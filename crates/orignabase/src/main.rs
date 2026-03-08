@@ -209,11 +209,26 @@ async fn serve(config: Config) -> Result<()> {
     let schema = build_schema(db.clone(), rule_engine.clone(), change_tx.clone());
 
     // --- Auth ---
+    // Read Apple private key from file if configured
+    let apple_private_key = config
+        .auth
+        .apple
+        .as_ref()
+        .and_then(|a| std::fs::read_to_string(&a.private_key_path).ok());
+
     let auth_state = AuthState {
         db: db.clone(),
         jwt_secret: config.auth.jwt_secret.clone(),
         access_ttl: config.auth.access_token_ttl_secs,
         refresh_ttl: config.auth.refresh_token_ttl_secs,
+        google_client_id: config.auth.google.as_ref().map(|g| g.client_id.clone()),
+        google_client_secret: config.auth.google.as_ref().map(|g| g.client_secret.clone()),
+        apple_team_id: config.auth.apple.as_ref().map(|a| a.team_id.clone()),
+        apple_key_id: config.auth.apple.as_ref().map(|a| a.key_id.clone()),
+        apple_service_id: config.auth.apple.as_ref().map(|a| a.service_id.clone()),
+        apple_private_key,
+        oidc_issuer_url: config.auth.oidc.as_ref().map(|o| o.issuer_url.clone()),
+        oidc_client_id: config.auth.oidc.as_ref().map(|o| o.client_id.clone()),
     };
 
     // --- Storage ---

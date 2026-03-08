@@ -36,6 +36,34 @@ pub struct AuthConfig {
     pub access_token_ttl_secs: u64,
     #[serde(default = "default_refresh_token_ttl")]
     pub refresh_token_ttl_secs: u64,
+    #[serde(default)]
+    pub google: Option<GoogleOAuthConfig>,
+    #[serde(default)]
+    pub apple: Option<AppleOAuthConfig>,
+    #[serde(default)]
+    pub oidc: Option<OidcConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GoogleOAuthConfig {
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppleOAuthConfig {
+    pub team_id: String,
+    pub key_id: String,
+    pub service_id: String,
+    /// Path to the .p8 private key file
+    pub private_key_path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OidcConfig {
+    pub issuer_url: String,
+    pub client_id: String,
+    pub client_secret: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -112,6 +140,9 @@ impl Default for AuthConfig {
             jwt_secret: default_jwt_secret(),
             access_token_ttl_secs: default_access_token_ttl(),
             refresh_token_ttl_secs: default_refresh_token_ttl(),
+            google: None,
+            apple: None,
+            oidc: None,
         }
     }
 }
@@ -203,6 +234,44 @@ impl Config {
         }
         if let Ok(v) = std::env::var("OB_SECURITY__RULES_PATH") {
             config.security.rules_path = v;
+        }
+
+        // Google OAuth from env
+        if let (Ok(id), Ok(secret)) = (
+            std::env::var("OB_AUTH__GOOGLE_CLIENT_ID"),
+            std::env::var("OB_AUTH__GOOGLE_CLIENT_SECRET"),
+        ) {
+            config.auth.google = Some(GoogleOAuthConfig {
+                client_id: id,
+                client_secret: secret,
+            });
+        }
+
+        // Apple OAuth from env
+        if let (Ok(team), Ok(key), Ok(svc), Ok(pk_path)) = (
+            std::env::var("OB_AUTH__APPLE_TEAM_ID"),
+            std::env::var("OB_AUTH__APPLE_KEY_ID"),
+            std::env::var("OB_AUTH__APPLE_SERVICE_ID"),
+            std::env::var("OB_AUTH__APPLE_PRIVATE_KEY_PATH"),
+        ) {
+            config.auth.apple = Some(AppleOAuthConfig {
+                team_id: team,
+                key_id: key,
+                service_id: svc,
+                private_key_path: pk_path,
+            });
+        }
+
+        // Generic OIDC from env
+        if let (Ok(issuer), Ok(id)) = (
+            std::env::var("OB_AUTH__OIDC_ISSUER_URL"),
+            std::env::var("OB_AUTH__OIDC_CLIENT_ID"),
+        ) {
+            config.auth.oidc = Some(OidcConfig {
+                issuer_url: issuer,
+                client_id: id,
+                client_secret: std::env::var("OB_AUTH__OIDC_CLIENT_SECRET").ok(),
+            });
         }
         if let Ok(v) = std::env::var("OB_CLUSTER__ENABLED") {
             config.cluster.enabled = v == "true" || v == "1";

@@ -21,6 +21,8 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
+reqwest = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }

@@ -82,6 +82,39 @@ class OrignaBaseAuth {
     return _handleAuthResponse(response);
   }
 
+  /// Sign in with Google. Pass the ID token obtained from Google Sign-In SDK.
+  Future<AuthState> signInWithGoogle(String idToken) async {
+    final response = await _client.request('POST', '/auth/google', body: {
+      'id_token': idToken,
+    });
+
+    return _handleAuthResponse(response);
+  }
+
+  /// Sign in with Apple. Pass the authorization code from Apple Sign-In.
+  /// [displayName] is optional — Apple only sends it on first sign-in.
+  Future<AuthState> signInWithApple(String authorizationCode,
+      {String? displayName}) async {
+    final body = <String, dynamic>{
+      'authorization_code': authorizationCode,
+    };
+    if (displayName != null) {
+      body['display_name'] = displayName;
+    }
+
+    final response = await _client.request('POST', '/auth/apple', body: body);
+    return _handleAuthResponse(response);
+  }
+
+  /// Sign in with a generic OIDC provider. Pass the access token.
+  Future<AuthState> signInWithOidc(String accessToken) async {
+    final response = await _client.request('POST', '/auth/oidc', body: {
+      'access_token': accessToken,
+    });
+
+    return _handleAuthResponse(response);
+  }
+
   /// Sign out the current user.
   void signOut() {
     _accessToken = null;

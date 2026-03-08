@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::jwt;
+use crate::oauth::{self, OAuthUserInfo};
 use crate::password;
 
 /// Shared auth state injected into routes.
@@ -13,6 +14,14 @@ pub struct AuthState {
     pub jwt_secret: String,
     pub access_ttl: u64,
     pub refresh_ttl: u64,
+    pub google_client_id: Option<String>,
+    pub google_client_secret: Option<String>,
+    pub apple_team_id: Option<String>,
+    pub apple_key_id: Option<String>,
+    pub apple_service_id: Option<String>,
+    pub apple_private_key: Option<String>,
+    pub oidc_issuer_url: Option<String>,
+    pub oidc_client_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -207,12 +216,206 @@ pub async fn refresh(
     })))
 }
 
+// ── OAuth Requests ──
+
+#[derive(Deserialize)]
+pub struct GoogleSignInRequest {
+    /// Google ID token from the client (obtained via Google Sign-In SDK)
+    pub id_token: String,
+}
+
+#[derive(Deserialize)]
+pub struct AppleSignInRequest {
+    /// Authorization code from Apple Sign-In
+    pub authorization_code: String,
+    /// Optional: user's name (Apple only sends this on first sign-in)
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct OidcSignInRequest {
+    /// OIDC access token
+    pub access_token: String,
+}
+
+/// POST /auth/google — Sign in with Google.
+pub async fn google_sign_in(
+    State(state): State<AuthState>,
+    Json(body): Json<GoogleSignInRequest>,
+) -> Result<Json<AuthResponse>> {
+    let client_id = state
+        .google_client_id
+        .as_deref()
+        .ok_or_else(|| Error::Config("Google OAuth not configured".into()))?;
+
+    let user_info = oauth::verify_google_id_token(&body.id_token, client_id).await?;
+    oauth_find_or_create_user(&state, user_info).await
+}
+
+/// POST /auth/apple — Sign in with Apple.
+pub async fn apple_sign_in(
+    State(state): State<AuthState>,
+    Json(body): Json<AppleSignInRequest>,
+) -> Result<Json<AuthResponse>> {
+    let service_id = state
+        .apple_service_id
+        .as_deref()
+        .ok_or_else(|| Error::Config("Apple OAuth not configured".into()))?;
+    let team_id = state
+        .apple_team_id
+        .as_deref()
+        .ok_or_else(|| Error::Config("Apple team_id not configured".into()))?;
+    let key_id = state
+        .apple_key_id
+        .as_deref()
+        .ok_or_else(|| Error::Config("Apple key_id not configured".into()))?;
+    let private_key = state
+        .apple_private_key
+        .as_deref()
+        .ok_or_else(|| Error::Config("Apple private key not configured".into()))?;
+
+    // Generate Apple client secret JWT
+    let client_secret =
+        oauth::generate_apple_client_secret(team_id, key_id, service_id, private_key)?;
+
+    let mut user_info =
+        oauth::verify_apple_auth_code(&body.authorization_code, service_id, &client_secret)
+            .await?;
+
+    // Apple only sends display_name on first sign-in (from client)
+    if user_info.display_name.is_none() {
+        user_info.display_name = body.display_name;
+    }
+
+    oauth_find_or_create_user(&state, user_info).await
+}
+
+/// POST /auth/oidc — Sign in with a generic OIDC provider.
+pub async fn oidc_sign_in(
+    State(state): State<AuthState>,
+    Json(body): Json<OidcSignInRequest>,
+) -> Result<Json<AuthResponse>> {
+    let issuer_url = state
+        .oidc_issuer_url
+        .as_deref()
+        .ok_or_else(|| Error::Config("OIDC not configured".into()))?;
+
+    let user_info = oauth::verify_oidc_token(&body.access_token, issuer_url).await?;
+    oauth_find_or_create_user(&state, user_info).await
+}
+
+/// Shared logic: find existing user by provider+provider_id, or create new one.
+/// Returns auth tokens.
+async fn oauth_find_or_create_user(
+    state: &AuthState,
+    info: OAuthUserInfo,
+) -> Result<Json<AuthResponse>> {
+    let provider = info.provider.to_string();
+
+    // Look up by provider + provider_id
+    let existing = state
+        .db
+        .query_bind(
+            "SELECT * FROM users WHERE oauth_provider = $provider AND oauth_provider_id = $pid",
+            json!({ "provider": provider, "pid": info.provider_id }),
+        )
+        .await?;
+
+    let user = if let Some(user) = existing.first() {
+        user.clone()
+    } else {
+        // Check if email exists (link accounts)
+        let email_user = if let Some(ref email) = info.email {
+            let results = state
+                .db
+                .query_bind(
+                    "SELECT * FROM users WHERE email = $email",
+                    json!({ "email": email }),
+                )
+                .await?;
+            results.into_iter().next()
+        } else {
+            None
+        };
+
+        if let Some(mut user) = email_user {
+            // Link OAuth to existing email account
+            let user_id = user["id"]
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| user["id"].to_string());
+
+            state
+                .db
+                .update_document(
+                    "users",
+                    &user_id,
+                    json!({
+                        "oauth_provider": provider,
+                        "oauth_provider_id": info.provider_id,
+                    }),
+                )
+                .await?;
+
+            user["oauth_provider"] = json!(provider);
+            user["oauth_provider_id"] = json!(info.provider_id);
+            user
+        } else {
+            // Create new user
+            let user_data = json!({
+                "email": info.email,
+                "display_name": info.display_name.unwrap_or_default(),
+                "oauth_provider": provider,
+                "oauth_provider_id": info.provider_id,
+                "picture": info.picture,
+                "roles": ["user"],
+                "created_at": chrono::Utc::now().to_rfc3339(),
+            });
+            state.db.create_document("users", user_data).await?
+        }
+    };
+
+    let user_id = user["id"]
+        .as_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| user["id"].to_string());
+
+    let roles: Vec<String> = user["roles"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let access_token =
+        jwt::issue_access_token(&user_id, &roles, &state.jwt_secret, state.access_ttl)?;
+    let refresh_token =
+        jwt::issue_refresh_token(&user_id, &state.jwt_secret, state.refresh_ttl)?;
+
+    let mut safe_user = user.clone();
+    if let Some(obj) = safe_user.as_object_mut() {
+        obj.remove("password_hash");
+    }
+
+    Ok(Json(AuthResponse {
+        access_token,
+        refresh_token,
+        user: safe_user,
+    }))
+}
+
 /// Build the auth router.
 pub fn auth_router(state: AuthState) -> axum::Router {
     axum::Router::new()
         .route("/auth/register", axum::routing::post(register))
         .route("/auth/login", axum::routing::post(login))
         .route("/auth/refresh", axum::routing::post(refresh))
+        .route("/auth/google", axum::routing::post(google_sign_in))
+        .route("/auth/apple", axum::routing::post(apple_sign_in))
+        .route("/auth/oidc", axum::routing::post(oidc_sign_in))
         .with_state(state)
 }
 
@@ -403,6 +606,43 @@ mod tests {
             let _ = &s.jwt_secret;
             let _ = &s.access_ttl;
             let _ = &s.refresh_ttl;
+            let _ = &s.google_client_id;
+            let _ = &s.apple_team_id;
+            let _ = &s.oidc_issuer_url;
         }
+    }
+
+    // ── OAuth request deserialization ──
+
+    #[test]
+    fn test_google_sign_in_request_deserialize() {
+        let json = json!({ "id_token": "REDACTED_SECRET" });
+        let req: GoogleSignInRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.id_token, "REDACTED_SECRET");
+    }
+
+    #[test]
+    fn test_apple_sign_in_request_deserialize() {
+        let json = json!({
+            "authorization_code": "auth_code_123",
+            "display_name": "John Appleseed"
+        });
+        let req: AppleSignInRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.authorization_code, "auth_code_123");
+        assert_eq!(req.display_name, Some("John Appleseed".to_string()));
+    }
+
+    #[test]
+    fn test_apple_sign_in_request_without_name() {
+        let json = json!({ "authorization_code": "code" });
+        let req: AppleSignInRequest = serde_json::from_value(json).unwrap();
+        assert!(req.display_name.is_none());
+    }
+
+    #[test]
+    fn test_oidc_sign_in_request_deserialize() {
+        let json = json!({ "access_token": "oidc_token_abc" });
+        let req: OidcSignInRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.access_token, "oidc_token_abc");
     }
 }

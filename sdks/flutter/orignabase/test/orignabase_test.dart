@@ -38,6 +38,28 @@ void main() {
       expect(ob.auth.currentState.isAuthenticated, false);
       ob.dispose();
     });
+
+    test('signInWithGoogle method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      // Verify method signature exists (will fail at network level, not compile)
+      expect(() => ob.auth.signInWithGoogle('fake_token'), throwsA(anything));
+      ob.dispose();
+    });
+
+    test('signInWithApple method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      expect(
+          () => ob.auth.signInWithApple('fake_code', displayName: 'Test'),
+          throwsA(anything));
+      ob.dispose();
+    });
+
+    test('signInWithOidc method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      expect(
+          () => ob.auth.signInWithOidc('fake_access_token'), throwsA(anything));
+      ob.dispose();
+    });
   });
 
   group('Document', () {
