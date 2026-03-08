@@ -6,6 +6,8 @@ use ob_admin::admin_router;
 use ob_admin::routes::AdminState;
 use ob_auth::routes::{AuthState, auth_router};
 use ob_core::Config;
+use ob_functions::{FunctionLimits, FunctionRegistry, WasmRuntime, functions_router};
+use ob_functions::routes::FunctionsState;
 use ob_database::DatabaseClient;
 use ob_graphql::build_schema;
 use ob_realtime::ChangeDispatcher;
@@ -128,6 +130,13 @@ async fn serve(config: Config) -> Result<()> {
         url_generator: url_gen,
     };
 
+    // --- Functions (WASM) ---
+    let wasm_runtime = Arc::new(WasmRuntime::new(FunctionLimits::default())?);
+    let function_registry = Arc::new(FunctionRegistry::new(wasm_runtime));
+    let functions_state = FunctionsState {
+        registry: function_registry,
+    };
+
     // --- Admin ---
     let admin_state = AdminState { db: db.clone() };
 
@@ -146,6 +155,7 @@ async fn serve(config: Config) -> Result<()> {
         .merge(auth_router(auth_state))
         .merge(realtime_router(registry))
         .merge(storage_router(storage_state))
+        .merge(functions_router(functions_state))
         .merge(admin_router(admin_state))
         .layer(CompressionLayer::new())
         .layer(TimeoutLayer::with_status_code(
@@ -163,6 +173,7 @@ async fn serve(config: Config) -> Result<()> {
     tracing::info!("OrignaBase listening on {addr}");
     tracing::info!("  GraphiQL:  http://{addr}/graphql");
     tracing::info!("  Realtime:  ws://{addr}/realtime");
+    tracing::info!("  Functions: http://{addr}/functions");
     tracing::info!("  Admin:     http://{addr}/_admin/health");
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
