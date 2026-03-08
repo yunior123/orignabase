@@ -31,7 +31,7 @@ services:
     ports:
       - "8080:8080"
     environment:
-      OB_DATABASE__ENDPOINT: ws://surrealdb:8000
+      OB_DATABASE__ENDPOINT: surrealdb:8000
       OB_DATABASE__USERNAME: root
       OB_DATABASE__PASSWORD: root
       OB_DATABASE__NAMESPACE: orignabase

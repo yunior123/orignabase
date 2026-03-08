@@ -42,7 +42,7 @@ Configure via `orignabase.toml` or environment variables:
 ```bash
 OB_HOST=0.0.0.0
 OB_PORT=8080
-OB_DATABASE__ENDPOINT=ws://localhost:8000
+OB_DATABASE__ENDPOINT=localhost:8000
 OB_DATABASE__USERNAME=root
 OB_DATABASE__PASSWORD=root
 OB_AUTH__JWT_SECRET=your-secret-here

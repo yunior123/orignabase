@@ -79,7 +79,7 @@ fn default_port() -> u16 {
 }
 
 fn default_db_endpoint() -> String {
-    "ws://localhost:8000".to_string()
+    "localhost:8000".to_string()
 }
 
 fn default_db_namespace() -> String {

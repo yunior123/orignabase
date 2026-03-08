@@ -23,10 +23,16 @@ async fn health() -> Json<Value> {
     }))
 }
 
-/// GET /_admin/collections — List all collections.
+/// GET /_admin/collections — List all collections (returns DB info).
 async fn list_collections(State(state): State<AdminState>) -> Result<Json<Value>> {
     let info = schema::list_collections(&state.db).await?;
-    Ok(Json(json!({ "collections": info })))
+    // Extract table names from INFO FOR DB response
+    let tables = info
+        .get("tables")
+        .and_then(|t| t.as_object())
+        .map(|obj| obj.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    Ok(Json(json!({ "collections": tables })))
 }
 
 /// POST /_admin/collections — Create a new collection.

@@ -53,14 +53,15 @@ pub async fn create_collection(db: &DatabaseClient, schema: &CollectionSchema) -
         }
     }
 
-    db.query_raw(&query).await?;
+    // DEFINE TABLE/FIELD returns no records, use query_raw_value
+    db.query_raw_value(&query).await?;
     tracing::info!("Created collection: {}", schema.name);
     Ok(())
 }
 
 /// List all tables in the current database.
-pub async fn list_collections(db: &DatabaseClient) -> Result<Vec<Value>> {
-    db.query_raw("INFO FOR DB").await
+pub async fn list_collections(db: &DatabaseClient) -> Result<Value> {
+    db.query_raw_value("INFO FOR DB").await
 }
 
 /// Drop a table.
@@ -69,7 +70,7 @@ pub async fn drop_collection(db: &DatabaseClient, name: &str) -> Result<()> {
     if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
         return Err(ob_core::Error::Validation("Invalid collection name".into()));
     }
-    db.query_raw(&format!("REMOVE TABLE {name}")).await?;
+    db.query_raw_value(&format!("REMOVE TABLE {name}")).await?;
     tracing::info!("Dropped collection: {name}");
     Ok(())
 }
