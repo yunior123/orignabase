@@ -73,6 +73,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # Testing
 tokio-test = "0.4"
 
+# Benchmarks
+criterion = { version = "0.5", features = ["html_reports"] }
+
 # Workspace crates
 ob-core = { path = "crates/ob-core" }
 ob-database = { path = "crates/ob-database" }
