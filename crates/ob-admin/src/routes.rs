@@ -89,6 +89,42 @@ async fn update_roles(
     Ok(Json(json!({ "user": updated })))
 }
 
+/// GET /_admin/analytics — Query analytics events.
+async fn analytics_summary(State(state): State<AdminState>) -> Result<Json<Value>> {
+    // Total events
+    let total = state
+        .db
+        .query_raw("SELECT count() AS total FROM _analytics_events GROUP ALL")
+        .await
+        .unwrap_or_default();
+
+    // Events by type (last 7 days)
+    let by_event = state
+        .db
+        .query_raw(
+            "SELECT event, count() AS count FROM _analytics_events \
+             WHERE timestamp > time::now() - 7d GROUP BY event ORDER BY count DESC LIMIT 20",
+        )
+        .await
+        .unwrap_or_default();
+
+    // Events by path (top 20)
+    let by_path = state
+        .db
+        .query_raw(
+            "SELECT path, count() AS count FROM _analytics_events \
+             WHERE path IS NOT NONE GROUP BY path ORDER BY count DESC LIMIT 20",
+        )
+        .await
+        .unwrap_or_default();
+
+    Ok(Json(json!({
+        "total": total,
+        "by_event": by_event,
+        "by_path": by_path,
+    })))
+}
+
 /// GET /_admin/ — Serve the admin dashboard SPA.
 async fn dashboard() -> Html<&'static str> {
     Html(DASHBOARD_HTML)
@@ -108,6 +144,7 @@ pub fn admin_router(state: AdminState) -> axum::Router {
             "/_admin/collections/{name}",
             axum::routing::delete(drop_collection),
         )
+        .route("/_admin/analytics", axum::routing::get(analytics_summary))
         .route("/_admin/users", axum::routing::get(list_users))
         .route("/_admin/users/{id}", axum::routing::delete(delete_user))
         .route(

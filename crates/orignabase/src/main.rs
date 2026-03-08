@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_graphql::http::GraphiQLSource;
 use axum::Router;
+use axum::response::IntoResponse;
 use clap::{Parser, Subcommand};
 use ob_admin::admin_router;
 use ob_admin::routes::AdminState;
@@ -260,6 +261,10 @@ async fn serve(config: Config) -> Result<()> {
     // --- Router Assembly ---
     let addr = format!("{}:{}", config.host, config.port);
 
+    // --- HTTP Function Triggers (catch-all under /fn/*) ---
+    let fn_registry_for_triggers = function_registry.clone();
+    let fn_runtime_for_triggers = wasm_runtime.clone();
+
     let app = Router::new()
         .route("/health", axum::routing::get(|| async { "ok" }))
         .route(
@@ -275,6 +280,43 @@ async fn serve(config: Config) -> Result<()> {
         .merge(functions_router(functions_state))
         .merge(analytics_router(analytics_state))
         .merge(admin_router(admin_state))
+        // HTTP function triggers: /fn/{*path} catches any method
+        .route("/fn/{*path}", axum::routing::any({
+            let registry = fn_registry_for_triggers;
+            let runtime = fn_runtime_for_triggers;
+            move |method: axum::http::Method, path: axum::extract::Path<String>, body: axum::body::Bytes| {
+                let registry = registry.clone();
+                let runtime = runtime.clone();
+                async move {
+                    let fn_path = format!("/{}", path.0);
+                    let method_str = method.as_str();
+                    match registry.find_http_trigger(method_str, &fn_path) {
+                        Some(fn_name) => {
+                            match registry.get_module(&fn_name) {
+                                Ok(module) => {
+                                    let input = String::from_utf8(body.to_vec()).unwrap_or_default();
+                                    match runtime.execute(&module, "handle", &input).await {
+                                        Ok(result) => (axum::http::StatusCode::OK, result).into_response(),
+                                        Err(e) => (
+                                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                            format!("Function error: {e}"),
+                                        ).into_response(),
+                                    }
+                                }
+                                Err(e) => (
+                                    axum::http::StatusCode::NOT_FOUND,
+                                    format!("Function not found: {e}"),
+                                ).into_response(),
+                            }
+                        }
+                        None => (
+                            axum::http::StatusCode::NOT_FOUND,
+                            "No function registered for this route".to_string(),
+                        ).into_response(),
+                    }
+                }
+            }
+        }))
         .layer(CompressionLayer::new())
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
