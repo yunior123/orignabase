@@ -128,4 +128,93 @@ mod tests {
         let sig2 = url2.split("sig=").nth(1).unwrap();
         assert_ne!(sig1, sig2);
     }
+
+    #[test]
+    fn test_sign_and_verify_upload() {
+        let signer = SignedUrlGenerator::new("upload_secret", "http://localhost:9000");
+
+        let url = signer.sign_upload("docs/report.pdf", 600).unwrap();
+        assert!(url.contains("/storage/upload/docs/report.pdf"));
+        assert!(url.contains("expires="));
+        assert!(url.contains("sig="));
+
+        // Extract and verify
+        let parts: Vec<&str> = url.split('?').collect();
+        let params: Vec<&str> = parts[1].split('&').collect();
+        let expires: u64 = params[0].strip_prefix("expires=").unwrap().parse().unwrap();
+        let sig = params[1].strip_prefix("sig=").unwrap();
+
+        assert!(signer.verify("PUT", "docs/report.pdf", expires, sig).unwrap());
+    }
+
+    #[test]
+    fn test_method_mismatch_fails_verification() {
+        let signer = SignedUrlGenerator::new("test_secret", "http://localhost:8080");
+
+        let url = signer.sign_download("file.txt", 3600).unwrap();
+
+        let parts: Vec<&str> = url.split('?').collect();
+        let params: Vec<&str> = parts[1].split('&').collect();
+        let expires: u64 = params[0].strip_prefix("expires=").unwrap().parse().unwrap();
+        let sig = params[1].strip_prefix("sig=").unwrap();
+
+        // Signed as GET (download), verifying as PUT should fail
+        assert!(!signer.verify("PUT", "file.txt", expires, sig).unwrap());
+    }
+
+    #[test]
+    fn test_path_mismatch_fails_verification() {
+        let signer = SignedUrlGenerator::new("test_secret", "http://localhost:8080");
+
+        let url = signer.sign_download("original.txt", 3600).unwrap();
+
+        let parts: Vec<&str> = url.split('?').collect();
+        let params: Vec<&str> = parts[1].split('&').collect();
+        let expires: u64 = params[0].strip_prefix("expires=").unwrap().parse().unwrap();
+        let sig = params[1].strip_prefix("sig=").unwrap();
+
+        // Different path should fail
+        assert!(!signer.verify("GET", "tampered.txt", expires, sig).unwrap());
+    }
+
+    #[test]
+    fn test_base_url_trailing_slash_normalized() {
+        let gen1 = SignedUrlGenerator::new("s", "http://example.com/");
+        let gen2 = SignedUrlGenerator::new("s", "http://example.com");
+
+        let url1 = gen1.sign_download("f.txt", 3600).unwrap();
+        let url2 = gen2.sign_download("f.txt", 3600).unwrap();
+
+        // Both should produce the same base URL prefix (no double slash)
+        assert!(url1.starts_with("http://example.com/storage/"));
+        assert!(url2.starts_with("http://example.com/storage/"));
+    }
+
+    #[test]
+    fn test_compute_signature_deterministic() {
+        let signer = SignedUrlGenerator::new("deterministic", "http://localhost");
+        let sig1 = signer.compute_signature("same:message:123").unwrap();
+        let sig2 = signer.compute_signature("same:message:123").unwrap();
+        assert_eq!(sig1, sig2);
+
+        let sig3 = signer.compute_signature("different:message:456").unwrap();
+        assert_ne!(sig1, sig3);
+    }
+
+    #[test]
+    fn test_expired_url_returns_auth_error() {
+        let signer = SignedUrlGenerator::new("test", "http://localhost");
+        let expired = 0u64; // epoch = always expired
+        let result = signer.verify("GET", "file.txt", expired, "any");
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("expired"), "Error should mention expiration: {err_msg}");
+    }
+
+    #[test]
+    fn test_empty_secret_still_produces_valid_hmac() {
+        let signer = SignedUrlGenerator::new("", "http://localhost");
+        let url = signer.sign_download("test.txt", 3600);
+        assert!(url.is_ok());
+    }
 }

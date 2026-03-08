@@ -238,4 +238,83 @@ mod tests {
             "application/octet-stream"
         );
     }
+
+    #[test]
+    fn test_content_type_all_variants() {
+        assert_eq!(guess_content_type("a.jpeg"), "image/jpeg");
+        assert_eq!(guess_content_type("a.png"), "image/png");
+        assert_eq!(guess_content_type("a.gif"), "image/gif");
+        assert_eq!(guess_content_type("a.webp"), "image/webp");
+        assert_eq!(guess_content_type("a.svg"), "image/svg+xml");
+        assert_eq!(guess_content_type("a.json"), "application/json");
+        assert_eq!(guess_content_type("a.html"), "text/html");
+        assert_eq!(guess_content_type("a.css"), "text/css");
+        assert_eq!(guess_content_type("a.js"), "application/javascript");
+        assert_eq!(guess_content_type("a.txt"), "text/plain");
+        assert_eq!(guess_content_type("a.mp4"), "video/mp4");
+        assert_eq!(guess_content_type("a.mp3"), "audio/mpeg");
+        assert_eq!(guess_content_type("a.zip"), "application/zip");
+    }
+
+    #[test]
+    fn test_content_type_no_extension() {
+        assert_eq!(guess_content_type("Makefile"), "application/octet-stream");
+        assert_eq!(guess_content_type(""), "application/octet-stream");
+    }
+
+    #[test]
+    fn test_content_type_nested_path() {
+        assert_eq!(guess_content_type("a/b/c/photo.png"), "image/png");
+        assert_eq!(guess_content_type("/deep/path/file.json"), "application/json");
+    }
+
+    #[test]
+    fn test_full_path_sanitizes_traversal() {
+        let dir = env::temp_dir().join("ob_storage_test_fullpath");
+        let storage = LocalStorage { root: dir.clone() };
+
+        // Double dots stripped
+        let p = storage.full_path("../../etc/passwd");
+        assert!(p.starts_with(&dir));
+        assert!(!p.to_string_lossy().contains(".."));
+
+        // Leading slashes stripped
+        let p = storage.full_path("/absolute/path.txt");
+        assert!(p.starts_with(&dir));
+        assert_eq!(p, dir.join("absolute/path.txt"));
+    }
+
+    #[test]
+    fn test_full_path_normal_paths() {
+        let dir = env::temp_dir().join("ob_storage_test_fullpath2");
+        let storage = LocalStorage { root: dir.clone() };
+
+        assert_eq!(storage.full_path("a/b/c.txt"), dir.join("a/b/c.txt"));
+        assert_eq!(storage.full_path("file.txt"), dir.join("file.txt"));
+    }
+
+    #[test]
+    fn test_full_path_empty_input() {
+        let dir = env::temp_dir().join("ob_storage_test_fullpath_empty");
+        let storage = LocalStorage { root: dir.clone() };
+
+        let p = storage.full_path("");
+        assert_eq!(p, dir.join(""));
+    }
+
+    #[test]
+    fn test_object_meta_serde_roundtrip() {
+        let meta = super::ObjectMeta {
+            path: "test/file.txt".to_string(),
+            size: 42,
+            content_type: "text/plain".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let parsed: super::ObjectMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.path, "test/file.txt");
+        assert_eq!(parsed.size, 42);
+        assert_eq!(parsed.content_type, "text/plain");
+    }
 }

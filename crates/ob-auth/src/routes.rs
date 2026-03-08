@@ -214,3 +214,194 @@ pub fn auth_router(state: AuthState) -> axum::Router {
         .route("/auth/refresh", axum::routing::post(refresh))
         .with_state(state)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── RegisterRequest deserialization ──────────────────────────────
+
+    #[test]
+    fn test_register_request_with_display_name() {
+        let json = json!({
+            "email": "user@example.com",
+            "password": "secret123",
+            "display_name": "Alice"
+        });
+        let req: RegisterRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.email, "user@example.com");
+        assert_eq!(req.password, "secret123");
+        assert_eq!(req.display_name, Some("Alice".to_string()));
+    }
+
+    #[test]
+    fn test_register_request_without_display_name() {
+        let json = json!({
+            "email": "user@example.com",
+            "password": "secret123"
+        });
+        let req: RegisterRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.display_name, None);
+    }
+
+    #[test]
+    fn test_register_request_missing_email_fails() {
+        let json = json!({ "password": "secret123" });
+        let result = serde_json::from_value::<RegisterRequest>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_register_request_missing_password_fails() {
+        let json = json!({ "email": "a@b.com" });
+        let result = serde_json::from_value::<RegisterRequest>(json);
+        assert!(result.is_err());
+    }
+
+    // ── LoginRequest deserialization ─────────────────────────────────
+
+    #[test]
+    fn test_login_request_deserialize() {
+        let json = json!({ "email": "a@b.com", "password": "pass1234" });
+        let req: LoginRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.email, "a@b.com");
+        assert_eq!(req.password, "pass1234");
+    }
+
+    #[test]
+    fn test_login_request_extra_fields_ignored() {
+        let raw = r#"{"email":"a@b.com","password":"pass1234","extra":"ignored"}"#;
+        let req: LoginRequest = serde_json::from_str(raw).unwrap();
+        assert_eq!(req.email, "a@b.com");
+    }
+
+    // ── AuthResponse serialization ──────────────────────────────────
+
+    #[test]
+    fn test_auth_response_serialize() {
+        let resp = AuthResponse {
+            access_token: "at_123".into(),
+            refresh_token: "rt_456".into(),
+            user: json!({"id": "u1", "email": "a@b.com"}),
+        };
+        let val = serde_json::to_value(&resp).unwrap();
+        assert_eq!(val["access_token"], "at_123");
+        assert_eq!(val["refresh_token"], "rt_456");
+        assert_eq!(val["user"]["id"], "u1");
+    }
+
+    #[test]
+    fn test_auth_response_has_all_fields() {
+        let resp = AuthResponse {
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            user: json!(null),
+        };
+        let val = serde_json::to_value(&resp).unwrap();
+        let obj = val.as_object().unwrap();
+        assert!(obj.contains_key("access_token"));
+        assert!(obj.contains_key("refresh_token"));
+        assert!(obj.contains_key("user"));
+        assert_eq!(obj.len(), 3);
+    }
+
+    // ── RefreshRequest deserialization ───────────────────────────────
+
+    #[test]
+    fn test_refresh_request_deserialize() {
+        let json = json!({ "refresh_token": "rt_abc" });
+        let req: RefreshRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.refresh_token, "rt_abc");
+    }
+
+    #[test]
+    fn test_refresh_request_missing_token_fails() {
+        let json = json!({});
+        let result = serde_json::from_value::<RefreshRequest>(json);
+        assert!(result.is_err());
+    }
+
+    // ── Email validation logic ──────────────────────────────────────
+
+    /// Documents the inline validation: `!email.contains('@') || email.len() < 5`
+    fn is_valid_email(e: &str) -> bool {
+        e.contains('@') && e.len() >= 5
+    }
+
+    #[test]
+    fn test_email_valid_basic() {
+        assert!(is_valid_email("a@b.c"));   // exactly 5 chars
+        assert!(is_valid_email("user@example.com"));
+    }
+
+    #[test]
+    fn test_email_no_at_sign() {
+        assert!(!is_valid_email("abcdef"));
+    }
+
+    #[test]
+    fn test_email_too_short() {
+        assert!(!is_valid_email("a@b"));    // 3 chars
+        assert!(!is_valid_email("a@bc"));   // 4 chars
+    }
+
+    #[test]
+    fn test_email_at_boundary() {
+        assert!(is_valid_email("a@b.c"));   // 5 chars — passes
+        assert!(!is_valid_email("a@bc"));   // 4 chars — fails
+    }
+
+    #[test]
+    fn test_email_empty() {
+        assert!(!is_valid_email(""));
+    }
+
+    #[test]
+    fn test_email_only_at() {
+        assert!(!is_valid_email("@"));       // 1 char
+        assert!(!is_valid_email("@@@@"));    // 4 chars, has @
+    }
+
+    #[test]
+    fn test_email_at_at_five_chars() {
+        assert!(is_valid_email("@@@@a"));   // 5 chars, has @ — passes validation
+    }
+
+    // ── Password validation logic ───────────────────────────────────
+
+    /// Documents the inline validation: `password.len() < 8`
+    fn is_valid_password(p: &str) -> bool {
+        p.len() >= 8
+    }
+
+    #[test]
+    fn test_password_too_short() {
+        assert!(!is_valid_password(""));
+        assert!(!is_valid_password("1234567"));  // 7 chars
+    }
+
+    #[test]
+    fn test_password_exact_boundary() {
+        assert!(is_valid_password("12345678"));  // 8 chars — passes
+        assert!(!is_valid_password("1234567"));  // 7 chars — fails
+    }
+
+    #[test]
+    fn test_password_long() {
+        assert!(is_valid_password("a]very$long!password?"));
+    }
+
+    // ── AuthState clone ─────────────────────────────────────────────
+
+    #[test]
+    fn test_auth_state_fields_exist() {
+        // Compile-time check that AuthState has the expected fields.
+        fn _assert_fields(s: &AuthState) {
+            let _ = &s.db;
+            let _ = &s.jwt_secret;
+            let _ = &s.access_ttl;
+            let _ = &s.refresh_ttl;
+        }
+    }
+}

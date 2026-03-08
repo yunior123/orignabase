@@ -132,3 +132,73 @@ impl SearchClient {
 fn reqwest_client() -> reqwest::Client {
     reqwest::Client::new()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_search_result_serde_roundtrip() {
+        let result = SearchResult {
+            hits: vec![
+                serde_json::json!({"id": "1", "title": "Hello"}),
+                serde_json::json!({"id": "2", "title": "World"}),
+            ],
+            query: "hello".to_string(),
+            processing_time_ms: 42,
+            estimated_total_hits: Some(100),
+        };
+
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: SearchResult = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.hits.len(), 2);
+        assert_eq!(parsed.query, "hello");
+        assert_eq!(parsed.processing_time_ms, 42);
+        assert_eq!(parsed.estimated_total_hits, Some(100));
+    }
+
+    #[test]
+    fn test_search_result_optional_total_hits() {
+        let json = r#"{
+            "hits": [],
+            "query": "test",
+            "processing_time_ms": 0,
+            "estimated_total_hits": null
+        }"#;
+        let result: SearchResult = serde_json::from_str(json).unwrap();
+        assert!(result.estimated_total_hits.is_none());
+        assert!(result.hits.is_empty());
+    }
+
+    #[test]
+    fn test_search_result_missing_optional_field() {
+        let json = r#"{
+            "hits": [{"id": "1"}],
+            "query": "q",
+            "processing_time_ms": 5
+        }"#;
+        let result: SearchResult = serde_json::from_str(json).unwrap();
+        assert!(result.estimated_total_hits.is_none());
+        assert_eq!(result.hits.len(), 1);
+    }
+
+    #[test]
+    fn test_search_client_new() {
+        let config = SearchConfig {
+            url: "http://meili:7700".to_string(),
+            api_key: Some("key123".to_string()),
+            indexes: Default::default(),
+        };
+        let client = SearchClient::new(config.clone());
+        assert_eq!(client.config.url, "http://meili:7700");
+        assert_eq!(client.config.api_key, Some("key123".to_string()));
+    }
+
+    #[test]
+    fn test_search_client_clone() {
+        fn assert_clone<T: Clone>() {}
+        assert_clone::<SearchClient>();
+        assert_clone::<SearchResult>();
+    }
+}

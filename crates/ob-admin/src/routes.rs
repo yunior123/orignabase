@@ -116,3 +116,62 @@ pub fn admin_router(state: AdminState) -> axum::Router {
         )
         .with_state(state)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_admin_health_status() {
+        let Json(body) = health().await;
+        assert_eq!(body["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn test_admin_health_version() {
+        let Json(body) = health().await;
+        assert!(body["version"].is_string());
+        assert!(!body["version"].as_str().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_admin_health_timestamp() {
+        let Json(body) = health().await;
+        let ts = body["timestamp"].as_str().unwrap();
+        // Should be valid RFC 3339
+        assert!(ts.contains('T'), "timestamp should be RFC 3339: {ts}");
+        assert!(ts.contains('+') || ts.ends_with('Z'), "timestamp should have timezone: {ts}");
+    }
+
+    #[tokio::test]
+    async fn test_admin_health_has_exactly_three_fields() {
+        let Json(body) = health().await;
+        let obj = body.as_object().unwrap();
+        assert_eq!(obj.len(), 3);
+        assert!(obj.contains_key("status"));
+        assert!(obj.contains_key("version"));
+        assert!(obj.contains_key("timestamp"));
+    }
+
+    #[test]
+    fn test_dashboard_html_not_empty() {
+        assert!(!DASHBOARD_HTML.is_empty());
+    }
+
+    #[test]
+    fn test_dashboard_html_is_html() {
+        let lower = DASHBOARD_HTML.to_lowercase();
+        assert!(
+            lower.contains("<html") || lower.contains("<!doctype"),
+            "DASHBOARD_HTML should contain HTML markup"
+        );
+    }
+
+    #[test]
+    fn test_admin_state_fields_exist() {
+        // Compile-time check that AdminState has the expected field.
+        fn _assert_fields(s: &AdminState) {
+            let _ = &s.db;
+        }
+    }
+}

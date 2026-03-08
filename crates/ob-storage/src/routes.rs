@@ -107,3 +107,37 @@ pub fn storage_router(state: StorageState) -> axum::Router {
         )
         .with_state(state)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_signed_params_deserialize() {
+        let json = r#"{"expires": 1700000000, "sig": "abc123"}"#;
+        let params: SignedParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.expires, 1700000000);
+        assert_eq!(params.sig, "abc123");
+    }
+
+    #[test]
+    fn test_signed_params_missing_field_fails() {
+        let json = r#"{"expires": 1700000000}"#;
+        let result = serde_json::from_str::<SignedParams>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_signed_params_wrong_type_fails() {
+        let json = r#"{"expires": "not_a_number", "sig": "abc"}"#;
+        let result = serde_json::from_str::<SignedParams>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_storage_state_is_clone() {
+        // Compile-time check: StorageState must be Clone (required by axum State)
+        fn assert_clone<T: Clone>() {}
+        assert_clone::<StorageState>();
+    }
+}

@@ -73,3 +73,61 @@ impl SearchSyncer {
         tracing::info!("Search syncer stopped");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_search_action_debug_and_clone() {
+        let upsert = SearchAction::Upsert;
+        let delete = SearchAction::Delete;
+
+        // Debug
+        assert_eq!(format!("{:?}", upsert), "Upsert");
+        assert_eq!(format!("{:?}", delete), "Delete");
+
+        // Clone
+        let cloned = upsert.clone();
+        assert!(matches!(cloned, SearchAction::Upsert));
+    }
+
+    #[test]
+    fn test_search_sync_event_construction() {
+        let event = SearchSyncEvent {
+            action: SearchAction::Upsert,
+            index: "products".to_string(),
+            document_id: "prod_123".to_string(),
+            data: serde_json::json!({"id": "prod_123", "title": "Widget"}),
+        };
+
+        assert!(matches!(event.action, SearchAction::Upsert));
+        assert_eq!(event.index, "products");
+        assert_eq!(event.document_id, "prod_123");
+        assert_eq!(event.data["title"], "Widget");
+    }
+
+    #[test]
+    fn test_search_sync_event_clone() {
+        let event = SearchSyncEvent {
+            action: SearchAction::Delete,
+            index: "users".to_string(),
+            document_id: "u_1".to_string(),
+            data: Value::Null,
+        };
+        let cloned = event.clone();
+        assert_eq!(cloned.index, "users");
+        assert_eq!(cloned.document_id, "u_1");
+        assert!(matches!(cloned.action, SearchAction::Delete));
+    }
+
+    #[test]
+    fn test_search_syncer_channel_capacity() {
+        let config = crate::SearchConfig::default();
+        let client = SearchClient::new(config);
+        let (_syncer, tx) = SearchSyncer::new(client);
+
+        // Channel should have capacity (1024 as defined)
+        assert_eq!(tx.capacity(), 1024);
+    }
+}
