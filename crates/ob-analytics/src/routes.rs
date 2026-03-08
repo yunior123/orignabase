@@ -1,5 +1,6 @@
 use axum::{Json, extract::State, http::HeaderMap};
 use ob_core::Result;
+use ob_database::DatabaseClient;
 use serde::Deserialize;
 
 use crate::event::{AnalyticsEvent, extract_domain, hash_ip};
@@ -9,6 +10,8 @@ use crate::event::{AnalyticsEvent, extract_domain, hash_ip};
 pub struct AnalyticsState {
     /// Salt for IP hashing (rotated daily for extra privacy).
     pub ip_salt: String,
+    /// Database client for persisting analytics events.
+    pub db: DatabaseClient,
 }
 
 #[derive(Deserialize)]
@@ -59,8 +62,14 @@ pub async fn ingest_event(
         browser: request.browser,
     };
 
-    // In a full implementation, this would write to SurrealDB.
-    // For now, log the event and return success.
+    // Persist to SurrealDB
+    let event_json = serde_json::to_value(&event)
+        .map_err(|e| ob_core::Error::Internal(e.to_string()))?;
+    state
+        .db
+        .create_document("_analytics_events", event_json)
+        .await?;
+
     tracing::debug!(event_id = %event.id, event_name = %event.event, "Analytics event ingested");
 
     Ok(Json(serde_json::json!({

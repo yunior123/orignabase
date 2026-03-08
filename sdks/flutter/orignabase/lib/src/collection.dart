@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'client.dart';
 import 'document.dart';
 import 'query.dart';
+import 'subcollection.dart';
 
 /// A reference to a collection, providing Firestore-like CRUD operations.
 ///
@@ -15,6 +16,13 @@ class CollectionRef extends Query {
 
   /// Get a document reference by ID.
   DocumentRef doc(String id) => DocumentRef(client, collectionName, id);
+
+  /// Access a subcollection of a document in this collection.
+  ///
+  /// Example: `client.collection('users').subcollection('uid123', 'orders')`
+  SubcollectionRef subcollection(String docId, String childCollection) {
+    return SubcollectionRef(client, collectionName, docId, childCollection);
+  }
 
   /// Add a new document to the collection.
   Future<Document> add(Map<String, dynamic> data) async {
@@ -38,6 +46,13 @@ class DocumentRef {
   final String id;
 
   DocumentRef(this._client, this.collection, this.id);
+
+  /// Access a subcollection under this document.
+  ///
+  /// Example: `ob.collection('products').doc('prod1').collection('reviews')`
+  SubcollectionRef subcollection(String childCollection) {
+    return SubcollectionRef(_client, collection, id, childCollection);
+  }
 
   /// Get the document data.
   Future<Document?> get() async {

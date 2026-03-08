@@ -11,3 +11,5 @@ export 'src/document.dart';
 export 'src/realtime.dart';
 export 'src/storage.dart';
 export 'src/errors.dart';
+export 'src/subcollection.dart';
+export 'src/aggregate.dart';

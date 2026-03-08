@@ -2,8 +2,10 @@ use async_graphql::{EmptySubscription, Schema};
 
 use crate::resolvers::{MutationRoot, QueryRoot};
 use ob_database::DatabaseClient;
+use ob_realtime::registry::ChangeEvent;
 use ob_security::RuleEngine;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 /// GraphQL context available in all resolvers.
 pub struct GqlContext {
@@ -17,10 +19,15 @@ pub struct GqlContext {
 pub type AppSchema = Schema<QueryRoot, MutationRoot, EmptySubscription>;
 
 /// Build the GraphQL schema with shared context.
-pub fn build_schema(db: DatabaseClient, rules: Arc<RuleEngine>) -> AppSchema {
+pub fn build_schema(
+    db: DatabaseClient,
+    rules: Arc<RuleEngine>,
+    change_tx: mpsc::Sender<ChangeEvent>,
+) -> AppSchema {
     Schema::build(QueryRoot, MutationRoot, EmptySubscription)
         .data(db)
         .data(rules)
+        .data(change_tx)
         .finish()
 }
 
@@ -51,8 +58,9 @@ mod tests {
         };
         let db = DatabaseClient::connect(&config).await.unwrap();
         let rules = Arc::new(RuleEngine::new(std::collections::HashMap::new()));
+        let (change_tx, _change_rx) = tokio::sync::mpsc::channel(16);
 
-        let schema = build_schema(db, rules);
+        let schema = build_schema(db, rules, change_tx);
 
         // Introspect — should return type names without error
         let result = schema.execute("{ __schema { types { name } } }").await;

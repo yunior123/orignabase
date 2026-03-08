@@ -1,9 +1,11 @@
 use async_graphql::{Context, Object, Result as GqlResult};
 use ob_auth::AuthContext;
 use ob_database::DatabaseClient;
+use ob_realtime::registry::{ChangeAction, ChangeEvent};
 use ob_security::{RuleEngine, SecurityContext};
 use serde_json::Value;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 pub struct QueryRoot;
 
@@ -141,6 +143,23 @@ impl MutationRoot {
             .await
             .map_err(|e| async_graphql::Error::new(e.to_string()))?;
 
+        // Emit realtime change event
+        if let Ok(tx) = ctx.data::<mpsc::Sender<ChangeEvent>>() {
+            let doc_id = doc
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let _ = tx
+                .send(ChangeEvent {
+                    action: ChangeAction::Create,
+                    collection: collection.clone(),
+                    document_id: doc_id.to_string(),
+                    data: doc.clone(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                })
+                .await;
+        }
+
         Ok(doc)
     }
 
@@ -190,6 +209,23 @@ impl MutationRoot {
             .await
             .map_err(|e| async_graphql::Error::new(e.to_string()))?;
 
+        // Emit realtime change event
+        if let Ok(tx) = ctx.data::<mpsc::Sender<ChangeEvent>>() {
+            let doc_id = doc
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&id);
+            let _ = tx
+                .send(ChangeEvent {
+                    action: ChangeAction::Update,
+                    collection: collection.clone(),
+                    document_id: doc_id.to_string(),
+                    data: doc.clone(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                })
+                .await;
+        }
+
         Ok(doc)
     }
 
@@ -231,6 +267,19 @@ impl MutationRoot {
             .delete_document(&collection, &id)
             .await
             .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+
+        // Emit realtime change event
+        if let Ok(tx) = ctx.data::<mpsc::Sender<ChangeEvent>>() {
+            let _ = tx
+                .send(ChangeEvent {
+                    action: ChangeAction::Delete,
+                    collection: collection.clone(),
+                    document_id: id.clone(),
+                    data: doc.clone(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                })
+                .await;
+        }
 
         Ok(doc)
     }

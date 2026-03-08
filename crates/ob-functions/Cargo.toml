@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 ob-core = { workspace = true }
+ob-realtime = { workspace = true }
 wasmi = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

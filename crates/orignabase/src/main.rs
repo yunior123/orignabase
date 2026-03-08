@@ -7,13 +7,15 @@ use ob_admin::routes::AdminState;
 use ob_auth::routes::{AuthState, auth_router};
 use ob_analytics::{AnalyticsState, analytics_router};
 use ob_core::Config;
-use ob_functions::{FunctionLimits, FunctionRegistry, WasmRuntime, functions_router};
+use ob_functions::{CronScheduler, DbTriggerExecutor, FunctionLimits, FunctionRegistry, WasmRuntime, functions_router};
 use ob_functions::routes::FunctionsState;
 use ob_database::DatabaseClient;
 use ob_graphql::build_schema;
 use ob_realtime::ChangeDispatcher;
 use ob_realtime::registry::SubscriptionRegistry;
 use ob_realtime::websocket::realtime_router;
+use ob_search::sync::{SearchAction, SearchSyncEvent, SearchSyncer};
+use ob_search::{SearchClient, SearchConfig};
 use ob_security::{RuleEngine, parse_rules};
 use ob_storage::routes::{StorageState, storage_router};
 use ob_storage::{LocalStorage, SignedUrlGenerator};
@@ -50,6 +52,24 @@ enum Commands {
     Migrate {
         #[command(subcommand)]
         source: MigrateSource,
+    },
+    /// Generate typed client code from the GraphQL schema
+    Codegen {
+        #[command(subcommand)]
+        target: CodegenTarget,
+    },
+}
+
+#[derive(Subcommand)]
+enum CodegenTarget {
+    /// Generate Dart/Flutter models from GraphQL introspection
+    Dart {
+        /// OrignaBase server URL to introspect
+        #[arg(long, default_value = "http://localhost:8080")]
+        url: String,
+        /// Output directory for generated Dart files
+        #[arg(long, default_value = "./lib/generated")]
+        output: String,
     },
 }
 
@@ -109,6 +129,9 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Commands::Serve => serve(config).await,
+        Commands::Codegen { target } => match target {
+            CodegenTarget::Dart { url, output } => codegen_dart(&url, &output).await,
+        },
         Commands::Migrate { source } => match source {
             MigrateSource::FromFirebase {
                 export_path,
@@ -137,8 +160,52 @@ async fn serve(config: Config) -> Result<()> {
     };
     let rule_engine = Arc::new(RuleEngine::new(rules));
 
+    // --- Realtime ---
+    let registry = SubscriptionRegistry::new();
+    let (dispatcher, dispatcher_tx) = ChangeDispatcher::new(registry.clone());
+    tokio::spawn(dispatcher.run());
+
+    // --- DB Trigger Executor ---
+    let (trigger_tx, trigger_rx) = tokio::sync::mpsc::channel(1024);
+
+    // --- Search Sync ---
+    let search_config = SearchConfig::default();
+    let search_client = SearchClient::new(search_config);
+    let (search_syncer, search_sync_tx) = SearchSyncer::new(search_client);
+    tokio::spawn(search_syncer.run());
+
+    // --- Fan-out channel: producers send here, bridge distributes to all consumers ---
+    let (change_tx, mut change_rx) = tokio::sync::mpsc::channel::<ob_realtime::registry::ChangeEvent>(1024);
+    {
+        let dispatcher_tx = dispatcher_tx.clone();
+        let trigger_tx = trigger_tx.clone();
+        let search_sync_tx = search_sync_tx.clone();
+        tokio::spawn(async move {
+            while let Some(event) = change_rx.recv().await {
+                // Fan-out to realtime dispatcher
+                let _ = dispatcher_tx.send(event.clone()).await;
+                // Fan-out to DB trigger executor
+                let _ = trigger_tx.send(event.clone()).await;
+                // Fan-out to search syncer
+                let search_action = match event.action {
+                    ob_realtime::registry::ChangeAction::Create
+                    | ob_realtime::registry::ChangeAction::Update => SearchAction::Upsert,
+                    ob_realtime::registry::ChangeAction::Delete => SearchAction::Delete,
+                };
+                let _ = search_sync_tx
+                    .send(SearchSyncEvent {
+                        action: search_action,
+                        index: event.collection.clone(),
+                        document_id: event.document_id.clone(),
+                        data: event.data,
+                    })
+                    .await;
+            }
+        });
+    }
+
     // --- GraphQL ---
-    let schema = build_schema(db.clone(), rule_engine.clone());
+    let schema = build_schema(db.clone(), rule_engine.clone(), change_tx.clone());
 
     // --- Auth ---
     let auth_state = AuthState {
@@ -147,11 +214,6 @@ async fn serve(config: Config) -> Result<()> {
         access_ttl: config.auth.access_token_ttl_secs,
         refresh_ttl: config.auth.refresh_token_ttl_secs,
     };
-
-    // --- Realtime ---
-    let registry = SubscriptionRegistry::new();
-    let (dispatcher, _change_tx) = ChangeDispatcher::new(registry.clone());
-    tokio::spawn(dispatcher.run());
 
     // --- Storage ---
     let storage = LocalStorage::new("./data/storage")?;
@@ -166,14 +228,30 @@ async fn serve(config: Config) -> Result<()> {
 
     // --- Functions (WASM) ---
     let wasm_runtime = Arc::new(WasmRuntime::new(FunctionLimits::default())?);
-    let function_registry = Arc::new(FunctionRegistry::new(wasm_runtime));
+    let function_registry = Arc::new(FunctionRegistry::new(wasm_runtime.clone()));
     let functions_state = FunctionsState {
-        registry: function_registry,
+        registry: function_registry.clone(),
     };
+
+    // --- Cron Scheduler ---
+    let cron_scheduler = CronScheduler::new(
+        function_registry.clone(),
+        wasm_runtime.clone(),
+    );
+    tokio::spawn(cron_scheduler.run());
+
+    // --- DB Trigger Executor ---
+    let db_trigger_executor = DbTriggerExecutor::new(
+        function_registry.clone(),
+        wasm_runtime.clone(),
+        trigger_rx,
+    );
+    tokio::spawn(db_trigger_executor.run());
 
     // --- Analytics ---
     let analytics_state = AnalyticsState {
         ip_salt: config.auth.jwt_secret.clone(), // Reuse secret as salt
+        db: db.clone(),
     };
 
     // --- Admin ---
@@ -458,5 +536,128 @@ fn translate_firestore_doc(doc: &serde_json::Value) -> serde_json::Value {
             serde_json::Value::Array(arr.iter().map(translate_firestore_doc).collect())
         }
         other => other.clone(),
+    }
+}
+
+// ── Dart Codegen ──
+
+async fn codegen_dart(url: &str, output_dir: &str) -> Result<()> {
+    println!("🔍 Introspecting GraphQL schema at {url}/graphql ...");
+
+    let client = reqwest::Client::new();
+    let introspection_query = serde_json::json!({
+        "query": r#"{
+            __schema {
+                types {
+                    name
+                    kind
+                    fields {
+                        name
+                        type {
+                            name
+                            kind
+                            ofType { name kind ofType { name kind } }
+                        }
+                    }
+                }
+                queryType { name }
+                mutationType { name }
+            }
+        }"#
+    });
+
+    let resp = client
+        .post(format!("{url}/graphql"))
+        .json(&introspection_query)
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("Introspection failed: HTTP {}", resp.status());
+    }
+
+    let body: serde_json::Value = resp.json().await?;
+    let types = body["data"]["__schema"]["types"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("No types in introspection result"))?;
+
+    // Create output directory
+    std::fs::create_dir_all(output_dir)?;
+
+    let mut models = String::new();
+    models.push_str("// AUTO-GENERATED by `orignabase codegen dart`\n");
+    models.push_str("// Do not edit manually.\n\n");
+    models.push_str("import 'package:freezed_annotation/freezed_annotation.dart';\n");
+    models.push_str("import 'package:json_annotation/json_annotation.dart';\n\n");
+    models.push_str("part 'models.freezed.dart';\n");
+    models.push_str("part 'models.g.dart';\n\n");
+
+    let mut count = 0;
+    for typ in types {
+        let name = typ["name"].as_str().unwrap_or("");
+        let kind = typ["kind"].as_str().unwrap_or("");
+
+        // Skip built-in GraphQL types
+        if name.starts_with("__") || name == "Boolean" || name == "String"
+            || name == "Int" || name == "Float" || name == "ID"
+            || name == "QueryRoot" || name == "MutationRoot"
+        {
+            continue;
+        }
+
+        if kind == "OBJECT" {
+            if let Some(fields) = typ["fields"].as_array() {
+                if fields.is_empty() {
+                    continue;
+                }
+
+                models.push_str(&format!("@freezed\nclass {name} with _${name} {{\n"));
+                models.push_str(&format!("  const factory {name}({{\n"));
+
+                for field in fields {
+                    let field_name = field["name"].as_str().unwrap_or("unknown");
+                    let dart_type = graphql_type_to_dart(&field["type"]);
+                    models.push_str(&format!("    {dart_type}? {field_name},\n"));
+                }
+
+                models.push_str(&format!("  }}) = _{name};\n\n"));
+                models.push_str(&format!(
+                    "  factory {name}.fromJson(Map<String, dynamic> json) => _${name}FromJson(json);\n"
+                ));
+                models.push_str("}\n\n");
+                count += 1;
+            }
+        }
+    }
+
+    let output_path = format!("{output_dir}/models.dart");
+    std::fs::write(&output_path, &models)?;
+
+    println!("✅ Generated {count} Dart models → {output_path}");
+    println!("   Run `dart run build_runner build` to generate Freezed/JSON serialization code.");
+
+    Ok(())
+}
+
+fn graphql_type_to_dart(typ: &serde_json::Value) -> String {
+    let kind = typ["kind"].as_str().unwrap_or("");
+    let name = typ["name"].as_str().unwrap_or("");
+
+    match kind {
+        "SCALAR" => match name {
+            "String" | "ID" => "String".to_string(),
+            "Int" => "int".to_string(),
+            "Float" => "double".to_string(),
+            "Boolean" => "bool".to_string(),
+            "DateTime" => "DateTime".to_string(),
+            _ => "dynamic".to_string(),
+        },
+        "OBJECT" => name.to_string(),
+        "LIST" => {
+            let inner = graphql_type_to_dart(&typ["ofType"]);
+            format!("List<{inner}>")
+        }
+        "NON_NULL" => graphql_type_to_dart(&typ["ofType"]),
+        _ => "dynamic".to_string(),
     }
 }

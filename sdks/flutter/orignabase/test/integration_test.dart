@@ -88,6 +88,49 @@ void main() {
     });
   });
 
+  group('Subcollection integration', () {
+    late OrignaBase ob;
+
+    setUp(() async {
+      ob = OrignaBase.initialize(url: baseUrl);
+      if (serverAvailable) {
+        final email = uniqueEmail();
+        await ob.auth.register(email, 'TestPassword123!');
+      }
+    });
+
+    tearDown(() {
+      ob.dispose();
+    });
+
+    test('subcollection path is correct for user orders', () {
+      final orders =
+          ob.collection('users').subcollection('user123', 'orders');
+      expect(orders.collectionPath, equals('users__orders'));
+      expect(orders.parentId, equals('user123'));
+    });
+
+    test('nested subcollection path for order items', () {
+      final items = ob
+          .collection('users')
+          .subcollection('user123', 'orders')
+          .subcollection('order456', 'items');
+      expect(items.collectionPath, equals('users__orders__items'));
+    });
+
+    test('create and query subcollection documents', () async {
+      if (!serverAvailable) {
+        markTestSkipped('OrignaBase server not running at $baseUrl');
+        return;
+      }
+      // Create a product review as subcollection
+      final reviews =
+          ob.collection('products').subcollection('prod1', 'reviews');
+      expect(reviews.collectionPath, equals('products__reviews'));
+      // Actual CRUD would need server-side subcollection support
+    }, skip: 'Requires subcollection-aware security rules');
+  });
+
   group('Collection CRUD integration', () {
     late OrignaBase ob;
 

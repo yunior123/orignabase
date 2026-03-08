@@ -62,29 +62,41 @@ async fn handle_socket(socket: WebSocket, state: RealtimeState) {
     tracing::info!(conn_id = %connection_id, "WebSocket connected");
 
     let (mut ws_sender, mut ws_receiver) = socket.split();
-    let (msg_tx, mut msg_rx) = mpsc::channel::<RealtimeMessage>(256);
 
-    // Task: forward subscription messages to WebSocket
+    // Single channel for all outbound ServerMessages (confirmations + change events)
+    let (srv_tx, mut srv_rx) = mpsc::channel::<ServerMessage>(256);
+
+    // Bridge channel: subscriptions receive RealtimeMessage, convert to ServerMessage
+    let (rt_tx, mut rt_rx) = mpsc::channel::<RealtimeMessage>(256);
+    let srv_tx_bridge = srv_tx.clone();
+    tokio::spawn(async move {
+        while let Some(rt_msg) = rt_rx.recv().await {
+            let server_msg = ServerMessage::Change {
+                subscription_id: rt_msg.subscription_id,
+                event: rt_msg.event,
+            };
+            if srv_tx_bridge.send(server_msg).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Send task: forward all ServerMessages to WebSocket
     let conn_id_clone = connection_id.clone();
     let send_task = tokio::spawn(async move {
         use futures_util::SinkExt;
 
-        // Forward realtime messages
-        while let Some(msg) = msg_rx.recv().await {
-            let server_msg = ServerMessage::Change {
-                subscription_id: msg.subscription_id,
-                event: msg.event,
-            };
-            if let Ok(json) = serde_json::to_string(&server_msg)
-                && ws_sender.send(Message::Text(json.into())).await.is_err()
-            {
-                break;
+        while let Some(server_msg) = srv_rx.recv().await {
+            if let Ok(json) = serde_json::to_string(&server_msg) {
+                if ws_sender.send(Message::Text(json.into())).await.is_err() {
+                    break;
+                }
             }
         }
         tracing::debug!(conn_id = %conn_id_clone, "WebSocket send task ended");
     });
 
-    // Task: receive client messages
+    // Receive loop: handle client messages
     use futures_util::StreamExt;
     while let Some(Ok(msg)) = ws_receiver.next().await {
         match msg {
@@ -100,27 +112,25 @@ async fn handle_socket(socket: WebSocket, state: RealtimeState) {
                             collection,
                             filter_hash,
                             user_id: None,
-                            sender: msg_tx.clone(),
+                            sender: rt_tx.clone(),
                         };
                         state.registry.subscribe(&connection_id, sub);
-
-                        let resp = ServerMessage::Subscribed { id };
-                        if let Ok(json) = serde_json::to_string(&resp) {
-                            // Send confirmation back through the msg channel would be
-                            // wrong — we need the ws_sender. For now, log it.
-                            tracing::debug!("Subscription confirmed: {json}");
-                        }
+                        let _ = srv_tx.send(ServerMessage::Subscribed { id }).await;
                     }
                     Ok(ClientMessage::Unsubscribe { id }) => {
                         state.registry.unsubscribe(&id);
-                        tracing::debug!(sub_id = %id, "Unsubscribed");
+                        let _ = srv_tx.send(ServerMessage::Unsubscribed { id }).await;
                     }
                     Ok(ClientMessage::Ping) => {
-                        // Pong handled by axum automatically for protocol pings
-                        tracing::trace!("Ping received");
+                        let _ = srv_tx.send(ServerMessage::Pong).await;
                     }
                     Err(e) => {
                         tracing::warn!("Invalid WebSocket message: {e}");
+                        let _ = srv_tx
+                            .send(ServerMessage::Error {
+                                message: e.to_string(),
+                            })
+                            .await;
                     }
                 }
             }
