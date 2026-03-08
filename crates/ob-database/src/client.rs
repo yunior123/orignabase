@@ -1,7 +1,7 @@
 use ob_core::Error;
 use ob_core::config::DatabaseConfig;
 use surrealdb::Surreal;
-use surrealdb::engine::remote::ws::{Client, Ws};
+use surrealdb::engine::remote::http::{Client, Http};
 use surrealdb::opt::auth::Root;
 
 /// Wrapper around the SurrealDB client with connection management.
@@ -13,7 +13,7 @@ pub struct DatabaseClient {
 impl DatabaseClient {
     /// Connect to SurrealDB and configure namespace/database.
     pub async fn connect(config: &DatabaseConfig) -> ob_core::Result<Self> {
-        let db = Surreal::new::<Ws>(&config.endpoint)
+        let db = Surreal::new::<Http>(&config.endpoint)
             .await
             .map_err(|e| Error::Database(format!("Connection failed: {e}")))?;
 

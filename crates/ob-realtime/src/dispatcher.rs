@@ -169,4 +169,103 @@ mod tests {
         drop(event_tx);
         let _ = handle.await;
     }
+
+    #[test]
+    fn test_change_event_creation_and_fields() {
+        let event = ChangeEvent {
+            action: ChangeAction::Create,
+            collection: "products".to_string(),
+            document_id: "products:xyz".to_string(),
+            data: serde_json::json!({"title": "Widget", "price": 9.99}),
+            timestamp: "2026-03-08T12:00:00Z".to_string(),
+        };
+
+        assert_eq!(event.action, ChangeAction::Create);
+        assert_eq!(event.collection, "products");
+        assert_eq!(event.document_id, "products:xyz");
+        assert_eq!(event.data["title"], "Widget");
+        assert_eq!(event.timestamp, "2026-03-08T12:00:00Z");
+    }
+
+    #[test]
+    fn test_change_event_serialization() {
+        let event = ChangeEvent {
+            action: ChangeAction::Update,
+            collection: "orders".to_string(),
+            document_id: "orders:123".to_string(),
+            data: serde_json::json!({"status": "shipped"}),
+            timestamp: "2026-03-08T14:00:00Z".to_string(),
+        };
+
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["action"], "update");
+        assert_eq!(json["collection"], "orders");
+        assert_eq!(json["document_id"], "orders:123");
+        assert_eq!(json["data"]["status"], "shipped");
+
+        // Deserialize back
+        let deserialized: ChangeEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(deserialized.action, ChangeAction::Update);
+        assert_eq!(deserialized.collection, "orders");
+    }
+
+    #[test]
+    fn test_change_action_serialization() {
+        // ChangeAction uses rename_all = "lowercase"
+        let create_json = serde_json::to_value(ChangeAction::Create).unwrap();
+        let update_json = serde_json::to_value(ChangeAction::Update).unwrap();
+        let delete_json = serde_json::to_value(ChangeAction::Delete).unwrap();
+
+        assert_eq!(create_json, "create");
+        assert_eq!(update_json, "update");
+        assert_eq!(delete_json, "delete");
+
+        // Round-trip
+        let back: ChangeAction = serde_json::from_value(create_json).unwrap();
+        assert_eq!(back, ChangeAction::Create);
+    }
+
+    #[test]
+    fn test_realtime_message_serialization() {
+        let event = ChangeEvent {
+            action: ChangeAction::Delete,
+            collection: "users".to_string(),
+            document_id: "users:u1".to_string(),
+            data: serde_json::json!(null),
+            timestamp: "2026-03-08T16:00:00Z".to_string(),
+        };
+
+        let msg = RealtimeMessage {
+            subscription_id: "sub_abc".to_string(),
+            event,
+        };
+
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["subscription_id"], "sub_abc");
+        assert_eq!(json["event"]["action"], "delete");
+        assert_eq!(json["event"]["collection"], "users");
+    }
+
+    #[tokio::test]
+    async fn test_emit_change_creates_timestamp() {
+        let (tx, mut rx) = mpsc::channel(16);
+
+        emit_change(
+            &tx,
+            ChangeAction::Create,
+            "test_col",
+            "test_col:1",
+            serde_json::json!({"key": "value"}),
+        )
+        .await;
+
+        let event = rx.recv().await.expect("should receive event");
+        assert_eq!(event.action, ChangeAction::Create);
+        assert_eq!(event.collection, "test_col");
+        assert_eq!(event.document_id, "test_col:1");
+        assert_eq!(event.data["key"], "value");
+        // timestamp should be a non-empty RFC3339 string
+        assert!(!event.timestamp.is_empty());
+        assert!(event.timestamp.contains('T'), "timestamp should be RFC3339 format");
+    }
 }

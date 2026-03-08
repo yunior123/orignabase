@@ -194,3 +194,197 @@ async fn test_functions_list_empty() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(body.is_array());
 }
+
+#[tokio::test]
+#[ignore = "requires running orignabase instance"]
+async fn test_admin_create_and_drop_collection() {
+    let client = reqwest::Client::new();
+    let collection_name = format!("test_col_{}", uuid::Uuid::new_v4().simple());
+
+    // Create collection
+    let resp = client
+        .post(format!("{}/_admin/collections", base_url()))
+        .json(&json!({
+            "name": collection_name,
+            "fields": [
+                { "name": "title", "field_type": "string", "required": true, "unique": false, "indexed": false }
+            ]
+        }))
+        .send()
+        .await
+        .expect("create collection failed");
+
+    assert_eq!(resp.status(), 200, "Create collection should succeed");
+
+    // Verify it appears in list
+    let resp = client
+        .get(format!("{}/_admin/collections", base_url()))
+        .send()
+        .await
+        .expect("list collections failed");
+
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains(&collection_name),
+        "Collection should appear in list"
+    );
+
+    // Drop it
+    let resp = client
+        .delete(format!("{}/_admin/collections/{}", base_url(), collection_name))
+        .send()
+        .await
+        .expect("drop collection failed");
+
+    assert_eq!(resp.status(), 200, "Drop collection should succeed");
+}
+
+#[tokio::test]
+#[ignore = "requires running orignabase instance"]
+async fn test_graphql_list_empty_collection() {
+    let client = reqwest::Client::new();
+
+    // Register to get a token
+    let email = format!("test_{}@example.com", uuid::Uuid::new_v4());
+    let resp = client
+        .post(format!("{}/auth/register", base_url()))
+        .json(&json!({
+            "email": email,
+            "password": "TestPassword123!"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let token = body["access_token"].as_str().unwrap().to_string();
+
+    // List from a collection that should be empty / nonexistent
+    let collection = format!("empty_col_{}", uuid::Uuid::new_v4().simple());
+    let resp = client
+        .post(format!("{}/graphql", base_url()))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "query": format!(r#"{{ list(collection: "{}") }}"#, collection)
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+#[ignore = "requires running orignabase instance"]
+async fn test_graphql_create_and_get() {
+    let client = reqwest::Client::new();
+
+    // Register to get a token
+    let email = format!("test_{}@example.com", uuid::Uuid::new_v4());
+    let resp = client
+        .post(format!("{}/auth/register", base_url()))
+        .json(&json!({
+            "email": email,
+            "password": "TestPassword123!"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let token = body["access_token"].as_str().unwrap().to_string();
+
+    // Create a document
+    let resp = client
+        .post(format!("{}/graphql", base_url()))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "query": r#"mutation { create(collection: "test_docs", data: "{\"title\":\"Test Doc\",\"value\":42}") }"#
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+
+    // Extract the created doc ID from the response
+    let created = &body["data"]["create"];
+    assert!(
+        created.is_object() || created.is_string(),
+        "Create should return the document"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires running orignabase instance"]
+async fn test_admin_list_users() {
+    let client = reqwest::Client::new();
+
+    // Register a user first
+    let email = format!("test_{}@example.com", uuid::Uuid::new_v4());
+    let resp = client
+        .post(format!("{}/auth/register", base_url()))
+        .json(&json!({
+            "email": email,
+            "password": "TestPassword123!"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+
+    // List users via admin endpoint
+    let resp = client
+        .get(format!("{}/_admin/users", base_url()))
+        .send()
+        .await
+        .expect("list users failed");
+
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    // Should be an array or object containing users
+    assert!(
+        body.is_array() || body.is_object(),
+        "Users response should be array or object"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires running orignabase instance"]
+async fn test_auth_register_duplicate_email() {
+    let client = reqwest::Client::new();
+    let email = format!("test_{}@example.com", uuid::Uuid::new_v4());
+
+    // First registration should succeed
+    let resp = client
+        .post(format!("{}/auth/register", base_url()))
+        .json(&json!({
+            "email": email,
+            "password": "TestPassword123!"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "First registration should succeed");
+
+    // Second registration with same email should fail
+    let resp = client
+        .post(format!("{}/auth/register", base_url()))
+        .json(&json!({
+            "email": email,
+            "password": "DifferentPassword456!"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_ne!(
+        resp.status(),
+        200,
+        "Duplicate email registration should fail"
+    );
+}

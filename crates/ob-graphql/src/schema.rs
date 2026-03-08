@@ -23,3 +23,40 @@ pub fn build_schema(db: DatabaseClient, rules: Arc<RuleEngine>) -> AppSchema {
         .data(rules)
         .finish()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ob_core::config::DatabaseConfig;
+
+    /// Verify that Schema type alias resolves correctly at compile time.
+    /// This is a compile-time check — if AppSchema type is malformed, this won't build.
+    #[test]
+    fn test_app_schema_type_is_valid() {
+        fn _assert_schema_type(_s: &AppSchema) {}
+        // If this compiles, the type alias is correctly defined.
+    }
+
+    /// Verify build_schema constructs a working schema with introspection.
+    /// Requires a running SurrealDB: `surreal start --user root --pass root memory`
+    #[tokio::test]
+    #[ignore = "requires running SurrealDB instance"]
+    async fn test_build_schema_and_introspect() {
+        let config = DatabaseConfig {
+            endpoint: "ws://localhost:8000".to_string(),
+            username: Some("root".to_string()),
+            password: Some("root".to_string()),
+            namespace: "test".to_string(),
+            name: "test_graphql".to_string(),
+        };
+        let db = DatabaseClient::connect(&config).await.unwrap();
+        let rules = Arc::new(RuleEngine::new(std::collections::HashMap::new()));
+
+        let schema = build_schema(db, rules);
+
+        // Introspect — should return type names without error
+        let result = schema.execute("{ __schema { types { name } } }").await;
+        assert!(result.errors.is_empty(), "Introspection errors: {:?}", result.errors);
+        assert!(!result.data.to_string().is_empty());
+    }
+}
