@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            binary: orignabase
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            binary: orignabase
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            binary: orignabase
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            binary: orignabase
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }} --bin orignabase
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ matrix.binary }} dist/
+          cp orignabase.toml dist/
+          cp rules.ob dist/
+          cd dist && tar czf ../orignabase-${{ matrix.target }}.tar.gz *
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orignabase-${{ matrix.target }}
+          path: orignabase-${{ matrix.target }}.tar.gz
+
+  docker:
+    name: Docker Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      TAG_NAME: ${{ github.ref_name }}
+      REPO_NAME: ${{ github.repository }}
+      ACTOR_NAME: ${{ github.actor }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        run: |
+          docker build -f docker/Dockerfile -t "ghcr.io/${REPO_NAME}:${TAG_NAME}" -t "ghcr.io/${REPO_NAME}:latest" .
+          docker push "ghcr.io/${REPO_NAME}:${TAG_NAME}"
+          docker push "ghcr.io/${REPO_NAME}:latest"
+
+  release:
+    name: Create Release
+    needs: [build, docker]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: "*.tar.gz"
