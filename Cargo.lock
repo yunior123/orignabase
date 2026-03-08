@@ -3271,6 +3271,7 @@ dependencies = [
  "ob-search",
  "ob-security",
  "ob-storage",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
