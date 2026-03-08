@@ -103,6 +103,9 @@ reqwest = { version = "0.12", features = ["json"] }
 # Async streams
 futures-util = "0.3"
 
+# NATS (cluster messaging)
+async-nats = "0.38"
+
 # Notify (file watcher for hot-reload)
 notify = "7"
 

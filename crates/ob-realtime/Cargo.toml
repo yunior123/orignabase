@@ -20,6 +20,11 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 dashmap = { workspace = true }
 futures-util = { workspace = true }
+async-nats = { workspace = true, optional = true }
+
+[features]
+default = []
+cluster = ["async-nats"]
 
 [dev-dependencies]
 tokio-test = { workspace = true }
