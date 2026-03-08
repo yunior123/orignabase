@@ -1,9 +1,12 @@
 use axum::{Json, extract::State};
+use axum::response::Html;
 use ob_core::{Error, Result};
 use ob_database::DatabaseClient;
 use serde_json::{Value, json};
 
 use crate::schema::{self, CollectionSchema};
+
+const DASHBOARD_HTML: &str = include_str!("dashboard.html");
 
 /// Admin API state.
 #[derive(Clone)]
@@ -80,9 +83,16 @@ async fn update_roles(
     Ok(Json(json!({ "user": updated })))
 }
 
+/// GET /_admin/ — Serve the admin dashboard SPA.
+async fn dashboard() -> Html<&'static str> {
+    Html(DASHBOARD_HTML)
+}
+
 /// Build the admin router. All routes require admin authentication.
 pub fn admin_router(state: AdminState) -> axum::Router {
     axum::Router::new()
+        .route("/_admin", axum::routing::get(dashboard))
+        .route("/_admin/", axum::routing::get(dashboard))
         .route("/_admin/health", axum::routing::get(health))
         .route(
             "/_admin/collections",

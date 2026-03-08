@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OrignaBase Admin</title>
+<style>
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3a;
+    --text: #e4e6eb; --muted: #8b8fa3; --accent: #6366f1;
+    --accent-hover: #818cf8; --success: #22c55e; --danger: #ef4444;
+    --warning: #f59e0b; --radius: 8px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+
+  .layout { display: flex; min-height: 100vh; }
+  .sidebar { width: 240px; background: var(--surface); border-right: 1px solid var(--border); padding: 20px 0; flex-shrink: 0; }
+  .main { flex: 1; padding: 32px; overflow-y: auto; }
+
+  .logo { padding: 0 20px 24px; font-size: 18px; font-weight: 700; color: var(--accent); }
+  .logo span { color: var(--muted); font-weight: 400; font-size: 12px; display: block; margin-top: 2px; }
+  .nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 20px; cursor: pointer; color: var(--muted); transition: all 0.15s; font-size: 14px; }
+  .nav-item:hover { color: var(--text); background: rgba(99,102,241,0.08); }
+  .nav-item.active { color: var(--accent); background: rgba(99,102,241,0.12); border-right: 2px solid var(--accent); }
+  .nav-item svg { width: 18px; height: 18px; flex-shrink: 0; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; margin-bottom: 32px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
+  .card-label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  .card-value { font-size: 28px; font-weight: 700; margin-top: 4px; }
+  .card-value.ok { color: var(--success); }
+
+  .page-header { margin-bottom: 24px; }
+  .page-header h1 { font-size: 24px; font-weight: 600; }
+  .page-header p { color: var(--muted); font-size: 14px; margin-top: 4px; }
+
+  .table-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th { text-align: left; padding: 12px 16px; background: rgba(255,255,255,0.03); color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+  td { padding: 12px 16px; border-top: 1px solid var(--border); }
+  tr:hover td { background: rgba(99,102,241,0.04); }
+
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: 6px; border: none; cursor: pointer; font-size: 13px; font-weight: 500; transition: all 0.15s; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+  .btn-danger:hover { background: var(--danger); color: #fff; }
+  .btn-sm { padding: 4px 10px; font-size: 12px; }
+
+  .form-group { margin-bottom: 16px; }
+  .form-group label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+  .form-group input, .form-group textarea { width: 100%; padding: 8px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 14px; }
+  .form-group input:focus, .form-group textarea:focus { outline: none; border-color: var(--accent); }
+
+  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100; align-items: center; justify-content: center; }
+  .modal-overlay.open { display: flex; }
+  .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; width: 90%; max-width: 480px; }
+  .modal h2 { font-size: 18px; margin-bottom: 16px; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+  .badge-green { background: rgba(34,197,94,0.15); color: var(--success); }
+  .badge-blue { background: rgba(99,102,241,0.15); color: var(--accent); }
+  .badge-yellow { background: rgba(245,158,11,0.15); color: var(--warning); }
+
+  .toast { position: fixed; bottom: 20px; right: 20px; padding: 12px 20px; border-radius: 8px; font-size: 14px; z-index: 200; animation: slideIn 0.3s; }
+  .toast-success { background: var(--success); color: #fff; }
+  .toast-error { background: var(--danger); color: #fff; }
+  @keyframes slideIn { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+  .empty { text-align: center; padding: 48px; color: var(--muted); }
+  .page { display: none; }
+  .page.active { display: block; }
+
+  @media (max-width: 768px) { .sidebar { display: none; } .main { padding: 16px; } .cards { grid-template-columns: 1fr 1fr; } }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="logo">OrignaBase <span>Admin Dashboard</span></div>
+    <div class="nav-item active" data-page="overview">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+      Overview
+    </div>
+    <div class="nav-item" data-page="collections">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
+      Collections
+    </div>
+    <div class="nav-item" data-page="users">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
+      Users
+    </div>
+    <div class="nav-item" data-page="functions">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+      Functions
+    </div>
+    <div class="nav-item" data-page="analytics">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+      Analytics
+    </div>
+  </aside>
+
+  <main class="main">
+    <div id="page-overview" class="page active">
+      <div class="page-header"><h1>Overview</h1><p>System status and quick stats</p></div>
+      <div class="cards">
+        <div class="card"><div class="card-label">Status</div><div class="card-value ok" id="stat-status">--</div></div>
+        <div class="card"><div class="card-label">Version</div><div class="card-value" id="stat-version">--</div></div>
+        <div class="card"><div class="card-label">Collections</div><div class="card-value" id="stat-collections">--</div></div>
+        <div class="card"><div class="card-label">Users</div><div class="card-value" id="stat-users">--</div></div>
+        <div class="card"><div class="card-label">Functions</div><div class="card-value" id="stat-functions">--</div></div>
+        <div class="card"><div class="card-label">Uptime</div><div class="card-value" id="stat-uptime">--</div></div>
+      </div>
+      <div class="page-header"><h1>Quick Actions</h1></div>
+      <div id="quick-actions" style="display:flex;gap:12px;flex-wrap:wrap;"></div>
+    </div>
+
+    <div id="page-collections" class="page">
+      <div class="page-header" style="display:flex;justify-content:space-between;align-items:center;">
+        <div><h1>Collections</h1><p>Manage database collections</p></div>
+        <button class="btn btn-primary" id="btn-new-col">+ New Collection</button>
+      </div>
+      <div class="table-wrap">
+        <table><thead><tr><th>Name</th><th>Fields</th><th>Actions</th></tr></thead>
+        <tbody id="collections-body"></tbody></table>
+      </div>
+    </div>
+
+    <div id="page-users" class="page">
+      <div class="page-header"><h1>Users</h1><p>Manage registered users</p></div>
+      <div class="table-wrap">
+        <table><thead><tr><th>ID</th><th>Email</th><th>Roles</th><th>Created</th><th>Actions</th></tr></thead>
+        <tbody id="users-body"></tbody></table>
+      </div>
+    </div>
+
+    <div id="page-functions" class="page">
+      <div class="page-header"><h1>Functions</h1><p>Deployed WASM functions</p></div>
+      <div class="table-wrap">
+        <table><thead><tr><th>Name</th><th>Trigger</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody id="functions-body"></tbody></table>
+      </div>
+    </div>
+
+    <div id="page-analytics" class="page">
+      <div class="page-header"><h1>Analytics</h1><p>Privacy-first event tracking</p></div>
+      <div class="cards">
+        <div class="card"><div class="card-label">Events (24h)</div><div class="card-value" id="stat-events-24h">--</div></div>
+        <div class="card"><div class="card-label">Unique Visitors</div><div class="card-value" id="stat-visitors">--</div></div>
+        <div class="card"><div class="card-label">Top Event</div><div class="card-value" style="font-size:18px;" id="stat-top-event">--</div></div>
+      </div>
+      <div class="page-header" style="margin-top:24px;"><h1>Recent Events</h1></div>
+      <div class="table-wrap">
+        <table><thead><tr><th>Event</th><th>Path</th><th>Referrer</th><th>Time</th></tr></thead>
+        <tbody id="analytics-body"></tbody></table>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="modal-overlay" id="create-modal">
+  <div class="modal">
+    <h2>Create Collection</h2>
+    <div class="form-group"><label>Collection Name</label><input type="text" id="col-name" placeholder="e.g. products"></div>
+    <div class="form-group"><label>Fields (JSON array)</label><textarea id="col-fields" rows="5" placeholder='[{"name": "title", "type": "string"}]'></textarea></div>
+    <div class="modal-actions">
+      <button class="btn" id="btn-cancel-modal" style="color:var(--muted);">Cancel</button>
+      <button class="btn btn-primary" id="btn-create-col">Create</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = window.location.origin;
+
+// --- DOM helpers (no innerHTML — all safe DOM construction) ---
+function clearEl(el) { while (el.firstChild) el.removeChild(el.firstChild); }
+
+function mkEl(tag, attrs, children) {
+  const el = document.createElement(tag);
+  if (attrs) Object.entries(attrs).forEach(([k, v]) => {
+    if (k === 'text') el.textContent = v;
+    else if (k === 'cls') el.className = v;
+    else if (k === 'onclick') el.addEventListener('click', v);
+    else if (k.startsWith('style_')) el.style[k.slice(6)] = v;
+    else el.setAttribute(k, v);
+  });
+  if (children) children.forEach(c => { if (c) el.appendChild(c); });
+  return el;
+}
+
+function mkTd(text, attrs) { return mkEl('td', { text, ...attrs }); }
+function mkBadge(text, cls) { return mkEl('span', { text, cls: `badge ${cls}` }); }
+
+function emptyRow(cols, msg) {
+  const tr = mkEl('tr');
+  tr.appendChild(mkEl('td', { text: msg, colspan: String(cols), cls: 'empty' }));
+  return tr;
+}
+
+// --- Navigation ---
+document.querySelectorAll('.nav-item').forEach(item => {
+  item.addEventListener('click', () => showPage(item.dataset.page));
+});
+
+function showPage(name) {
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  const nav = document.querySelector('[data-page="' + name + '"]');
+  if (nav) nav.classList.add('active');
+  const page = document.getElementById('page-' + name);
+  if (page) page.classList.add('active');
+  if (name === 'collections') loadCollections();
+  if (name === 'users') loadUsers();
+  if (name === 'functions') loadFunctions();
+  if (name === 'overview') loadOverview();
+}
+
+// --- Toast ---
+function toast(msg, type) {
+  type = type || 'success';
+  const el = mkEl('div', { text: msg, cls: 'toast toast-' + type });
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
+// --- Modal ---
+function showCreateModal() { document.getElementById('create-modal').classList.add('open'); }
+function closeModal() { document.getElementById('create-modal').classList.remove('open'); }
+document.getElementById('btn-new-col').addEventListener('click', showCreateModal);
+document.getElementById('btn-cancel-modal').addEventListener('click', closeModal);
+document.getElementById('btn-create-col').addEventListener('click', createCollection);
+
+// --- Quick actions ---
+(function initQuickActions() {
+  const container = document.getElementById('quick-actions');
+  const b1 = mkEl('button', { text: '+ Create Collection', cls: 'btn btn-primary', onclick: function() { showPage('collections'); showCreateModal(); } });
+  const b2 = mkEl('button', { text: 'Manage Users', cls: 'btn btn-primary', onclick: function() { showPage('users'); } });
+  const b3 = mkEl('button', { text: 'Open GraphiQL', cls: 'btn btn-primary', onclick: function() { window.open('/graphql', '_blank'); } });
+  container.appendChild(b1);
+  container.appendChild(b2);
+  container.appendChild(b3);
+})();
+
+// --- API ---
+async function api(path, opts) {
+  opts = opts || {};
+  try {
+    const res = await fetch(API + path, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts));
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return await res.json();
+  } catch (e) { return null; }
+}
+
+// --- Overview ---
+async function loadOverview() {
+  const health = await api('/_admin/health');
+  if (health) {
+    document.getElementById('stat-status').textContent = health.status === 'ok' ? 'Healthy' : 'Error';
+    document.getElementById('stat-version').textContent = 'v' + health.version;
+  }
+  const cols = await api('/_admin/collections');
+  document.getElementById('stat-collections').textContent = cols && cols.collections ? cols.collections.length : '--';
+  const users = await api('/_admin/users');
+  document.getElementById('stat-users').textContent = users && users.users ? users.users.length : '--';
+  const funcs = await api('/functions');
+  document.getElementById('stat-functions').textContent = funcs && funcs.functions ? funcs.functions.length : '--';
+  document.getElementById('stat-uptime').textContent = 'Active';
+}
+
+// --- Collections ---
+async function loadCollections() {
+  const data = await api('/_admin/collections');
+  const tbody = document.getElementById('collections-body');
+  clearEl(tbody);
+  if (!data || !data.collections || !data.collections.length) {
+    tbody.appendChild(emptyRow(3, 'No collections. Create one to get started.'));
+    return;
+  }
+  data.collections.forEach(function(c) {
+    var name = typeof c === 'string' ? c : (c.name || String(c));
+    var fields = c.fields ? c.fields.map(function(f) { return f.name || String(f); }).join(', ') : '--';
+    var tr = mkEl('tr', null, [
+      mkEl('td', null, [mkEl('strong', { text: name })]),
+      mkTd(fields, { style_color: 'var(--muted)' }),
+      mkEl('td', null, [
+        mkEl('button', { text: 'Drop', cls: 'btn btn-danger btn-sm', onclick: function() { dropCollection(name); } })
+      ])
+    ]);
+    tbody.appendChild(tr);
+  });
+}
+
+async function createCollection() {
+  var name = document.getElementById('col-name').value.trim();
+  if (!name) { toast('Collection name is required', 'error'); return; }
+  var fields = [];
+  try {
+    var raw = document.getElementById('col-fields').value.trim();
+    if (raw) fields = JSON.parse(raw);
+  } catch (e) { toast('Invalid JSON for fields', 'error'); return; }
+  var res = await api('/_admin/collections', { method: 'POST', body: JSON.stringify({ name: name, fields: fields }) });
+  if (res) { toast('Collection "' + name + '" created'); closeModal(); loadCollections(); }
+  else toast('Failed to create collection', 'error');
+}
+
+async function dropCollection(name) {
+  if (!confirm('Drop collection "' + name + '"? This cannot be undone.')) return;
+  var res = await api('/_admin/collections/' + encodeURIComponent(name), { method: 'DELETE' });
+  if (res) { toast('Dropped "' + name + '"'); loadCollections(); }
+  else toast('Failed to drop collection', 'error');
+}
+
+// --- Users ---
+async function loadUsers() {
+  var data = await api('/_admin/users');
+  var tbody = document.getElementById('users-body');
+  clearEl(tbody);
+  if (!data || !data.users || !data.users.length) {
+    tbody.appendChild(emptyRow(5, 'No users registered yet.'));
+    return;
+  }
+  data.users.forEach(function(u) {
+    var roles = (u.roles || []);
+    var rolesCell = mkEl('td');
+    if (roles.length === 0) { rolesCell.appendChild(mkBadge('none', 'badge-yellow')); }
+    else roles.forEach(function(r) { rolesCell.appendChild(mkBadge(r, 'badge-blue')); rolesCell.appendChild(document.createTextNode(' ')); });
+    var created = u.created_at ? new Date(u.created_at).toLocaleDateString() : '--';
+    var uid = u.id ? String(u.id) : '--';
+    var tr = mkEl('tr', null, [
+      mkTd(uid, { style_fontFamily: 'monospace', style_fontSize: '12px' }),
+      mkTd(u.email || '--'),
+      rolesCell,
+      mkTd(created, { style_color: 'var(--muted)' }),
+      mkEl('td', null, [
+        mkEl('button', { text: 'Delete', cls: 'btn btn-danger btn-sm', onclick: function() { deleteUser(uid); } })
+      ])
+    ]);
+    tbody.appendChild(tr);
+  });
+}
+
+async function deleteUser(id) {
+  if (!confirm('Delete user ' + id + '?')) return;
+  var res = await api('/_admin/users/' + encodeURIComponent(id), { method: 'DELETE' });
+  if (res) { toast('User deleted'); loadUsers(); }
+  else toast('Failed to delete user', 'error');
+}
+
+// --- Functions ---
+async function loadFunctions() {
+  var data = await api('/functions');
+  var tbody = document.getElementById('functions-body');
+  clearEl(tbody);
+  if (!data || !data.functions || !data.functions.length) {
+    tbody.appendChild(emptyRow(4, 'No functions deployed. Use the API to deploy WASM functions.'));
+    return;
+  }
+  data.functions.forEach(function(f) {
+    var trigger = f.trigger || 'http';
+    var badgeCls = trigger === 'http' ? 'badge-blue' : trigger === 'cron' ? 'badge-yellow' : 'badge-green';
+    var tr = mkEl('tr', null, [
+      mkEl('td', null, [mkEl('strong', { text: f.name })]),
+      mkEl('td', null, [mkBadge(trigger, badgeCls)]),
+      mkEl('td', null, [mkBadge('Active', 'badge-green')]),
+      mkEl('td', null, [
+        mkEl('button', { text: 'Delete', cls: 'btn btn-danger btn-sm', onclick: function() { deleteFunction(f.name); } })
+      ])
+    ]);
+    tbody.appendChild(tr);
+  });
+}
+
+async function deleteFunction(name) {
+  if (!confirm('Delete function "' + name + '"?')) return;
+  var res = await api('/functions/' + encodeURIComponent(name), { method: 'DELETE' });
+  if (res) { toast('Function deleted'); loadFunctions(); }
+  else toast('Failed to delete function', 'error');
+}
+
+// --- Analytics (placeholder) ---
+(function initAnalytics() {
+  var tbody = document.getElementById('analytics-body');
+  tbody.appendChild(emptyRow(4, 'No analytics data yet. Events appear here after ingestion.'));
+})();
+
+// --- Init ---
+loadOverview();
+</script>
+</body>
+</html>
