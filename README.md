@@ -112,9 +112,22 @@ mutation {
 | `POST /functions/deploy` | Deploy WASM function |
 | `POST /functions/invoke/:name` | Invoke function |
 | `POST /analytics/event` | Ingest analytics event |
+| `GET /_admin/` | Admin dashboard (SPA) |
 | `GET /_admin/health` | Admin health check |
 | `POST /_admin/collections` | Create collection |
 | `GET /_admin/collections` | List collections |
+
+## Admin Dashboard
+
+Access the built-in admin dashboard at `http://localhost:8080/_admin/`. Features:
+
+- **Overview** — System health, version, collection/user/function counts
+- **Collections** — Create, list, and drop database collections
+- **Users** — View, manage roles, delete users
+- **Functions** — View deployed WASM functions
+- **Analytics** — Event tracking overview
+
+The dashboard is embedded in the binary (no external files needed).
 
 ## Firebase Migration
 
