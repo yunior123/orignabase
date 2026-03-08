@@ -107,15 +107,10 @@ async fn test_auth_refresh_token() {
         .await
         .unwrap();
 
-    // NOTE: refresh endpoint has a known issue with SurrealDB RecordId lookup
-    // The sub claim contains "users:xxx" but the query `WHERE id = $uid` doesn't
-    // match because SurrealDB compares string vs RecordId. This will be fixed
-    // when we normalize user ID handling.
-    assert!(
-        resp.status() == 200 || resp.status() == 401,
-        "Refresh should return 200 or 401 (known RecordId issue), got {}",
-        resp.status()
-    );
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["access_token"].is_string());
+    assert!(body["refresh_token"].is_string());
 }
 
 #[tokio::test]

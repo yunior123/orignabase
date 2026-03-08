@@ -173,11 +173,12 @@ pub async fn refresh(
         return Err(Error::Auth("Invalid token type".into()));
     }
 
-    // Look up user to get current roles (parameterized query)
+    // Look up user to get current roles
+    // Use type::thing() to convert the string record ID back to a RecordId
     let users = state
         .db
         .query_bind(
-            "SELECT * FROM users WHERE id = $uid",
+            "SELECT * FROM type::thing($uid)",
             json!({ "uid": claims.sub }),
         )
         .await?;
