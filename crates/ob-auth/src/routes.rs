@@ -56,13 +56,13 @@ pub async fn register(
         ));
     }
 
-    // Check if email already exists
+    // Check if email already exists (parameterized query — safe from injection)
     let existing = state
         .db
-        .query_raw(&format!(
-            "SELECT id FROM users WHERE email = '{}'",
-            body.email.replace('\'', "''")
-        ))
+        .query_bind(
+            "SELECT id FROM users WHERE email = $email",
+            json!({ "email": body.email }),
+        )
         .await?;
     if !existing.is_empty() {
         return Err(Error::Validation("Email already registered".into()));
@@ -110,13 +110,13 @@ pub async fn login(
     State(state): State<AuthState>,
     Json(body): Json<LoginRequest>,
 ) -> Result<Json<AuthResponse>> {
-    // Find user by email
+    // Find user by email (parameterized query — safe from injection)
     let users = state
         .db
-        .query_raw(&format!(
-            "SELECT * FROM users WHERE email = '{}'",
-            body.email.replace('\'', "''")
-        ))
+        .query_bind(
+            "SELECT * FROM users WHERE email = $email",
+            json!({ "email": body.email }),
+        )
         .await?;
 
     let user = users
@@ -173,10 +173,13 @@ pub async fn refresh(
         return Err(Error::Auth("Invalid token type".into()));
     }
 
-    // Look up user to get current roles
+    // Look up user to get current roles (parameterized query)
     let users = state
         .db
-        .query_raw(&format!("SELECT * FROM users WHERE id = {}", claims.sub))
+        .query_bind(
+            "SELECT * FROM users WHERE id = $uid",
+            json!({ "uid": claims.sub }),
+        )
         .await?;
 
     let user = users

@@ -88,4 +88,24 @@ impl DatabaseClient {
 
         Ok(results)
     }
+
+    /// Execute a parameterized SurrealQL query (safe from injection).
+    pub async fn query_bind(
+        &self,
+        query: &str,
+        binds: impl serde::Serialize + 'static,
+    ) -> Result<Vec<Value>> {
+        let mut response = self
+            .inner()
+            .query(query)
+            .bind(binds)
+            .await
+            .map_err(|e| Error::Database(format!("Query failed: {e}")))?;
+
+        let results: Vec<Value> = response
+            .take(0)
+            .map_err(|e| Error::Database(format!("Result extraction failed: {e}")))?;
+
+        Ok(results)
+    }
 }
