@@ -11,6 +11,19 @@ services:
         limits:
           memory: 256M
 
+  meilisearch:
+    image: getmeili/meilisearch:v1.12
+    ports:
+      - "7700:7700"
+    environment:
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-change-me-in-production}
+    volumes:
+      - meili_data:/meili_data
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
   orignabase:
     build:
       context: ..
@@ -26,6 +39,7 @@ services:
       OB_AUTH__JWT_SECRET: ${OB_AUTH__JWT_SECRET:-change-me-in-production}
     depends_on:
       - surrealdb
+      - meilisearch
     deploy:
       resources:
         limits:
@@ -33,3 +47,4 @@ services:
 
 volumes:
   surrealdb_data:
+  meili_data:
