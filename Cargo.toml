@@ -7,6 +7,10 @@ members = [
     "crates/ob-auth",
     "crates/ob-graphql",
     "crates/ob-security",
+    "crates/ob-realtime",
+    "crates/ob-storage",
+    "crates/ob-search",
+    "crates/ob-admin",
 ]
 
 [workspace.package]
@@ -73,6 +77,30 @@ ob-database = { path = "crates/ob-database" }
 ob-auth = { path = "crates/ob-auth" }
 ob-graphql = { path = "crates/ob-graphql" }
 ob-security = { path = "crates/ob-security" }
+ob-realtime = { path = "crates/ob-realtime" }
+ob-storage = { path = "crates/ob-storage" }
+ob-search = { path = "crates/ob-search" }
+ob-admin = { path = "crates/ob-admin" }
+
+# Crypto (for signed URLs)
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+
+# File handling
+tokio-util = { version = "0.7", features = ["io"] }
+
+# HTTP client (for Meilisearch)
+reqwest = { version = "0.12", features = ["json"] }
+
+# Async streams
+futures-util = "0.3"
+
+# Notify (file watcher for hot-reload)
+notify = "7"
+
+# Dashboard
+dashmap = "6"
 
 [profile.release]
 lto = true

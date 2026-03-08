@@ -1,0 +1,21 @@
+[package]
+name = "ob-admin"
+description = "Admin API — schema management, user admin, system info, logs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ob-core = { workspace = true }
+ob-database = { workspace = true }
+ob-auth = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

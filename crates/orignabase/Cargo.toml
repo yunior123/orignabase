@@ -15,6 +15,10 @@ ob-database = { workspace = true }
 ob-auth = { workspace = true }
 ob-graphql = { workspace = true }
 ob-security = { workspace = true }
+ob-realtime = { workspace = true }
+ob-storage = { workspace = true }
+ob-search = { workspace = true }
+ob-admin = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
