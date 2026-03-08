@@ -205,7 +205,7 @@ mod tests {
         use ob_core::config::DatabaseConfig;
 
         let config = DatabaseConfig {
-            endpoint: "ws://localhost:8000".to_string(),
+            endpoint: "localhost:8000".to_string(),
             username: Some("root".to_string()),
             password: Some("root".to_string()),
             namespace: "test".to_string(),
