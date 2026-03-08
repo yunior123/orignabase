@@ -202,6 +202,43 @@ await ob.storage.upload('users/123/avatar.jpg', bytes);
 
 See `sdks/flutter/orignabase/` for the full SDK.
 
+## Horizontal Scaling
+
+### TiKV Backend
+
+Replace embedded RocksDB with TiKV for horizontal database scaling:
+
+```bash
+# Start SurrealDB with TiKV backend
+surreal start --user root --pass root tikv://pd:2379
+
+# Point OrignaBase to TiKV-backed SurrealDB
+OB_DATABASE__ENDPOINT=ws://surrealdb:8000 orignabase serve
+```
+
+No code changes needed — SurrealDB abstracts the storage engine. Just change the connection target.
+
+### Multi-Node Clustering (NATS JetStream)
+
+Enable NATS JetStream for cross-node realtime sync:
+
+```bash
+OB_CLUSTER__ENABLED=true \
+OB_CLUSTER__NATS_URL=nats://nats:4222 \
+orignabase serve
+```
+
+Or in `orignabase.toml`:
+
+```toml
+[cluster]
+enabled = true
+nats_url = "nats://nats:4222"
+# node_id = "node-1"  # Optional, auto-generated if not set
+```
+
+Build with cluster support: `cargo build --features ob-realtime/cluster`
+
 ## CLI Commands
 
 ```bash

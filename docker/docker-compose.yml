@@ -45,6 +45,27 @@ services:
         limits:
           memory: 512M
 
+  # --- Cluster Mode (uncomment to enable multi-node) ---
+  # nats:
+  #   image: nats:2.10
+  #   command: --jetstream --store_dir /data
+  #   ports:
+  #     - "4222:4222"
+  #   volumes:
+  #     - nats_data:/data
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         memory: 128M
+
+  # --- TiKV Mode (uncomment to replace RocksDB with TiKV) ---
+  # To use TiKV instead of embedded RocksDB:
+  # 1. Replace surrealdb command with:
+  #    command: start --user root --pass root tikv://pd:2379
+  # 2. Add TiKV PD + TiKV nodes (see TiKV docs)
+  # 3. Set OB_CLUSTER__ENABLED=true and OB_CLUSTER__NATS_URL=nats://nats:4222
+
 volumes:
   surrealdb_data:
   meili_data:
+  # nats_data:

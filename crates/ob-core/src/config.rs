@@ -12,6 +12,8 @@ pub struct Config {
     pub auth: AuthConfig,
     #[serde(default)]
     pub security: SecurityConfig,
+    #[serde(default)]
+    pub cluster: ClusterConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -40,6 +42,32 @@ pub struct AuthConfig {
 pub struct SecurityConfig {
     #[serde(default = "default_rules_path")]
     pub rules_path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClusterConfig {
+    /// Enable multi-node clustering via NATS JetStream
+    #[serde(default)]
+    pub enabled: bool,
+    /// NATS server URL
+    #[serde(default = "default_nats_url")]
+    pub nats_url: String,
+    /// Unique node ID (auto-generated if not set)
+    pub node_id: Option<String>,
+}
+
+impl Default for ClusterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            nats_url: default_nats_url(),
+            node_id: None,
+        }
+    }
+}
+
+fn default_nats_url() -> String {
+    "nats://localhost:4222".to_string()
 }
 
 fn default_host() -> String {
@@ -175,6 +203,15 @@ impl Config {
         }
         if let Ok(v) = std::env::var("OB_SECURITY__RULES_PATH") {
             config.security.rules_path = v;
+        }
+        if let Ok(v) = std::env::var("OB_CLUSTER__ENABLED") {
+            config.cluster.enabled = v == "true" || v == "1";
+        }
+        if let Ok(v) = std::env::var("OB_CLUSTER__NATS_URL") {
+            config.cluster.nats_url = v;
+        }
+        if let Ok(v) = std::env::var("OB_CLUSTER__NODE_ID") {
+            config.cluster.node_id = Some(v);
         }
 
         Ok(config)
