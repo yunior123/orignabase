@@ -20,6 +20,7 @@ ob-storage = { workspace = true }
 ob-search = { workspace = true }
 ob-admin = { workspace = true }
 ob-functions = { workspace = true }
+ob-analytics = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }

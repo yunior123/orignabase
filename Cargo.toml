@@ -12,6 +12,7 @@ members = [
     "crates/ob-search",
     "crates/ob-admin",
     "crates/ob-functions",
+    "crates/ob-analytics",
 ]
 
 [workspace.package]
@@ -83,6 +84,7 @@ ob-storage = { path = "crates/ob-storage" }
 ob-search = { path = "crates/ob-search" }
 ob-admin = { path = "crates/ob-admin" }
 ob-functions = { path = "crates/ob-functions" }
+ob-analytics = { path = "crates/ob-analytics" }
 
 # Crypto (for signed URLs)
 hmac = "0.12"
@@ -100,6 +102,9 @@ futures-util = "0.3"
 
 # Notify (file watcher for hot-reload)
 notify = "7"
+
+# Hex encoding
+hex = "0.4"
 
 # WASM runtime (interpreter — lightweight, no JIT/cranelift overhead)
 wasmi = "0.42"

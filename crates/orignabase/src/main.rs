@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 use ob_admin::admin_router;
 use ob_admin::routes::AdminState;
 use ob_auth::routes::{AuthState, auth_router};
+use ob_analytics::{AnalyticsState, analytics_router};
 use ob_core::Config;
 use ob_functions::{FunctionLimits, FunctionRegistry, WasmRuntime, functions_router};
 use ob_functions::routes::FunctionsState;
@@ -137,6 +138,11 @@ async fn serve(config: Config) -> Result<()> {
         registry: function_registry,
     };
 
+    // --- Analytics ---
+    let analytics_state = AnalyticsState {
+        ip_salt: config.auth.jwt_secret.clone(), // Reuse secret as salt
+    };
+
     // --- Admin ---
     let admin_state = AdminState { db: db.clone() };
 
@@ -156,6 +162,7 @@ async fn serve(config: Config) -> Result<()> {
         .merge(realtime_router(registry))
         .merge(storage_router(storage_state))
         .merge(functions_router(functions_state))
+        .merge(analytics_router(analytics_state))
         .merge(admin_router(admin_state))
         .layer(CompressionLayer::new())
         .layer(TimeoutLayer::with_status_code(
@@ -174,6 +181,7 @@ async fn serve(config: Config) -> Result<()> {
     tracing::info!("  GraphiQL:  http://{addr}/graphql");
     tracing::info!("  Realtime:  ws://{addr}/realtime");
     tracing::info!("  Functions: http://{addr}/functions");
+    tracing::info!("  Analytics: http://{addr}/analytics/event");
     tracing::info!("  Admin:     http://{addr}/_admin/health");
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;

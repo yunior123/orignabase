@@ -2905,6 +2905,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ob-analytics"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "hex",
+ "ob-core",
+ "ob-database",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-test",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ob-auth"
 version = "0.1.0"
 dependencies = [
@@ -3177,6 +3195,7 @@ dependencies = [
  "axum",
  "clap",
  "ob-admin",
+ "ob-analytics",
  "ob-auth",
  "ob-core",
  "ob-database",
