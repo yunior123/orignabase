@@ -116,6 +116,36 @@ mutation {
 | `POST /_admin/collections` | Create collection |
 | `GET /_admin/collections` | List collections |
 
+## Firebase Migration
+
+Migrate from Firestore JSON exports:
+
+```bash
+# Dry run — see what would be migrated
+orignabase migrate from-firebase --export-path ./firestore-export --dry-run
+
+# Migrate specific collections
+orignabase migrate from-firebase \
+  --export-path ./firestore-export \
+  --collections users,products,orders \
+  --target-url http://localhost:8080
+
+# Migrate all collections
+orignabase migrate from-firebase --export-path ./firestore-export
+```
+
+Supports Firestore typed values (`stringValue`, `integerValue`, `arrayValue`, `mapValue`, etc.) and extracts document IDs from Firestore paths.
+
+## Benchmarks
+
+Run criterion benchmarks for hot paths:
+
+```bash
+cargo bench --bench core_benchmarks
+```
+
+Covers: query translation, security rules evaluation, rule parsing, Argon2id hashing, JWT issue/verify, signed URLs, analytics helpers.
+
 ## Architecture
 
 ```
@@ -131,6 +161,40 @@ orignabase (single binary)
 ├── ob-functions  — WASM runtime (wasmi), function registry
 ├── ob-analytics  — Privacy-first event tracking
 └── ob-admin      — Schema + user management API
+```
+
+## Flutter SDK
+
+```dart
+final ob = OrignaBase(url: 'http://localhost:8080');
+
+// Auth
+await ob.auth.signInWithEmail('user@example.com', 'password');
+
+// Database — Firestore-like fluent API
+final products = ob.collection('products');
+final docs = await products
+    .where('status', isEqualTo: 'active')
+    .where('price', isGreaterThan: 1000)
+    .orderBy('created_at', descending: true)
+    .limit(20)
+    .get();
+
+// Realtime
+ob.realtime.subscribe('products', onEvent: (event) => print(event));
+
+// Storage
+await ob.storage.upload('users/123/avatar.jpg', bytes);
+```
+
+See `sdks/flutter/orignabase/` for the full SDK.
+
+## CLI Commands
+
+```bash
+orignabase serve                    # Start server
+orignabase config                   # Print configuration
+orignabase migrate from-firebase    # Migrate from Firestore
 ```
 
 ## License
