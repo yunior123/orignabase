@@ -1,0 +1,9 @@
+// OrignaBase Security Rules
+// Default rules — customize per collection.
+
+rules users {
+    read: isAuthenticated();
+    create: true;
+    update: isAuthenticated() && isOwner(resource.id);
+    delete: hasRole("admin");
+}

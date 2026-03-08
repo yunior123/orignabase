@@ -1,0 +1,29 @@
+[package]
+name = "orignabase"
+description = "OrignaBase — A lightweight, blazingly fast, self-hosted Backend-as-a-Service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "orignabase"
+path = "src/main.rs"
+
+[dependencies]
+ob-core = { workspace = true }
+ob-database = { workspace = true }
+ob-auth = { workspace = true }
+ob-graphql = { workspace = true }
+ob-security = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+async-graphql = { workspace = true }
+async-graphql-axum = { workspace = true }
+clap = { version = "4", features = ["derive"] }

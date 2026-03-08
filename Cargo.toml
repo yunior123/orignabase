@@ -1,0 +1,80 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/orignabase",
+    "crates/ob-core",
+    "crates/ob-database",
+    "crates/ob-auth",
+    "crates/ob-graphql",
+    "crates/ob-security",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/yunior123/orignabase"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Web framework
+axum = { version = "0.8", features = ["ws", "macros"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tower = { version = "0.5", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "compression-gzip", "trace", "timeout", "limit"] }
+
+# GraphQL
+async-graphql = { version = "7", features = ["chrono", "uuid"] }
+async-graphql-axum = "7"
+
+# Database
+surrealdb = { version = "2", features = ["kv-rocksdb"] }
+
+# Auth
+argon2 = "0.5"
+jsonwebtoken = "9"
+rand = "0.8"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Security rules parser
+pest = "2.7"
+pest_derive = "2.7"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Config
+dotenvy = "0.15"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Testing
+tokio-test = "0.4"
+
+# Workspace crates
+ob-core = { path = "crates/ob-core" }
+ob-database = { path = "crates/ob-database" }
+ob-auth = { path = "crates/ob-auth" }
+ob-graphql = { path = "crates/ob-graphql" }
+ob-security = { path = "crates/ob-security" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

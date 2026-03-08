@@ -1,0 +1,41 @@
+// OrignaBase Security Rules Grammar
+
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* }
+
+// Identifiers and literals
+ident      = @{ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_")* }
+dot_path   = @{ ident ~ ("." ~ ident)* }
+string_lit = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+number_lit = @{ "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
+bool_lit   = @{ "true" | "false" }
+
+// Values — order matters: bool_lit before dot_path to prevent "true"/"false" matching as ident
+value = { function_call | bool_lit | string_lit | number_lit | dot_path }
+
+// Function calls
+function_call = { ident ~ "(" ~ (value ~ ("," ~ value)*)? ~ ")" }
+
+// Comparison operators
+comp_op = { ">=" | "<=" | "!=" | ">" | "<" | "==" }
+
+// Expressions
+atom       = { "(" ~ expr ~ ")" | value }
+comparison = { atom ~ comp_op ~ atom }
+not_expr   = { "!" ~ atom | comparison | atom }
+and_expr   = { not_expr ~ ("&&" ~ not_expr)* }
+expr       = { and_expr ~ ("||" ~ and_expr)* }
+
+// Operations
+operation = { "read" | "create" | "update" | "delete" | "list" }
+op_list   = { operation ~ ("," ~ operation)* }
+
+// Rule entries
+rule_entry    = { op_list ~ ":" ~ expr ~ ";" }
+validate_entry = { op_list ~ ":" ~ "{" ~ "validate" ~ ":" ~ expr ~ ";" ~ "}" }
+
+// Rule block
+rule_block = { "rules" ~ ident ~ "{" ~ (validate_entry | rule_entry)* ~ "}" }
+
+// Top-level file
+file = { SOI ~ rule_block* ~ EOI }
