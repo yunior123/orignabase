@@ -156,7 +156,7 @@ impl Config {
             toml::from_str(
                 r#"
                 [database]
-                endpoint = "ws://localhost:8000"
+                endpoint = "localhost:8000"
                 "#,
             )
             .map_err(|e| crate::Error::Config(e.to_string()))?
@@ -227,7 +227,7 @@ mod tests {
         let config = Config::load(None).unwrap();
         assert_eq!(config.host, "0.0.0.0");
         assert_eq!(config.port, 8080);
-        assert_eq!(config.database.endpoint, "ws://localhost:8000");
+        assert_eq!(config.database.endpoint, "localhost:8000");
         assert_eq!(config.auth.access_token_ttl_secs, 900);
     }
 
@@ -237,7 +237,7 @@ mod tests {
             host = "127.0.0.1"
             port = 9090
             [database]
-            endpoint = "ws://db:8000"
+            endpoint = "db:8000"
             namespace = "test"
             name = "testdb"
             [auth]

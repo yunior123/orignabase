@@ -1,0 +1,6 @@
+rules todos {
+    read: isAuthenticated() && isOwner(resource.owner_id);
+    create: isAuthenticated();
+    update: isOwner(resource.owner_id);
+    delete: isOwner(resource.owner_id);
+}

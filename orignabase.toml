@@ -5,11 +5,11 @@ host = "0.0.0.0"
 port = 8080
 
 [database]
-endpoint = "ws://localhost:8000"
+endpoint = "localhost:8000"
 namespace = "orignabase"
 name = "main"
-# username = "root"
-# password = "root"
+username = "root"
+password = "root"
 
 [auth]
 jwt_secret = "CHANGE_ME_IN_PRODUCTION"
