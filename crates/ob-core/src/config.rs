@@ -221,9 +221,37 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Mutex to serialize all tests that call Config::load (which reads env vars).
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    /// Helper: clear all OB_ env vars to ensure a clean slate.
+    fn clear_all_ob_env_vars() {
+        for key in &[
+            "OB_HOST",
+            "OB_PORT",
+            "OB_DATABASE__ENDPOINT",
+            "OB_DATABASE__NAMESPACE",
+            "OB_DATABASE__NAME",
+            "OB_DATABASE__USERNAME",
+            "OB_DATABASE__PASSWORD",
+            "OB_AUTH__JWT_SECRET",
+            "OB_AUTH__ACCESS_TOKEN_TTL_SECS",
+            "OB_AUTH__REFRESH_TOKEN_TTL_SECS",
+            "OB_SECURITY__RULES_PATH",
+            "OB_CLUSTER__ENABLED",
+            "OB_CLUSTER__NATS_URL",
+            "OB_CLUSTER__NODE_ID",
+        ] {
+            unsafe { std::env::remove_var(key) };
+        }
+    }
 
     #[test]
     fn test_default_config() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        clear_all_ob_env_vars();
         let config = Config::load(None).unwrap();
         assert_eq!(config.host, "0.0.0.0");
         assert_eq!(config.port, 8080);
@@ -248,5 +276,216 @@ mod tests {
         assert_eq!(config.port, 9090);
         assert_eq!(config.database.namespace, "test");
         assert_eq!(config.auth.jwt_secret, "supersecret");
+    }
+
+    // ── Default impl tests ──
+
+    #[test]
+    fn test_auth_config_default() {
+        let auth = AuthConfig::default();
+        assert_eq!(auth.jwt_secret, "CHANGE_ME_IN_PRODUCTION");
+        assert_eq!(auth.access_token_ttl_secs, 900);
+        assert_eq!(auth.refresh_token_ttl_secs, 604800);
+    }
+
+    #[test]
+    fn test_security_config_default() {
+        let sec = SecurityConfig::default();
+        assert_eq!(sec.rules_path, "rules.ob");
+    }
+
+    #[test]
+    fn test_cluster_config_default() {
+        let cluster = ClusterConfig::default();
+        assert!(!cluster.enabled);
+        assert_eq!(cluster.nats_url, "nats://localhost:4222");
+        assert!(cluster.node_id.is_none());
+    }
+
+    #[test]
+    fn test_database_defaults_via_serde() {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.database.endpoint, "localhost:8000");
+        assert_eq!(config.database.namespace, "orignabase");
+        assert_eq!(config.database.name, "main");
+        assert!(config.database.username.is_none());
+        assert!(config.database.password.is_none());
+    }
+
+    #[test]
+    fn test_host_and_port_defaults_via_serde() {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            endpoint = "x"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.host, "0.0.0.0");
+        assert_eq!(config.port, 8080);
+    }
+
+    // ── Load from nonexistent file falls back to defaults ──
+
+    #[test]
+    fn test_load_nonexistent_file_uses_defaults() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        clear_all_ob_env_vars();
+        let config = Config::load(Some(Path::new("/tmp/__nonexistent_orignabase__.toml"))).unwrap();
+        assert_eq!(config.host, "0.0.0.0");
+        assert_eq!(config.port, 8080);
+        assert_eq!(config.database.endpoint, "localhost:8000");
+    }
+
+    // ── Cluster section from TOML ──
+
+    #[test]
+    fn test_parse_cluster_section() {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            endpoint = "localhost:8000"
+            [cluster]
+            enabled = true
+            nats_url = "nats://remote:4222"
+            node_id = "node-1"
+            "#,
+        )
+        .unwrap();
+        assert!(config.cluster.enabled);
+        assert_eq!(config.cluster.nats_url, "nats://remote:4222");
+        assert_eq!(config.cluster.node_id.as_deref(), Some("node-1"));
+    }
+
+    // ── Environment variable override tests ──
+    // All env var tests in one function, holding the ENV_MUTEX,
+    // to avoid parallel test pollution (env vars are process-global).
+
+    #[test]
+    fn test_env_overrides_all() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        clear_all_ob_env_vars();
+
+        // -- OB_HOST --
+        unsafe { std::env::set_var("OB_HOST", "10.0.0.1") };
+        let config = Config::load(None).unwrap();
+        assert_eq!(config.host, "10.0.0.1");
+        clear_all_ob_env_vars();
+
+        // -- OB_PORT (valid) --
+        unsafe { std::env::set_var("OB_PORT", "3000") };
+        let config = Config::load(None).unwrap();
+        assert_eq!(config.port, 3000);
+        clear_all_ob_env_vars();
+
+        // -- OB_PORT (invalid) --
+        unsafe { std::env::set_var("OB_PORT", "not_a_number") };
+        let result = Config::load(None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("OB_PORT must be a number"));
+        clear_all_ob_env_vars();
+
+        // -- OB_DATABASE__ENDPOINT --
+        unsafe { std::env::set_var("OB_DATABASE__ENDPOINT", "remote:9000") };
+        let config = Config::load(None).unwrap();
+        assert_eq!(config.database.endpoint, "remote:9000");
+        clear_all_ob_env_vars();
+
+        // -- OB_DATABASE__NAMESPACE --
+        unsafe { std::env::set_var("OB_DATABASE__NAMESPACE", "custom_ns") };
+        let config = Config::load(None).unwrap();
+        assert_eq!(config.database.namespace, "custom_ns");
+        clear_all_ob_env_vars();
+
+        // -- OB_DATABASE__NAME --
+        unsafe { std::env::set_var("OB_DATABASE__NAME", "mydb") };
+        let config = Config::load(None).unwrap();
+        assert_eq!(config.database.name, "mydb");
+        clear_all_ob_env_vars();
+
+        // -- OB_DATABASE__USERNAME --
+        unsafe { std::env::set_var("OB_DATABASE__USERNAME", "admin") };
+        let config = Config::load(None).unwrap();
+        assert_eq!(config.database.username.as_deref(), Some("admin"));
+        clear_all_ob_env_vars();
+
+        // -- OB_DATABASE__PASSWORD --
+        unsafe { std::env::set_var("OB_DATABASE__PASSWORD", "s3cret") };
+        let config = Config::load(None).unwrap();
+        assert_eq!(config.database.password.as_deref(), Some("s3cret"));
+        clear_all_ob_env_vars();
+
+        // -- OB_AUTH__JWT_SECRET --
+        unsafe { std::env::set_var("OB_AUTH__JWT_SECRET", "my_jwt_secret") };
+        let config = Config::load(None).unwrap();
+        assert_eq!(config.auth.jwt_secret, "my_jwt_secret");
+        clear_all_ob_env_vars();
+
+        // -- OB_AUTH__ACCESS_TOKEN_TTL_SECS (valid) --
+        unsafe { std::env::set_var("OB_AUTH__ACCESS_TOKEN_TTL_SECS", "1800") };
+        let config = Config::load(None).unwrap();
+        assert_eq!(config.auth.access_token_ttl_secs, 1800);
+        clear_all_ob_env_vars();
+
+        // -- OB_AUTH__ACCESS_TOKEN_TTL_SECS (invalid) --
+        unsafe { std::env::set_var("OB_AUTH__ACCESS_TOKEN_TTL_SECS", "abc") };
+        let result = Config::load(None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid access token TTL"));
+        clear_all_ob_env_vars();
+
+        // -- OB_AUTH__REFRESH_TOKEN_TTL_SECS (valid) --
+        unsafe { std::env::set_var("OB_AUTH__REFRESH_TOKEN_TTL_SECS", "86400") };
+        let config = Config::load(None).unwrap();
+        assert_eq!(config.auth.refresh_token_ttl_secs, 86400);
+        clear_all_ob_env_vars();
+
+        // -- OB_AUTH__REFRESH_TOKEN_TTL_SECS (invalid) --
+        unsafe { std::env::set_var("OB_AUTH__REFRESH_TOKEN_TTL_SECS", "xyz") };
+        let result = Config::load(None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid refresh token TTL"));
+        clear_all_ob_env_vars();
+
+        // -- OB_SECURITY__RULES_PATH --
+        unsafe { std::env::set_var("OB_SECURITY__RULES_PATH", "/etc/rules.ob") };
+        let config = Config::load(None).unwrap();
+        assert_eq!(config.security.rules_path, "/etc/rules.ob");
+        clear_all_ob_env_vars();
+
+        // -- OB_CLUSTER__ENABLED = "true" --
+        unsafe { std::env::set_var("OB_CLUSTER__ENABLED", "true") };
+        let config = Config::load(None).unwrap();
+        assert!(config.cluster.enabled);
+        clear_all_ob_env_vars();
+
+        // -- OB_CLUSTER__ENABLED = "1" --
+        unsafe { std::env::set_var("OB_CLUSTER__ENABLED", "1") };
+        let config = Config::load(None).unwrap();
+        assert!(config.cluster.enabled);
+        clear_all_ob_env_vars();
+
+        // -- OB_CLUSTER__ENABLED = "false" --
+        unsafe { std::env::set_var("OB_CLUSTER__ENABLED", "false") };
+        let config = Config::load(None).unwrap();
+        assert!(!config.cluster.enabled);
+        clear_all_ob_env_vars();
+
+        // -- OB_CLUSTER__NATS_URL --
+        unsafe { std::env::set_var("OB_CLUSTER__NATS_URL", "nats://prod:4222") };
+        let config = Config::load(None).unwrap();
+        assert_eq!(config.cluster.nats_url, "nats://prod:4222");
+        clear_all_ob_env_vars();
+
+        // -- OB_CLUSTER__NODE_ID --
+        unsafe { std::env::set_var("OB_CLUSTER__NODE_ID", "node-42") };
+        let config = Config::load(None).unwrap();
+        assert_eq!(config.cluster.node_id.as_deref(), Some("node-42"));
+        clear_all_ob_env_vars();
     }
 }

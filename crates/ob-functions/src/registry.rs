@@ -257,4 +257,228 @@ mod tests {
         reg.unregister("on_product_create").unwrap();
         assert_eq!(reg.count(), 0);
     }
+
+    fn make_wasm() -> Vec<u8> {
+        wat::parse_str(
+            r#"(module
+                (memory (export "memory") 1)
+                (func (export "alloc") (param i32) (result i32) i32.const 0)
+                (func (export "handle") (param i32 i32) (result i64) i64.const 0)
+            )"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_find_http_trigger_match() {
+        let reg = make_registry();
+        let wasm = make_wasm();
+        reg.register(
+            "api_hello",
+            &wasm,
+            vec![TriggerType::Http {
+                method: "GET".into(),
+                path: "/api/hello".into(),
+            }],
+            None,
+        )
+        .unwrap();
+
+        let found = reg.find_http_trigger("GET", "/api/hello");
+        assert_eq!(found, Some("api_hello".to_string()));
+
+        // Non-matching method
+        assert!(reg.find_http_trigger("POST", "/api/hello").is_none());
+        // Non-matching path
+        assert!(reg.find_http_trigger("GET", "/api/bye").is_none());
+    }
+
+    #[test]
+    fn test_find_cron_triggers_empty() {
+        let reg = make_registry();
+        assert!(reg.find_cron_triggers().is_empty());
+    }
+
+    #[test]
+    fn test_find_cron_triggers_match() {
+        let reg = make_registry();
+        let wasm = make_wasm();
+        reg.register(
+            "nightly_job",
+            &wasm,
+            vec![TriggerType::Cron {
+                schedule: "0 0 * * *".into(),
+            }],
+            Some("Runs at midnight".into()),
+        )
+        .unwrap();
+
+        let crons = reg.find_cron_triggers();
+        assert_eq!(crons.len(), 1);
+        assert_eq!(crons[0].0, "nightly_job");
+        assert_eq!(crons[0].1, "0 0 * * *");
+    }
+
+    #[test]
+    fn test_get_module_existing() {
+        let reg = make_registry();
+        let wasm = make_wasm();
+        reg.register("my_func", &wasm, vec![], None).unwrap();
+
+        let module = reg.get_module("my_func");
+        assert!(module.is_ok());
+    }
+
+    #[test]
+    fn test_get_module_nonexistent() {
+        let reg = make_registry();
+        assert!(reg.get_module("nope").is_err());
+    }
+
+    #[test]
+    fn test_get_meta_existing() {
+        let reg = make_registry();
+        let wasm = make_wasm();
+        reg.register(
+            "my_func",
+            &wasm,
+            vec![TriggerType::Cron {
+                schedule: "*/5 * * * *".into(),
+            }],
+            Some("A test function".into()),
+        )
+        .unwrap();
+
+        let meta = reg.get_meta("my_func").unwrap();
+        assert_eq!(meta.name, "my_func");
+        assert_eq!(meta.description, Some("A test function".to_string()));
+        assert_eq!(meta.triggers.len(), 1);
+        assert_eq!(meta.wasm_size, wasm.len() as u64);
+        assert!(!meta.created_at.is_empty());
+        assert!(!meta.updated_at.is_empty());
+    }
+
+    #[test]
+    fn test_register_multiple_triggers() {
+        let reg = make_registry();
+        let wasm = make_wasm();
+        let triggers = vec![
+            TriggerType::Http {
+                method: "POST".into(),
+                path: "/webhook".into(),
+            },
+            TriggerType::Database {
+                collection: "orders".into(),
+                event: DbEvent::Create,
+            },
+            TriggerType::Cron {
+                schedule: "0 */6 * * *".into(),
+            },
+        ];
+
+        let meta = reg
+            .register("multi_trigger", &wasm, triggers, None)
+            .unwrap();
+        assert_eq!(meta.triggers.len(), 3);
+
+        // Should be found by each trigger type
+        assert_eq!(
+            reg.find_http_trigger("POST", "/webhook"),
+            Some("multi_trigger".to_string())
+        );
+        assert_eq!(
+            reg.find_db_triggers("orders", &DbEvent::Create),
+            vec!["multi_trigger".to_string()]
+        );
+        let crons = reg.find_cron_triggers();
+        assert_eq!(crons.len(), 1);
+        assert_eq!(crons[0].0, "multi_trigger");
+    }
+
+    #[test]
+    fn test_runtime_accessor() {
+        let reg = make_registry();
+        // Just verify runtime() returns without panicking
+        let _runtime = reg.runtime();
+    }
+
+    #[test]
+    fn test_function_meta_serde() {
+        let meta = FunctionMeta {
+            name: "test_fn".to_string(),
+            triggers: vec![
+                TriggerType::Http {
+                    method: "GET".into(),
+                    path: "/test".into(),
+                },
+                TriggerType::Database {
+                    collection: "items".into(),
+                    event: DbEvent::Update,
+                },
+                TriggerType::Cron {
+                    schedule: "0 0 * * *".into(),
+                },
+            ],
+            description: Some("A test function".into()),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            wasm_size: 1234,
+        };
+
+        let json = serde_json::to_string(&meta).unwrap();
+        let deserialized: FunctionMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.name, "test_fn");
+        assert_eq!(deserialized.triggers.len(), 3);
+        assert_eq!(deserialized.description, Some("A test function".to_string()));
+        assert_eq!(deserialized.wasm_size, 1234);
+    }
+
+    #[test]
+    fn test_trigger_type_serde() {
+        let http = TriggerType::Http {
+            method: "POST".into(),
+            path: "/api".into(),
+        };
+        let json = serde_json::to_string(&http).unwrap();
+        let back: TriggerType = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, http);
+
+        let db = TriggerType::Database {
+            collection: "users".into(),
+            event: DbEvent::Delete,
+        };
+        let json = serde_json::to_string(&db).unwrap();
+        let back: TriggerType = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, db);
+
+        let cron = TriggerType::Cron {
+            schedule: "*/10 * * * *".into(),
+        };
+        let json = serde_json::to_string(&cron).unwrap();
+        let back: TriggerType = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, cron);
+    }
+
+    #[test]
+    fn test_db_event_serde() {
+        for event in [DbEvent::Create, DbEvent::Update, DbEvent::Delete] {
+            let json = serde_json::to_string(&event).unwrap();
+            let back: DbEvent = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, event);
+        }
+    }
+
+    #[test]
+    fn test_list_with_registered_functions() {
+        let reg = make_registry();
+        let wasm = make_wasm();
+        reg.register("fn_a", &wasm, vec![], None).unwrap();
+        reg.register("fn_b", &wasm, vec![], Some("B".into())).unwrap();
+
+        let list = reg.list();
+        assert_eq!(list.len(), 2);
+        let names: Vec<String> = list.iter().map(|m| m.name.clone()).collect();
+        assert!(names.contains(&"fn_a".to_string()));
+        assert!(names.contains(&"fn_b".to_string()));
+    }
 }

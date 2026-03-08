@@ -51,10 +51,62 @@ pub async fn serve(config: Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    fn make_state() -> AppState {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            endpoint = "localhost:8000"
+            "#,
+        )
+        .unwrap();
+        AppState::new(config)
+    }
 
     #[tokio::test]
     async fn test_health_check() {
         let result = health_check().await;
         assert_eq!(result, "ok");
+    }
+
+    #[tokio::test]
+    async fn test_router_health_endpoint() {
+        let app = build_router(make_state());
+        let req = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&bytes[..], b"ok");
+    }
+
+    #[tokio::test]
+    async fn test_router_unknown_route_404() {
+        let app = build_router(make_state());
+        let req = Request::builder()
+            .uri("/nonexistent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_router_health_post_method_not_allowed() {
+        let app = build_router(make_state());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 }

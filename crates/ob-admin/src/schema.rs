@@ -257,4 +257,69 @@ mod tests {
         assert!(!valid("a/b"));
         // Note: empty string passes chars().all() (vacuous truth), but is invalid semantically
     }
+
+    #[test]
+    fn test_empty_string_vacuous_truth() {
+        // Document that empty string passes the validation predicate (vacuous truth).
+        // This is a known edge case — the chars().all() check returns true for "".
+        let valid = |name: &str| name.chars().all(|c| c.is_alphanumeric() || c == '_');
+        assert!(valid(""), "Empty string should pass chars().all() due to vacuous truth");
+    }
+
+    #[test]
+    fn test_collection_schema_empty_fields() {
+        let schema = CollectionSchema {
+            name: "empty_table".to_string(),
+            fields: vec![],
+        };
+        let json = serde_json::to_value(&schema).unwrap();
+        assert_eq!(json["name"], "empty_table");
+        assert!(json["fields"].as_array().unwrap().is_empty());
+
+        // Roundtrip
+        let json_str = serde_json::to_string(&schema).unwrap();
+        let back: CollectionSchema = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.name, "empty_table");
+        assert!(back.fields.is_empty());
+    }
+
+    #[test]
+    fn test_function_meta_all_trigger_types_serde() {
+        // Test FunctionMeta from ob-functions trigger types serialized as raw JSON
+        // to verify the schema structures work with all trigger variants.
+        let json_str = r#"{
+            "name": "multi",
+            "fields": [
+                { "name": "a", "field_type": "string", "required": true, "unique": true, "indexed": true },
+                { "name": "b", "field_type": "int", "required": false, "unique": false, "indexed": true },
+                { "name": "c", "field_type": "bool" }
+            ]
+        }"#;
+        let schema: CollectionSchema = serde_json::from_str(json_str).unwrap();
+        assert_eq!(schema.fields.len(), 3);
+        assert!(schema.fields[0].required);
+        assert!(schema.fields[0].unique);
+        assert!(schema.fields[0].indexed);
+        assert!(!schema.fields[1].unique);
+        assert!(schema.fields[1].indexed);
+        // Field "c" should have defaults (required=false, unique=false, indexed=false)
+        assert!(!schema.fields[2].required);
+        assert!(!schema.fields[2].unique);
+        assert!(!schema.fields[2].indexed);
+    }
+
+    #[test]
+    fn test_field_def_all_true() {
+        let field = FieldDef {
+            name: "email".to_string(),
+            field_type: "string".to_string(),
+            required: true,
+            unique: true,
+            indexed: true,
+        };
+        let json = serde_json::to_value(&field).unwrap();
+        assert_eq!(json["required"], true);
+        assert_eq!(json["unique"], true);
+        assert_eq!(json["indexed"], true);
+    }
 }

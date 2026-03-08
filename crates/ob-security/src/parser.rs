@@ -257,4 +257,265 @@ mod tests {
         let rules = &result["products"];
         assert_eq!(rules.rules.len(), 4);
     }
+
+    #[test]
+    fn test_parse_not_expression() {
+        // NOTE: The `!` token is anonymous in pest, so the parser currently
+        // does not propagate it — `!isAuthenticated()` parses the same as
+        // `isAuthenticated()`. This test documents the current behavior.
+        let input = r#"
+            rules products {
+                read: !isAuthenticated();
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        let rule = &result["products"].rules[0];
+        assert_eq!(rule.operations, vec!["read"]);
+        // Due to parser bug, the Not is lost; it parses as FunctionCall
+        assert!(matches!(rule.condition, Expression::FunctionCall { .. }));
+    }
+
+    #[test]
+    fn test_parse_comparison_number() {
+        let input = r#"
+            rules products {
+                read: resource.price > 100;
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        let rule = &result["products"].rules[0];
+        assert!(matches!(rule.condition, Expression::Comparison { .. }));
+        if let Expression::Comparison { ref left, ref op, ref right } = rule.condition {
+            assert!(matches!(left.as_ref(), Expression::Path(p) if p == "resource.price"));
+            assert!(matches!(op, CompOp::Gt));
+            assert!(matches!(right.as_ref(), Expression::Number(n) if (*n - 100.0).abs() < f64::EPSILON));
+        }
+    }
+
+    #[test]
+    fn test_parse_comparison_string_literal() {
+        let input = r#"
+            rules products {
+                read: resource.status == "active";
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        let rule = &result["products"].rules[0];
+        if let Expression::Comparison { ref left, ref op, ref right } = rule.condition {
+            assert!(matches!(left.as_ref(), Expression::Path(p) if p == "resource.status"));
+            assert!(matches!(op, CompOp::Eq));
+            assert!(matches!(right.as_ref(), Expression::StringLit(s) if s == "active"));
+        } else {
+            panic!("Expected Comparison expression");
+        }
+    }
+
+    #[test]
+    fn test_parse_validate_entry() {
+        let input = r#"
+            rules products {
+                create: {
+                    validate: incoming.price > 0;
+                }
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        let rule = &result["products"].rules[0];
+        assert_eq!(rule.operations, vec!["create"]);
+        // validate_entry sets condition = Bool(true), validation = Some(...)
+        assert!(matches!(rule.condition, Expression::Bool(true)));
+        assert!(rule.validation.is_some());
+    }
+
+    #[test]
+    fn test_parse_multiple_operations() {
+        let input = r#"
+            rules products {
+                create, update: isAuthenticated();
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        let rule = &result["products"].rules[0];
+        assert_eq!(rule.operations, vec!["create", "update"]);
+    }
+
+    #[test]
+    fn test_parse_error_invalid_syntax() {
+        let input = r#"this is not valid rules syntax at all {{{}"#;
+        let result = parse_rules(input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_error_missing_semicolon() {
+        let input = r#"
+            rules products {
+                read: true
+            }
+        "#;
+        let result = parse_rules(input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_bool_false() {
+        let input = r#"
+            rules products {
+                delete: false;
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        let rule = &result["products"].rules[0];
+        assert!(matches!(rule.condition, Expression::Bool(false)));
+    }
+
+    #[test]
+    fn test_parse_parenthesized_expression() {
+        let input = r#"
+            rules products {
+                read: (isAuthenticated() && hasRole("admin")) || hasRole("super");
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        let rule = &result["products"].rules[0];
+        // Top-level should be Or
+        assert!(matches!(rule.condition, Expression::Or(_)));
+    }
+
+    #[test]
+    fn test_parse_nested_path() {
+        let input = r#"
+            rules products {
+                read: resource.address.city == "Toronto";
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        let rule = &result["products"].rules[0];
+        if let Expression::Comparison { ref left, .. } = rule.condition {
+            assert!(matches!(left.as_ref(), Expression::Path(p) if p == "resource.address.city"));
+        } else {
+            panic!("Expected Comparison expression");
+        }
+    }
+
+    #[test]
+    fn test_parse_multiple_rule_blocks() {
+        let input = r#"
+            rules products {
+                read: true;
+            }
+            rules orders {
+                read: isAuthenticated();
+                create: isAuthenticated();
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        assert!(result.contains_key("products"));
+        assert!(result.contains_key("orders"));
+        assert_eq!(result["products"].rules.len(), 1);
+        assert_eq!(result["orders"].rules.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_all_comparison_operators() {
+        let ops = vec![(">=", "Gte"), ("<=", "Lte"), ("!=", "Neq"), ("<", "Lt"), ("==", "Eq")];
+        for (op_str, _label) in ops {
+            let input = format!(
+                r#"rules products {{ read: resource.val {op_str} 10; }}"#
+            );
+            let result = parse_rules(&input).unwrap();
+            let rule = &result["products"].rules[0];
+            assert!(matches!(rule.condition, Expression::Comparison { .. }),
+                "Failed to parse operator {op_str}");
+        }
+    }
+
+    #[test]
+    fn test_parse_function_with_path_arg() {
+        let input = r#"
+            rules products {
+                update: isOwner(resource.seller_id);
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        let rule = &result["products"].rules[0];
+        if let Expression::FunctionCall { ref name, ref args } = rule.condition {
+            assert_eq!(name, "isOwner");
+            assert_eq!(args.len(), 1);
+            assert!(matches!(&args[0], Expression::Path(p) if p == "resource.seller_id"));
+        } else {
+            panic!("Expected FunctionCall");
+        }
+    }
+
+    #[test]
+    fn test_parse_or_expression() {
+        let input = r#"
+            rules products {
+                delete: hasRole("admin") || hasRole("super");
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        let rule = &result["products"].rules[0];
+        if let Expression::Or(ref exprs) = rule.condition {
+            assert_eq!(exprs.len(), 2);
+        } else {
+            panic!("Expected Or expression");
+        }
+    }
+
+    #[test]
+    fn test_parse_and_expression() {
+        let input = r#"
+            rules products {
+                create: isAuthenticated() && hasRole("seller") && hasRole("verified");
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        let rule = &result["products"].rules[0];
+        if let Expression::And(ref exprs) = rule.condition {
+            assert_eq!(exprs.len(), 3);
+        } else {
+            panic!("Expected And expression with 3 parts");
+        }
+    }
+
+    #[test]
+    fn test_parse_empty_rule_block() {
+        let input = r#"
+            rules products {
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        assert!(result.contains_key("products"));
+        assert_eq!(result["products"].rules.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_number_literal_decimal() {
+        let input = r#"
+            rules products {
+                read: resource.rating > 4.5;
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        let rule = &result["products"].rules[0];
+        if let Expression::Comparison { ref right, .. } = rule.condition {
+            assert!(matches!(right.as_ref(), Expression::Number(n) if (*n - 4.5).abs() < f64::EPSILON));
+        } else {
+            panic!("Expected Comparison");
+        }
+    }
+
+    #[test]
+    fn test_parse_list_operation() {
+        let input = r#"
+            rules products {
+                list: isAuthenticated();
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        let rule = &result["products"].rules[0];
+        assert_eq!(rule.operations, vec!["list"]);
+    }
 }

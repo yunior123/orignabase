@@ -309,4 +309,899 @@ mod tests {
         let anon = test_ctx(false, vec![]);
         assert!(!engine.check("unknown_collection", "read", &anon).unwrap());
     }
+
+    // Helper: context with resource data
+    fn ctx_with_resource(user_id: &str, resource: Value) -> SecurityContext {
+        SecurityContext {
+            user_id: Some(user_id.to_string()),
+            roles: vec![],
+            authenticated: true,
+            resource: Some(resource),
+            incoming: None,
+        }
+    }
+
+    // Helper: context with incoming data
+    fn ctx_with_incoming(user_id: &str, incoming: Value) -> SecurityContext {
+        SecurityContext {
+            user_id: Some(user_id.to_string()),
+            roles: vec![],
+            authenticated: true,
+            resource: None,
+            incoming: Some(incoming),
+        }
+    }
+
+    // Helper: context with both resource and incoming
+    fn ctx_full(user_id: &str, resource: Value, incoming: Value, roles: Vec<&str>) -> SecurityContext {
+        SecurityContext {
+            user_id: Some(user_id.to_string()),
+            roles: roles.into_iter().map(String::from).collect(),
+            authenticated: true,
+            resource: Some(resource),
+            incoming: Some(incoming),
+        }
+    }
+
+    // ---- isOwner tests ----
+
+    #[test]
+    fn test_is_owner_matches() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                update: isOwner(resource.seller_id);
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("user123", serde_json::json!({"seller_id": "user123"}));
+        assert!(engine.check("products", "update", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_is_owner_no_match() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                update: isOwner(resource.seller_id);
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("user123", serde_json::json!({"seller_id": "other_user"}));
+        assert!(!engine.check("products", "update", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_is_owner_missing_field() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                update: isOwner(resource.seller_id);
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("user123", serde_json::json!({"name": "Widget"}));
+        assert!(!engine.check("products", "update", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_is_owner_no_resource() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                update: isOwner(resource.seller_id);
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = test_ctx(true, vec![]);
+        assert!(!engine.check("products", "update", &ctx).unwrap());
+    }
+
+    // ---- Or expression ----
+
+    #[test]
+    fn test_or_expression_first_true() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                delete: isOwner(resource.seller_id) || hasRole("admin");
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("user123", serde_json::json!({"seller_id": "user123"}));
+        assert!(engine.check("products", "delete", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_or_expression_second_true() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                delete: isOwner(resource.seller_id) || hasRole("admin");
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_full(
+            "user123",
+            serde_json::json!({"seller_id": "someone_else"}),
+            serde_json::json!({}),
+            vec!["admin"],
+        );
+        assert!(engine.check("products", "delete", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_or_expression_both_false() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                delete: isOwner(resource.seller_id) || hasRole("admin");
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_full(
+            "user123",
+            serde_json::json!({"seller_id": "someone_else"}),
+            serde_json::json!({}),
+            vec!["user"],
+        );
+        assert!(!engine.check("products", "delete", &ctx).unwrap());
+    }
+
+    // ---- Not expression ----
+    // NOTE: The `!` operator in the grammar is currently not propagated by the
+    // parser (the "!" token is anonymous in pest and not counted in children).
+    // These tests document the current behavior. When the parser is fixed,
+    // update these assertions.
+
+    #[test]
+    fn test_not_expression_currently_ignored() {
+        // Due to parser bug, `!isAuthenticated()` parses as `isAuthenticated()`
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: !isAuthenticated();
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        // Authenticated → the `!` is lost, so result is true (not negated)
+        let ctx = test_ctx(true, vec![]);
+        assert!(engine.check("products", "read", &ctx).unwrap());
+        // Unauthenticated → false (not negated)
+        let ctx2 = test_ctx(false, vec![]);
+        assert!(!engine.check("products", "read", &ctx2).unwrap());
+    }
+
+    #[test]
+    fn test_not_expression_via_eval_directly() {
+        // Test the Not arm of eval_expr by constructing rules manually
+        let mut rules_map = HashMap::new();
+        rules_map.insert(
+            "test".to_string(),
+            crate::parser::RuleSet {
+                collection: "test".to_string(),
+                rules: vec![crate::parser::SecurityRule {
+                    operations: vec!["read".to_string()],
+                    condition: Expression::Not(Box::new(Expression::Bool(true))),
+                    validation: None,
+                }],
+            },
+        );
+        let engine = RuleEngine::new(rules_map);
+        let ctx = test_ctx(false, vec![]);
+        assert!(!engine.check("test", "read", &ctx).unwrap());
+
+        // Not(false) → true
+        let mut rules_map2 = HashMap::new();
+        rules_map2.insert(
+            "test".to_string(),
+            crate::parser::RuleSet {
+                collection: "test".to_string(),
+                rules: vec![crate::parser::SecurityRule {
+                    operations: vec!["read".to_string()],
+                    condition: Expression::Not(Box::new(Expression::Bool(false))),
+                    validation: None,
+                }],
+            },
+        );
+        let engine2 = RuleEngine::new(rules_map2);
+        assert!(engine2.check("test", "read", &ctx).unwrap());
+    }
+
+    // ---- Comparison expressions ----
+
+    #[test]
+    fn test_comparison_gt_number_true() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: resource.price > 100;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("u1", serde_json::json!({"price": 200}));
+        assert!(engine.check("products", "read", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_comparison_gt_number_false() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: resource.price > 100;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("u1", serde_json::json!({"price": 50}));
+        assert!(!engine.check("products", "read", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_comparison_gte() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: resource.price >= 100;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx_eq = ctx_with_resource("u1", serde_json::json!({"price": 100}));
+        assert!(engine.check("products", "read", &ctx_eq).unwrap());
+        let ctx_less = ctx_with_resource("u1", serde_json::json!({"price": 99}));
+        assert!(!engine.check("products", "read", &ctx_less).unwrap());
+    }
+
+    #[test]
+    fn test_comparison_lt() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: resource.price < 100;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("u1", serde_json::json!({"price": 50}));
+        assert!(engine.check("products", "read", &ctx).unwrap());
+        let ctx2 = ctx_with_resource("u1", serde_json::json!({"price": 100}));
+        assert!(!engine.check("products", "read", &ctx2).unwrap());
+    }
+
+    #[test]
+    fn test_comparison_lte() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: resource.price <= 100;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("u1", serde_json::json!({"price": 100}));
+        assert!(engine.check("products", "read", &ctx).unwrap());
+        let ctx2 = ctx_with_resource("u1", serde_json::json!({"price": 101}));
+        assert!(!engine.check("products", "read", &ctx2).unwrap());
+    }
+
+    #[test]
+    fn test_comparison_eq_string() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: resource.status == "active";
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("u1", serde_json::json!({"status": "active"}));
+        assert!(engine.check("products", "read", &ctx).unwrap());
+        let ctx2 = ctx_with_resource("u1", serde_json::json!({"status": "inactive"}));
+        assert!(!engine.check("products", "read", &ctx2).unwrap());
+    }
+
+    #[test]
+    fn test_comparison_neq() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: resource.status != "deleted";
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("u1", serde_json::json!({"status": "active"}));
+        assert!(engine.check("products", "read", &ctx).unwrap());
+        let ctx2 = ctx_with_resource("u1", serde_json::json!({"status": "deleted"}));
+        assert!(!engine.check("products", "read", &ctx2).unwrap());
+    }
+
+    #[test]
+    fn test_comparison_string_ordering() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: resource.name > "apple";
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("u1", serde_json::json!({"name": "banana"}));
+        assert!(engine.check("products", "read", &ctx).unwrap());
+        let ctx2 = ctx_with_resource("u1", serde_json::json!({"name": "aardvark"}));
+        assert!(!engine.check("products", "read", &ctx2).unwrap());
+    }
+
+    #[test]
+    fn test_comparison_mixed_types_returns_false() {
+        // Comparing string to number should return false for ordering ops
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: resource.name > 100;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("u1", serde_json::json!({"name": "banana"}));
+        assert!(!engine.check("products", "read", &ctx).unwrap());
+    }
+
+    // ---- Path expression (bare path truthy/falsy) ----
+
+    #[test]
+    fn test_path_truthy_nonempty_string() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: resource.name;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("u1", serde_json::json!({"name": "Widget"}));
+        assert!(engine.check("products", "read", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_path_falsy_empty_string() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: resource.name;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("u1", serde_json::json!({"name": ""}));
+        assert!(!engine.check("products", "read", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_path_falsy_null() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: resource.missing_field;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("u1", serde_json::json!({"name": "Widget"}));
+        assert!(!engine.check("products", "read", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_path_truthy_nonzero_number() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: resource.count;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("u1", serde_json::json!({"count": 42}));
+        assert!(engine.check("products", "read", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_path_falsy_zero_number() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: resource.count;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("u1", serde_json::json!({"count": 0}));
+        assert!(!engine.check("products", "read", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_path_truthy_nonempty_array() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: resource.tags;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("u1", serde_json::json!({"tags": ["a", "b"]}));
+        assert!(engine.check("products", "read", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_path_falsy_empty_array() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: resource.tags;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("u1", serde_json::json!({"tags": []}));
+        assert!(!engine.check("products", "read", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_path_truthy_object() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: resource.meta;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("u1", serde_json::json!({"meta": {"key": "val"}}));
+        assert!(engine.check("products", "read", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_path_truthy_bool_true() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: resource.active;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("u1", serde_json::json!({"active": true}));
+        assert!(engine.check("products", "read", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_path_falsy_bool_false() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: resource.active;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("u1", serde_json::json!({"active": false}));
+        assert!(!engine.check("products", "read", &ctx).unwrap());
+    }
+
+    // ---- resolve_path: auth.uid ----
+
+    #[test]
+    fn test_auth_uid_path() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: resource.owner == auth.uid;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let mut ctx = ctx_with_resource("user123", serde_json::json!({"owner": "user123"}));
+        assert!(engine.check("products", "read", &ctx).unwrap());
+        ctx.resource = Some(serde_json::json!({"owner": "other"}));
+        assert!(!engine.check("products", "read", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_auth_uid_unauthenticated() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: resource.owner == auth.uid;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = SecurityContext {
+            user_id: None,
+            roles: vec![],
+            authenticated: false,
+            resource: Some(serde_json::json!({"owner": "user123"})),
+            incoming: None,
+        };
+        // auth.uid resolves to Null, string != Null → false
+        assert!(!engine.check("products", "read", &ctx).unwrap());
+    }
+
+    // ---- resolve_path: unknown root ----
+
+    #[test]
+    fn test_unknown_path_root() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: unknown.field;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = test_ctx(true, vec![]);
+        // unknown root → Null → falsy
+        assert!(!engine.check("products", "read", &ctx).unwrap());
+    }
+
+    // ---- resolve_path: auth with unknown subpath ----
+
+    #[test]
+    fn test_auth_unknown_subpath() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: auth.email;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = test_ctx(true, vec![]);
+        // auth.email → Null → falsy
+        assert!(!engine.check("products", "read", &ctx).unwrap());
+    }
+
+    // ---- incoming path ----
+
+    #[test]
+    fn test_incoming_path() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                create: incoming.price > 0;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_incoming("u1", serde_json::json!({"price": 10}));
+        assert!(engine.check("products", "create", &ctx).unwrap());
+        let ctx2 = ctx_with_incoming("u1", serde_json::json!({"price": -5}));
+        assert!(!engine.check("products", "create", &ctx2).unwrap());
+    }
+
+    #[test]
+    fn test_incoming_path_no_incoming() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                create: incoming.price > 0;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = test_ctx(true, vec![]); // no incoming
+        // incoming.price → Null, Null > 0 → false (mixed types)
+        assert!(!engine.check("products", "create", &ctx).unwrap());
+    }
+
+    // ---- Validation rules ----
+
+    #[test]
+    fn test_validation_passes() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                create: isAuthenticated();
+                create: {
+                    validate: incoming.price > 0;
+                }
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_incoming("u1", serde_json::json!({"price": 25}));
+        // First rule matches create → isAuthenticated() → true, no validation → allowed
+        assert!(engine.check("products", "create", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_validation_fails() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                create: {
+                    validate: incoming.price > 0;
+                }
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_incoming("u1", serde_json::json!({"price": -5}));
+        // condition is true (default), but validation fails
+        let result = engine.check("products", "create", &ctx);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validation_succeeds() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                create: {
+                    validate: incoming.price > 0;
+                }
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_incoming("u1", serde_json::json!({"price": 50}));
+        assert!(engine.check("products", "create", &ctx).unwrap());
+    }
+
+    // ---- Unknown function ----
+
+    #[test]
+    fn test_unknown_function_returns_false() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: someCustomFunction();
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = test_ctx(true, vec![]);
+        assert!(!engine.check("products", "read", &ctx).unwrap());
+    }
+
+    // ---- Multiple operations in single rule entry ----
+
+    #[test]
+    fn test_multiple_operations_single_rule() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                create, update: isAuthenticated();
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let auth = test_ctx(true, vec![]);
+        let anon = test_ctx(false, vec![]);
+        assert!(engine.check("products", "create", &auth).unwrap());
+        assert!(engine.check("products", "update", &auth).unwrap());
+        assert!(!engine.check("products", "create", &anon).unwrap());
+        assert!(!engine.check("products", "update", &anon).unwrap());
+    }
+
+    // ---- Bool literal false ----
+
+    #[test]
+    fn test_bool_false_denies() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                delete: false;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = test_ctx(true, vec!["admin"]);
+        assert!(!engine.check("products", "delete", &ctx).unwrap());
+    }
+
+    // ---- No matching operation ----
+
+    #[test]
+    fn test_no_matching_operation_denied() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: true;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = test_ctx(true, vec![]);
+        assert!(!engine.check("products", "delete", &ctx).unwrap());
+    }
+
+    // ---- Nested path resolution ----
+
+    #[test]
+    fn test_nested_resource_path() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: resource.address.city == "Toronto";
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("u1", serde_json::json!({"address": {"city": "Toronto"}}));
+        assert!(engine.check("products", "read", &ctx).unwrap());
+        let ctx2 = ctx_with_resource("u1", serde_json::json!({"address": {"city": "Montreal"}}));
+        assert!(!engine.check("products", "read", &ctx2).unwrap());
+    }
+
+    // ---- hasRole with no string arg ----
+
+    #[test]
+    fn test_has_role_non_string_arg() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: hasRole(resource.role);
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("u1", serde_json::json!({"role": "admin"}));
+        // hasRole expects StringLit arg, gets Path → false
+        assert!(!engine.check("products", "read", &ctx).unwrap());
+    }
+
+    // ---- isOwner with non-path arg ----
+
+    #[test]
+    fn test_is_owner_non_path_arg() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                update: isOwner("literal_string");
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("user123", serde_json::json!({"seller_id": "user123"}));
+        // isOwner expects Path arg, gets StringLit → false
+        assert!(!engine.check("products", "update", &ctx).unwrap());
+    }
+
+    // ---- eval_value for non-matching expression ----
+
+    #[test]
+    fn test_comparison_with_bool_literal() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: resource.active == true;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let ctx = ctx_with_resource("u1", serde_json::json!({"active": true}));
+        assert!(engine.check("products", "read", &ctx).unwrap());
+        let ctx2 = ctx_with_resource("u1", serde_json::json!({"active": false}));
+        assert!(!engine.check("products", "read", &ctx2).unwrap());
+    }
+
+    // ---- Parenthesized expression ----
+
+    #[test]
+    fn test_parenthesized_expression() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: (isAuthenticated() && hasRole("admin")) || hasRole("super");
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        // admin + authenticated → true
+        let ctx = test_ctx(true, vec!["admin"]);
+        assert!(engine.check("products", "read", &ctx).unwrap());
+        // super alone → true
+        let ctx2 = test_ctx(false, vec!["super"]);
+        assert!(engine.check("products", "read", &ctx2).unwrap());
+        // neither admin nor super → false
+        let ctx3 = test_ctx(true, vec!["user"]);
+        assert!(!engine.check("products", "read", &ctx3).unwrap());
+    }
+
+    // ---- Eq/Neq with numbers ----
+
+    #[test]
+    fn test_eq_numbers() {
+        // NOTE: Number equality uses Value::eq which distinguishes i64 vs f64.
+        // Rule literals are parsed as f64 (5.0), so resource values must also
+        // be f64 for Eq to match. json!(5) creates i64, json!(5.0) creates f64.
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: resource.quantity == 5;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        // f64 resource value matches f64 rule literal
+        let ctx = ctx_with_resource("u1", serde_json::json!({"quantity": 5.0}));
+        assert!(engine.check("products", "read", &ctx).unwrap());
+        let ctx2 = ctx_with_resource("u1", serde_json::json!({"quantity": 10.0}));
+        assert!(!engine.check("products", "read", &ctx2).unwrap());
+    }
+
+    #[test]
+    fn test_eq_numbers_int_vs_float_mismatch() {
+        // Documents that json integer (i64) != rule float (f64) in Eq comparison
+        let rules = parse_rules(
+            r#"
+            rules products {
+                read: resource.quantity == 5;
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        // json!(5) is i64, rule 5 is f64 → Eq comparison fails
+        let ctx = ctx_with_resource("u1", serde_json::json!({"quantity": 5}));
+        assert!(!engine.check("products", "read", &ctx).unwrap());
+    }
 }

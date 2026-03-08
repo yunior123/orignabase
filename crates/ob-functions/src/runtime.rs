@@ -179,4 +179,85 @@ mod tests {
         let result = runtime.compile(&wasm);
         assert!(result.is_ok());
     }
+
+    /// WAT module that echoes input back: alloc returns fixed offset 1024,
+    /// process returns (ptr << 32) | len pointing at the same input data.
+    const ECHO_WAT: &str = r#"(module
+        (memory (export "memory") 1)
+        (func (export "alloc") (param $size i32) (result i32)
+            i32.const 1024
+        )
+        (func (export "process") (param $ptr i32) (param $len i32) (result i64)
+            local.get $ptr
+            i64.extend_i32_u
+            i64.const 32
+            i64.shl
+            local.get $len
+            i64.extend_i32_u
+            i64.or
+        )
+    )"#;
+
+    #[tokio::test]
+    async fn test_execute_echo() {
+        let runtime = WasmRuntime::new(FunctionLimits::default()).unwrap();
+        let wasm = wat::parse_str(ECHO_WAT).unwrap();
+        let module = runtime.compile(&wasm).unwrap();
+        let result = runtime.execute(&module, "process", "hello").await.unwrap();
+        assert_eq!(result, "hello");
+    }
+
+    #[tokio::test]
+    async fn test_execute_empty_input() {
+        let runtime = WasmRuntime::new(FunctionLimits::default()).unwrap();
+        let wasm = wat::parse_str(ECHO_WAT).unwrap();
+        let module = runtime.compile(&wasm).unwrap();
+        let result = runtime.execute(&module, "process", "").await.unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_custom_limits() {
+        let limits = FunctionLimits {
+            max_fuel: 500,
+            max_time_secs: 10,
+        };
+        assert_eq!(limits.max_fuel, 500);
+        assert_eq!(limits.max_time_secs, 10);
+
+        let runtime = WasmRuntime::new(limits).unwrap();
+        assert_eq!(runtime.limits().max_fuel, 500);
+        assert_eq!(runtime.limits().max_time_secs, 10);
+    }
+
+    #[test]
+    fn test_engine_accessor() {
+        let runtime = WasmRuntime::new(FunctionLimits::default()).unwrap();
+        // Just verify engine() returns a reference without panicking
+        let _engine = runtime.engine();
+    }
+
+    #[test]
+    fn test_limits_accessor() {
+        let limits = FunctionLimits {
+            max_fuel: 42,
+            max_time_secs: 7,
+        };
+        let runtime = WasmRuntime::new(limits).unwrap();
+        let got = runtime.limits();
+        assert_eq!(got.max_fuel, 42);
+        assert_eq!(got.max_time_secs, 7);
+    }
+
+    #[tokio::test]
+    async fn test_execute_missing_function() {
+        let runtime = WasmRuntime::new(FunctionLimits::default()).unwrap();
+        let wasm = wat::parse_str(ECHO_WAT).unwrap();
+        let module = runtime.compile(&wasm).unwrap();
+        // "nonexistent" is not exported by the module
+        let result = runtime.execute(&module, "nonexistent", "hello").await;
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("nonexistent"), "Error should mention the missing function name: {err_msg}");
+    }
 }
