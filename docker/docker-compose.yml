@@ -1,24 +1,32 @@
+# OrignaBase Docker Compose
+# Usage:
+#   Dev:     cp .env.dev .env && docker compose up -d
+#   Staging: cp .env.staging .env && docker compose up -d
+#   Prod:    cp .env.prod .env && docker compose up -d
+
 services:
   surrealdb:
     image: surrealdb/surrealdb:v2
-    command: start --user root --pass root rocksdb:/data/database.db
+    command: start --user ${SURREALDB_USER} --pass ${SURREALDB_PASS} rocksdb:/data/database.db
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - surrealdb_data:/data
+    restart: unless-stopped
     deploy:
       resources:
         limits:
-          memory: 256M
+          memory: 512M
 
   meilisearch:
     image: getmeili/meilisearch:v1.12
     ports:
-      - "7700:7700"
+      - "127.0.0.1:7700:7700"
     environment:
-      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-change-me-in-production}
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY}
     volumes:
       - meili_data:/meili_data
+    restart: unless-stopped
     deploy:
       resources:
         limits:
@@ -29,43 +37,49 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
-      OB_DATABASE__ENDPOINT: surrealdb:8000
-      OB_DATABASE__USERNAME: root
-      OB_DATABASE__PASSWORD: root
-      OB_DATABASE__NAMESPACE: orignabase
-      OB_DATABASE__NAME: main
-      OB_AUTH__JWT_SECRET: ${OB_AUTH__JWT_SECRET:-change-me-in-production}
+      OB_HOST: ${OB_HOST}
+      OB_PORT: ${OB_PORT}
+      OB_DATABASE__ENDPOINT: ${OB_DATABASE__ENDPOINT}
+      OB_DATABASE__USERNAME: ${OB_DATABASE__USERNAME}
+      OB_DATABASE__PASSWORD: ${OB_DATABASE__PASSWORD}
+      OB_DATABASE__NAMESPACE: ${OB_DATABASE__NAMESPACE}
+      OB_DATABASE__NAME: ${OB_DATABASE__NAME}
+      OB_AUTH__JWT_SECRET: ${OB_AUTH__JWT_SECRET}
+      OB_AUTH__ACCESS_TOKEN_TTL_SECS: ${OB_AUTH__ACCESS_TOKEN_TTL_SECS}
+      OB_AUTH__REFRESH_TOKEN_TTL_SECS: ${OB_AUTH__REFRESH_TOKEN_TTL_SECS}
+      OB_SECURITY__RULES_PATH: ${OB_SECURITY__RULES_PATH}
     depends_on:
       - surrealdb
       - meilisearch
+    restart: unless-stopped
     deploy:
       resources:
         limits:
           memory: 512M
 
-  # --- Cluster Mode (uncomment to enable multi-node) ---
-  # nats:
-  #   image: nats:2.10
-  #   command: --jetstream --store_dir /data
-  #   ports:
-  #     - "4222:4222"
-  #   volumes:
-  #     - nats_data:/data
-  #   deploy:
-  #     resources:
-  #       limits:
-  #         memory: 128M
-
-  # --- TiKV Mode (uncomment to replace RocksDB with TiKV) ---
-  # To use TiKV instead of embedded RocksDB:
-  # 1. Replace surrealdb command with:
-  #    command: start --user root --pass root tikv://pd:2379
-  # 2. Add TiKV PD + TiKV nodes (see TiKV docs)
-  # 3. Set OB_CLUSTER__ENABLED=true and OB_CLUSTER__NATS_URL=nats://nats:4222
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - /var/www/orignagta:/var/www/orignagta:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - orignabase
+    deploy:
+      resources:
+        limits:
+          memory: 128M
 
 volumes:
   surrealdb_data:
   meili_data:
-  # nats_data:
+  caddy_data:
+  caddy_config:

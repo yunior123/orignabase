@@ -1,0 +1,77 @@
+{
+	email admin@orignagta.ca
+}
+
+(api_security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "accelerometer=(), camera=(), geolocation=(), gyroscope=(), microphone=(), payment=(), usb=()"
+		-Server
+	}
+}
+
+(site_security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Frame-Options "SAMEORIGIN"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "accelerometer=(), camera=(), geolocation=(), gyroscope=(), microphone=(), payment=(), usb=()"
+		-Server
+	}
+}
+
+(cors) {
+	@preflight method OPTIONS
+	handle @preflight {
+		header Access-Control-Allow-Origin "{args[0]}"
+		header Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+		header Access-Control-Allow-Headers "Authorization, Content-Type, Origin, Accept, X-Requested-With"
+		header Access-Control-Allow-Credentials "true"
+		header Access-Control-Max-Age "86400"
+		respond "" 204
+	}
+
+	header {
+		Access-Control-Allow-Origin "{args[0]}"
+		Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+		Access-Control-Allow-Headers "Authorization, Content-Type, Origin, Accept, X-Requested-With"
+		Access-Control-Allow-Credentials "true"
+		Vary "Origin"
+	}
+}
+
+# Production API — api.orignagta.ca (TLS auto via Let's Encrypt)
+api.orignagta.ca {
+	import api_security_headers
+	import cors "https://www.orignagta.ca"
+	encode zstd gzip
+	reverse_proxy orignabase:8080
+}
+
+# Staging API — api-staging.orignagta.ca
+api-staging.orignagta.ca {
+	import api_security_headers
+	import cors "https://staging.orignagta.ca"
+	encode zstd gzip
+	reverse_proxy orignabase:8080
+}
+
+# Production website
+orignagta.ca, www.orignagta.ca {
+	import site_security_headers
+	encode zstd gzip
+	root * /var/www/orignagta
+	try_files {path} {path}/ /index.html
+	file_server
+}
+
+# Dev fallback — direct IP access (HTTP only, no TLS)
+:80 {
+	import api_security_headers
+	encode zstd gzip
+	reverse_proxy orignabase:8080
+}
