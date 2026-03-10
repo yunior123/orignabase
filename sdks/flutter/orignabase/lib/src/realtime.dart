@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:meta/meta.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'client.dart';
@@ -25,6 +26,17 @@ class RealtimeClient {
 
   RealtimeClient(this._client);
 
+  /// Create a RealtimeClient with a pre-connected channel (for testing).
+  @visibleForTesting
+  RealtimeClient.withChannel(this._client, WebSocketChannel channel)
+      : _channel = channel {
+    _listener = _channel!.stream.listen(
+      _handleMessage,
+      onDone: _handleDisconnect,
+      onError: (_) => _handleDisconnect(),
+    );
+  }
+
   /// Connect to the realtime WebSocket endpoint.
   void connect() {
     final wsUrl = _client.url
@@ -39,6 +51,31 @@ class RealtimeClient {
     );
   }
 
+  /// Subscribe to changes on a specific document.
+  ///
+  /// ```dart
+  /// final stream = realtime.subscribeDocument('users', 'user123');
+  /// stream.listen((change) => print('User updated: ${change.document.data}'));
+  /// ```
+  Stream<DocumentChange> subscribeDocument(
+      String collection, String documentId) {
+    final subId =
+        '${collection}_${documentId}_${DateTime.now().millisecondsSinceEpoch}';
+    final controller = StreamController<DocumentChange>.broadcast(
+      onCancel: () => _unsubscribe(subId),
+    );
+    _subscriptions[subId] = controller;
+
+    _channel?.sink.add(jsonEncode({
+      'type': 'subscribe',
+      'id': subId,
+      'collection': collection,
+      'document_id': documentId,
+    }));
+
+    return controller.stream;
+  }
+
   /// Subscribe to changes on a collection.
   Stream<DocumentChange> subscribe(String collection, {String? filter}) {
     final subId = '${collection}_${DateTime.now().millisecondsSinceEpoch}';
@@ -50,7 +87,7 @@ class RealtimeClient {
     // Send subscribe message
     _channel?.sink.add(jsonEncode({
       'type': 'subscribe',
-      'subscription_id': subId,
+      'id': subId,
       'collection': collection,
       if (filter != null) 'filter': filter,
     }));
@@ -59,11 +96,18 @@ class RealtimeClient {
   }
 
   void _unsubscribe(String subId) {
-    _channel?.sink.add(jsonEncode({
-      'type': 'unsubscribe',
-      'subscription_id': subId,
-    }));
-    _subscriptions.remove(subId)?.close();
+    // Guard: don't try to send if we're already disconnecting.
+    final controller = _subscriptions.remove(subId);
+    if (controller == null) return;
+    try {
+      _channel?.sink.add(jsonEncode({
+        'type': 'unsubscribe',
+        'id': subId,
+      }));
+    } catch (_) {
+      // Channel may already be closed during disconnect.
+    }
+    controller.close();
   }
 
   void _handleMessage(dynamic rawMessage) {

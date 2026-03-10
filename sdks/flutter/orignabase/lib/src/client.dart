@@ -1,10 +1,20 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import 'auth.dart';
+import 'batch.dart';
 import 'collection.dart';
+import 'config.dart';
 import 'errors.dart';
+import 'links.dart';
+import 'metrics.dart';
+import 'offline.dart';
+import 'presence.dart';
+import 'push.dart';
+import 'realtime.dart';
 import 'storage.dart';
+import 'vector.dart';
 
 /// Main OrignaBase client. Entry point for all SDK operations.
 ///
@@ -16,30 +26,80 @@ import 'storage.dart';
 class OrignaBase {
   final String url;
   final http.Client _httpClient;
+
+  /// Internal HTTP client — used by storage for direct file operations.
+  http.Client get httpClient => _httpClient;
   late final OrignaBaseAuth auth;
   late final OrignaBaseStorage storage;
+  late final OfflineCache offline;
+  late final OrignaBaseConfig config;
+  late final OrignaBasePresence presence;
+  late final OrignaBaseLinks links;
+  late final OrignaBasePush push;
+  late final OrignaBaseMetrics metrics;
+  late final VectorSearch vectorSearch;
+  RealtimeClient? _realtime;
+
+  /// Shared realtime client, lazily initialized on first use.
+  /// All snapshots() calls should use this instead of creating new connections.
+  RealtimeClient get realtime {
+    if (_realtime == null) {
+      _realtime = RealtimeClient(this);
+      _realtime!.connect();
+    }
+    return _realtime!;
+  }
 
   OrignaBase._({
     required this.url,
     http.Client? httpClient,
+    OfflineStorage? offlineStorage,
   }) : _httpClient = httpClient ?? http.Client() {
     auth = OrignaBaseAuth(this);
     storage = OrignaBaseStorage(this);
+    offline = OfflineCache(storage: offlineStorage)..bindClient(this);
+    config = OrignaBaseConfig(this);
+    presence = OrignaBasePresence(this);
+    links = OrignaBaseLinks(this);
+    push = OrignaBasePush(this);
+    metrics = OrignaBaseMetrics(this);
+    vectorSearch = VectorSearch(this);
   }
 
   /// Initialize the OrignaBase client.
+  ///
+  /// Optionally pass an [OfflineStorage] implementation for persistent
+  /// offline caching (e.g., Hive-based storage). Defaults to in-memory.
   static OrignaBase initialize({
     required String url,
     http.Client? httpClient,
+    OfflineStorage? offlineStorage,
   }) {
-    final trimmedUrl = url.endsWith('/') ? url.substring(0, url.length - 1) : url;
-    return OrignaBase._(url: trimmedUrl, httpClient: httpClient);
+    final trimmedUrl =
+        url.endsWith('/') ? url.substring(0, url.length - 1) : url;
+    return OrignaBase._(
+        url: trimmedUrl,
+        httpClient: httpClient,
+        offlineStorage: offlineStorage);
   }
 
   /// Get a collection reference for Firestore-like queries.
   CollectionRef collection(String name) => CollectionRef(this, name);
 
+  /// Create a write batch for atomic multi-document operations.
+  ///
+  /// ```dart
+  /// final batch = ob.batch();
+  /// batch.create('products', {'title': 'Widget'});
+  /// batch.update('products', 'abc', {'price': 39.99});
+  /// batch.delete('products', 'old-id');
+  /// await batch.commit();
+  /// ```
+  WriteBatch batch() => WriteBatch(this);
+
   /// Execute a GraphQL query.
+  ///
+  /// Throws [OrignaBaseException] if the GraphQL response contains errors.
   Future<Map<String, dynamic>> graphql(
     String query, {
     Map<String, dynamic>? variables,
@@ -48,6 +108,25 @@ class OrignaBase {
     if (variables != null) body['variables'] = variables;
 
     final response = await request('POST', '/graphql', body: body);
+
+    // Check for GraphQL-level errors (returned as 200 with errors array)
+    if (response.containsKey('errors') && response['errors'] is List) {
+      final errors = response['errors'] as List;
+      if (errors.isNotEmpty) {
+        final message =
+            (errors.first as Map<String, dynamic>)['message'] as String? ??
+                'GraphQL error';
+        if (message.contains('Permission denied') ||
+            message.contains('Unauthorized')) {
+          throw ForbiddenException(message, statusCode: 403);
+        }
+        if (message.contains('Not found') || message.contains('not found')) {
+          throw NotFoundException(message, statusCode: 404);
+        }
+        throw OrignaBaseException(message);
+      }
+    }
+
     return response;
   }
 
@@ -70,25 +149,43 @@ class OrignaBase {
     }
 
     final http.Response response;
-    switch (method.toUpperCase()) {
-      case 'GET':
-        response = await _httpClient.get(uri, headers: requestHeaders);
-      case 'POST':
-        response = await _httpClient.post(
-          uri,
-          headers: requestHeaders,
-          body: body != null ? jsonEncode(body) : null,
-        );
-      case 'PUT':
-        response = await _httpClient.put(
-          uri,
-          headers: requestHeaders,
-          body: body != null ? jsonEncode(body) : null,
-        );
-      case 'DELETE':
-        response = await _httpClient.delete(uri, headers: requestHeaders);
-      default:
-        throw OrignaBaseException('Unsupported HTTP method: $method');
+    try {
+      switch (method.toUpperCase()) {
+        case 'GET':
+          response = await _httpClient.get(uri, headers: requestHeaders)
+              .timeout(const Duration(seconds: 30));
+        case 'POST':
+          response = await _httpClient.post(
+            uri,
+            headers: requestHeaders,
+            body: body != null ? jsonEncode(body) : null,
+          ).timeout(const Duration(seconds: 30));
+        case 'PUT':
+          response = await _httpClient.put(
+            uri,
+            headers: requestHeaders,
+            body: body != null ? jsonEncode(body) : null,
+          ).timeout(const Duration(seconds: 30));
+        case 'DELETE':
+          // Use Request directly to support body in DELETE (needed by push, config)
+          final deleteRequest = http.Request('DELETE', uri);
+          deleteRequest.headers.addAll(requestHeaders);
+          if (body != null) deleteRequest.body = jsonEncode(body);
+          final streamedResponse = await _httpClient.send(deleteRequest)
+              .timeout(const Duration(seconds: 30));
+          response = await http.Response.fromStream(streamedResponse);
+        default:
+          throw OrignaBaseException('Unsupported HTTP method: $method');
+      }
+    } on http.ClientException catch (e) {
+      throw NetworkException('HTTP client error: ${e.message}');
+    } on TimeoutException {
+      throw NetworkException('Request timed out after 30 seconds');
+    } on OrignaBaseException {
+      rethrow;
+    } catch (e) {
+      // Catches SocketException (dart:io) and any other transport errors
+      throw NetworkException('Network error: $e');
     }
 
     if (response.statusCode >= 200 && response.statusCode < 300) {
@@ -97,9 +194,16 @@ class OrignaBase {
     }
 
     // Handle errors
-    final errorBody = response.body.isNotEmpty
-        ? jsonDecode(response.body) as Map<String, dynamic>
-        : <String, dynamic>{'message': 'Unknown error'};
+    Map<String, dynamic> errorBody;
+    if (response.body.isEmpty) {
+      errorBody = <String, dynamic>{'message': 'Unknown error'};
+    } else {
+      try {
+        errorBody = jsonDecode(response.body) as Map<String, dynamic>;
+      } on FormatException {
+        errorBody = <String, dynamic>{'message': response.body};
+      }
+    }
     final message = errorBody['message'] as String? ?? 'Request failed';
 
     switch (response.statusCode) {
@@ -109,15 +213,45 @@ class OrignaBase {
         throw ForbiddenException(message, statusCode: 403);
       case 404:
         throw NotFoundException(message, statusCode: 404);
+      case 409:
+        throw ConflictException(message, statusCode: 409);
       case 422:
         throw ValidationException(message, statusCode: 422);
+      case 429:
+        throw RateLimitException(message, statusCode: 429);
       default:
         throw OrignaBaseException(message, statusCode: response.statusCode);
     }
   }
 
-  /// Dispose the HTTP client.
+  /// Full-text search via the OrignaBase search API.
+  Future<Map<String, dynamic>> search(
+    String index,
+    String query, {
+    int? limit,
+    int? offset,
+    String? filter,
+  }) async {
+    final args = <String>[
+      'index: "$index"',
+      'query: "$query"',
+    ];
+    if (limit != null) args.add('limit: $limit');
+    if (offset != null) args.add('offset: $offset');
+    if (filter != null) args.add('filter: "$filter"');
+
+    final response = await graphql(
+      'query { search(${args.join(', ')}) }',
+    );
+    return response['data']?['search'] as Map<String, dynamic>? ?? {};
+  }
+
+  /// Dispose all resources: realtime connection, auth stream, offline cache, and HTTP client.
   void dispose() {
+    _realtime?.disconnect();
+    _realtime = null;
+    auth.dispose();
+    offline.dispose();
     _httpClient.close();
   }
 }

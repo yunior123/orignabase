@@ -33,3 +33,13 @@ class ValidationException extends OrignaBaseException {
 class NetworkException extends OrignaBaseException {
   NetworkException(super.message, {super.statusCode});
 }
+
+/// Conflict error (e.g., document version mismatch, duplicate key).
+class ConflictException extends OrignaBaseException {
+  ConflictException(super.message, {super.statusCode});
+}
+
+/// Rate limit exceeded — too many requests.
+class RateLimitException extends OrignaBaseException {
+  RateLimitException(super.message, {super.statusCode});
+}

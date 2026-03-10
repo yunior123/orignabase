@@ -60,7 +60,9 @@ class AggregateQuery {
       'starts_with' => '~',
       _ => '=',
     };
-    final val = f.value is String ? "'${f.value}'" : '${f.value}';
+    final val = f.value is String
+        ? "'${(f.value as String).replaceAll("'", "''")}'"
+        : '${f.value}';
     return '${f.field} $op $val';
   }
 }
