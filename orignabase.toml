@@ -1,0 +1,32 @@
+# OrignaBase Configuration
+# Environment variables (OB_*) override these values.
+
+host = "0.0.0.0"
+port = 8080
+
+[database]
+endpoint = "localhost:8000"
+namespace = "orignabase"
+name = "main"
+username = "root"
+password = "root"
+
+[auth]
+jwt_secret = "CHANGE_ME_IN_PRODUCTION"
+access_token_ttl_secs = 900       # 15 minutes
+refresh_token_ttl_secs = 604800   # 7 days
+
+[security]
+rules_path = "rules.ob"
+
+# [search]
+# url = "http://localhost:7700"
+# api_key = "change-me-in-production"
+# [search.indexes.products]
+# searchable = ["title", "description"]
+# filterable = ["category", "price"]
+# sortable = ["price", "created_at"]
+
+# [storage]
+# backend = "local"
+# root = "./data/storage"
