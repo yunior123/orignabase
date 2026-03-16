@@ -17,12 +17,38 @@ class DocumentChange {
   DocumentChange({required this.type, required this.document});
 }
 
+/// Internal subscription registration.
+class _SubEntry {
+  final String id;
+  final String collection;
+  final String? documentId;
+  final StreamController<DocumentChange> controller;
+
+  _SubEntry({
+    required this.id,
+    required this.collection,
+    this.documentId,
+    required this.controller,
+  });
+}
+
 /// Manages a WebSocket connection for realtime subscriptions.
+///
+/// Reconnects automatically on disconnect with exponential back-off:
+/// 1s → 2s → 4s → 8s → 16s → 30s (cap).  Active subscriptions are
+/// re-registered transparently so callers never need to re-subscribe.
 class RealtimeClient {
   final OrignaBase _client;
   WebSocketChannel? _channel;
-  final _subscriptions = <String, StreamController<DocumentChange>>{};
   StreamSubscription<dynamic>? _listener;
+
+  /// All active subscriptions keyed by subscription ID.
+  final _subs = <String, _SubEntry>{};
+
+  bool _disconnecting = false;
+  Timer? _reconnectTimer;
+  int _reconnectAttempts = 0;
+  static const _maxBackoffSeconds = 30;
 
   RealtimeClient(this._client);
 
@@ -32,24 +58,86 @@ class RealtimeClient {
       : _channel = channel {
     _listener = _channel!.stream.listen(
       _handleMessage,
-      onDone: _handleDisconnect,
-      onError: (_) => _handleDisconnect(),
+      onDone: _scheduleReconnect,
+      onError: (_) => _scheduleReconnect(),
     );
   }
+
+  // ---------------------------------------------------------------------------
+  // Connection management
+  // ---------------------------------------------------------------------------
 
   /// Connect to the realtime WebSocket endpoint.
   void connect() {
-    final wsUrl = _client.url
-        .replaceFirst('http://', 'ws://')
-        .replaceFirst('https://', 'wss://');
+    _disconnecting = false;
+    _doConnect();
+  }
 
-    _channel = WebSocketChannel.connect(Uri.parse('$wsUrl/realtime'));
+  void _doConnect() {
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+
+    final baseUri = Uri.parse(_client.url);
+    final wsScheme = baseUri.scheme == 'https' ? 'wss' : 'ws';
+    // Explicit port to avoid Dart URI defaulting wss to port 0.
+    final port = baseUri.hasPort
+        ? baseUri.port
+        : (baseUri.scheme == 'https' ? 443 : 80);
+    final wsUri = Uri(
+      scheme: wsScheme,
+      host: baseUri.host,
+      port: port,
+      path: '${baseUri.path}/realtime',
+      queryParameters: _client.auth.accessToken != null
+          ? {'token': _client.auth.accessToken!}
+          : null,
+    );
+
+    _channel = WebSocketChannel.connect(wsUri);
     _listener = _channel!.stream.listen(
       _handleMessage,
-      onDone: _handleDisconnect,
-      onError: (_) => _handleDisconnect(),
+      onDone: _scheduleReconnect,
+      onError: (_) => _scheduleReconnect(),
     );
+
+    // Re-register all active subscriptions after (re)connect.
+    for (final sub in _subs.values) {
+      _sendSubscribe(sub);
+    }
+
+    _reconnectAttempts = 0;
   }
+
+  void _scheduleReconnect() {
+    if (_disconnecting) return;
+
+    final backoff = _backoffDuration();
+    _reconnectAttempts++;
+
+    _reconnectTimer?.cancel();
+    _reconnectTimer = Timer(backoff, _doConnect);
+  }
+
+  Duration _backoffDuration() {
+    final seconds = (1 << _reconnectAttempts).clamp(1, _maxBackoffSeconds);
+    return Duration(seconds: seconds);
+  }
+
+  /// Disconnect and clean up all resources permanently.
+  void disconnect() {
+    _disconnecting = true;
+    _reconnectTimer?.cancel();
+    _listener?.cancel();
+    _channel?.sink.close();
+    for (final sub in _subs.values) {
+      sub.controller.close();
+    }
+    _subs.clear();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Subscription API
+  // ---------------------------------------------------------------------------
 
   /// Subscribe to changes on a specific document.
   ///
@@ -61,54 +149,62 @@ class RealtimeClient {
       String collection, String documentId) {
     final subId =
         '${collection}_${documentId}_${DateTime.now().millisecondsSinceEpoch}';
-    final controller = StreamController<DocumentChange>.broadcast(
-      onCancel: () => _unsubscribe(subId),
+    final entry = _SubEntry(
+      id: subId,
+      collection: collection,
+      documentId: documentId,
+      controller: StreamController<DocumentChange>.broadcast(
+        onCancel: () => _unsubscribe(subId),
+      ),
     );
-    _subscriptions[subId] = controller;
-
-    _channel?.sink.add(jsonEncode({
-      'type': 'subscribe',
-      'id': subId,
-      'collection': collection,
-      'document_id': documentId,
-    }));
-
-    return controller.stream;
+    _subs[subId] = entry;
+    _sendSubscribe(entry);
+    return entry.controller.stream;
   }
 
   /// Subscribe to changes on a collection.
   Stream<DocumentChange> subscribe(String collection, {String? filter}) {
     final subId = '${collection}_${DateTime.now().millisecondsSinceEpoch}';
-    final controller = StreamController<DocumentChange>.broadcast(
-      onCancel: () => _unsubscribe(subId),
+    final entry = _SubEntry(
+      id: subId,
+      collection: collection,
+      controller: StreamController<DocumentChange>.broadcast(
+        onCancel: () => _unsubscribe(subId),
+      ),
     );
-    _subscriptions[subId] = controller;
+    _subs[subId] = entry;
+    _sendSubscribe(entry);
+    return entry.controller.stream;
+  }
 
-    // Send subscribe message
-    _channel?.sink.add(jsonEncode({
+  void _sendSubscribe(_SubEntry sub) {
+    final msg = <String, dynamic>{
       'type': 'subscribe',
-      'id': subId,
-      'collection': collection,
-      if (filter != null) 'filter': filter,
-    }));
-
-    return controller.stream;
+      'id': sub.id,
+      'collection': sub.collection,
+      if (sub.documentId != null) 'document_id': sub.documentId,
+    };
+    try {
+      _channel?.sink.add(jsonEncode(msg));
+    } catch (_) {
+      // Channel not yet open — will be resent after reconnect.
+    }
   }
 
   void _unsubscribe(String subId) {
-    // Guard: don't try to send if we're already disconnecting.
-    final controller = _subscriptions.remove(subId);
-    if (controller == null) return;
+    final sub = _subs.remove(subId);
+    if (sub == null) return;
     try {
-      _channel?.sink.add(jsonEncode({
-        'type': 'unsubscribe',
-        'id': subId,
-      }));
+      _channel?.sink.add(jsonEncode({'type': 'unsubscribe', 'id': subId}));
     } catch (_) {
-      // Channel may already be closed during disconnect.
+      // Channel may already be closed.
     }
-    controller.close();
+    sub.controller.close();
   }
+
+  // ---------------------------------------------------------------------------
+  // Message handling
+  // ---------------------------------------------------------------------------
 
   void _handleMessage(dynamic rawMessage) {
     if (rawMessage is! String) return;
@@ -117,8 +213,8 @@ class RealtimeClient {
     final event = data['event'] as Map<String, dynamic>?;
 
     if (subId == null || event == null) return;
-    final controller = _subscriptions[subId];
-    if (controller == null) return;
+    final sub = _subs[subId];
+    if (sub == null) return;
 
     final changeType = switch (event['action'] as String?) {
       'create' => ChangeType.create,
@@ -132,26 +228,12 @@ class RealtimeClient {
     final collection = event['collection'] as String? ?? '';
     final docData = event['data'] as Map<String, dynamic>? ?? {};
 
-    controller.add(DocumentChange(
+    sub.controller.add(DocumentChange(
       type: changeType,
       document: Document.fromMap(collection, {
         'id': event['document_id'],
         ...docData,
       }),
     ));
-  }
-
-  void _handleDisconnect() {
-    for (final controller in _subscriptions.values) {
-      controller.close();
-    }
-    _subscriptions.clear();
-  }
-
-  /// Disconnect and clean up.
-  void disconnect() {
-    _listener?.cancel();
-    _channel?.sink.close();
-    _handleDisconnect();
   }
 }
