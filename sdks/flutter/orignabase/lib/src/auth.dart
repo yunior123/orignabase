@@ -40,6 +40,7 @@ class OrignaBaseAuth {
   final OrignaBase _client;
   String? _accessToken;
   String? _refreshToken;
+  String? _lastEmail;
 
   final _authStateController = StreamController<AuthState>.broadcast();
 
@@ -57,8 +58,8 @@ class OrignaBaseAuth {
   /// Current user id from the active access token.
   String? get currentUserId => currentClaims['sub'] as String?;
 
-  /// Current email from the active access token or last auth response.
-  String? get currentEmail => currentClaims['email'] as String?;
+  /// Current email from JWT claims or last auth response.
+  String? get currentEmail => currentClaims['email'] as String? ?? _lastEmail;
 
   /// Current roles from the active access token.
   List<String> get currentRoles {
@@ -169,8 +170,7 @@ class OrignaBaseAuth {
 
   /// Sign in anonymously. The user can later be upgraded to a real account.
   Future<AuthState> signInAnonymously() async {
-    final response =
-        await _client.request('POST', '/auth/anonymous', body: {});
+    final response = await _client.request('POST', '/auth/anonymous', body: {});
     return _handleAuthResponse(response);
   }
 
@@ -208,7 +208,10 @@ class OrignaBaseAuth {
 
   /// Send email verification to the current user.
   Future<void> sendEmailVerification() async {
-    await _client.request('POST', '/auth/send-verification', body: {});
+    final email = currentEmail;
+    await _client.request('POST', '/auth/send-verification', body: {
+      if (email != null) 'email': email,
+    });
   }
 
   /// Verify email with token.
@@ -222,8 +225,7 @@ class OrignaBaseAuth {
 
   /// Set up MFA — returns QR code and manual key for authenticator app.
   Future<MfaSetupResult> setupMfa() async {
-    final response =
-        await _client.request('POST', '/auth/mfa/setup', body: {});
+    final response = await _client.request('POST', '/auth/mfa/setup', body: {});
     return MfaSetupResult(
       qrCodeBase64: response['qr_code_base64'] as String? ?? '',
       manualKey: response['manual_key'] as String? ?? '',
@@ -256,8 +258,7 @@ class OrignaBaseAuth {
   /// Use a recovery code to complete MFA challenge.
   Future<AuthState> useMfaRecoveryCode(
       String challengeToken, String recoveryCode) async {
-    final response =
-        await _client.request('POST', '/auth/mfa/recovery', body: {
+    final response = await _client.request('POST', '/auth/mfa/recovery', body: {
       'challenge_token': challengeToken,
       'recovery_code': recoveryCode,
     });
@@ -278,14 +279,38 @@ class OrignaBaseAuth {
     _authStateController.add(AuthState.unauthenticated);
   }
 
+  /// Restore an authenticated session from tokens returned by a web OAuth callback.
+  AuthState restoreSession({
+    required String accessToken,
+    String? refreshToken,
+    String? email,
+  }) {
+    _accessToken = accessToken;
+    _refreshToken = refreshToken;
+    _lastEmail = email ?? currentEmail;
+
+    final state = currentState;
+    _authStateController.add(state);
+    return state;
+  }
+
   AuthState _handleAuthResponse(Map<String, dynamic> response) {
     _accessToken = response['access_token'] as String?;
     _refreshToken = response['refresh_token'] as String?;
 
+    // Extract email from response (may be at top level or nested in user object)
+    final user = response['user'] as Map<String, dynamic>?;
+    final email = response['email'] as String? ??
+        user?['email'] as String? ??
+        currentEmail;
+    _lastEmail = email;
+
     final state = AuthState(
       status: AuthStatus.authenticated,
-      userId: response['user_id'] as String? ?? currentUserId,
-      email: response['email'] as String? ?? currentEmail,
+      userId: response['user_id'] as String? ??
+          user?['id'] as String? ??
+          currentUserId,
+      email: email,
       roles: currentRoles,
       emailVerified: isEmailVerified,
     );
