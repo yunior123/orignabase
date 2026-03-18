@@ -1,4 +1,4 @@
-use crate::registry::{ChangeAction, ChangeEvent, RealtimeMessage, SubscriptionRegistry};
+use crate::registry::{ChangeAction, ChangeEvent, RealtimeMessage, Subscription, SubscriptionRegistry};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -96,7 +96,7 @@ mod tests {
         let (sub_tx, mut sub_rx) = mpsc::channel(16);
         let sub = Subscription {
             id: "sub1".to_string(),
-            collection: "products".to_string(),
+            collection: Arc::from("products"),
             filter_hash: 0,
             document_id: None,
             user_id: None,
@@ -141,7 +141,7 @@ mod tests {
         let (sub_tx, mut sub_rx) = mpsc::channel(16);
         let sub = Subscription {
             id: "sub1".to_string(),
-            collection: "products".to_string(),
+            collection: Arc::from("products"),
             filter_hash: 0,
             document_id: None,
             user_id: None,
@@ -178,7 +178,7 @@ mod tests {
     fn test_change_event_creation_and_fields() {
         let event = ChangeEvent {
             action: ChangeAction::Create,
-            collection: "products".to_string(),
+            collection: Arc::from("products"),
             document_id: "products:xyz".to_string(),
             before_data: None,
             after_data: Some(serde_json::json!({"title": "Widget", "price": 9.99})),

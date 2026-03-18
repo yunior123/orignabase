@@ -1,4 +1,5 @@
 use crate::registry::{RealtimeMessage, Subscription, SubscriptionRegistry};
+use std::sync::Arc;
 use axum::{
     extract::{
         Query, State, WebSocketUpgrade,
@@ -191,7 +192,7 @@ async fn handle_socket(socket: WebSocket, state: RealtimeState, user_id: String)
 
                         let sub = Subscription {
                             id: id.clone(),
-                            collection,
+                            collection: Arc::from(collection.as_str()),
                             filter_hash,
                             document_id,
                             user_id: Some(user_id.clone()),

@@ -37,10 +37,12 @@ pub enum ChangeAction {
 }
 
 /// A subscription entry tracking what a client is listening to.
+/// Uses `Arc<str>` for `collection` to avoid expensive String cloning
+/// when broadcasting to 1000+ subscriptions.
 #[derive(Debug, Clone)]
 pub struct Subscription {
     pub id: SubscriptionId,
-    pub collection: String,
+    pub collection: Arc<str>,
     pub filter_hash: u64,
     /// Optional document ID for document-level subscriptions.
     /// When set, only changes to this specific document trigger notifications.
@@ -68,7 +70,7 @@ pub struct SubscriptionRegistry {
     /// subscription_id → Subscription
     subscriptions: DashMap<SubscriptionId, Subscription>,
     /// (collection, filter_hash) → set of subscription IDs
-    dependency_map: DashMap<(String, u64), HashSet<SubscriptionId>>,
+    dependency_map: DashMap<(Arc<str>, u64), HashSet<SubscriptionId>>,
     /// connection_id → set of subscription IDs (for cleanup on disconnect)
     connections: DashMap<String, HashSet<SubscriptionId>>,
     /// user_id → PresenceInfo (online users)
@@ -131,7 +133,7 @@ impl SubscriptionRegistry {
 
     /// Find all subscriptions affected by a change to a collection.
     pub fn find_affected(&self, collection: &str, filter_hash: u64) -> Vec<Subscription> {
-        let key = (collection.to_string(), filter_hash);
+        let key: (Arc<str>, u64) = (Arc::from(collection), filter_hash);
         if let Some(sub_ids) = self.dependency_map.get(&key) {
             sub_ids
                 .iter()
@@ -276,7 +278,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(16);
         let sub = Subscription {
             id: id.to_string(),
-            collection: collection.to_string(),
+            collection: Arc::from(collection),
             filter_hash,
             document_id: None,
             user_id: None,
@@ -377,7 +379,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(16);
         let sub = Subscription {
             id: id.to_string(),
-            collection: collection.to_string(),
+            collection: Arc::from(collection),
             filter_hash: 0,
             document_id: Some(document_id.to_string()),
             user_id: None,
