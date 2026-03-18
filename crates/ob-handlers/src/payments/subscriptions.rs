@@ -264,17 +264,26 @@ async fn create_subscription(
     )
     .await?;
 
-    // Check for existing active subscription
-    if let Some(existing) = get_user_subscription(&state, &user_id).await? {
-        let status = existing
-            .get(fields::SUBSCRIPTION_STATUS)
+    // Check for existing active subscription (atomic check before creation)
+    // This prevents race conditions where two simultaneous requests both pass the check
+    let existing_sql = format!(
+        "SELECT * FROM {} WHERE {} = '{}' AND (status = 'active' OR {} = 'active') LIMIT 1",
+        collections::SUBSCRIPTIONS,
+        fields::BUYER_ID,
+        user_id,
+        fields::SUBSCRIPTION_STATUS
+    );
+    let existing_records = state.db.query_raw(&existing_sql).await?;
+    
+    if !existing_records.is_empty() {
+        let existing = &existing_records[0];
+        let existing_sub_id = existing
+            .get("id")
             .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if status == SubscriptionStatus::Active.as_str() {
-            return Err(ob_core::Error::Validation(
-                "User already has an active subscription".into(),
-            ));
-        }
+            .unwrap_or("unknown");
+        return Err(ob_core::Error::Validation(
+            format!("User already has an active subscription: {}", existing_sub_id)
+        ));
     }
 
     let stripe_key = state.config.require_secret("stripe_secret_key")?;

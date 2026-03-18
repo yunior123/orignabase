@@ -1055,10 +1055,17 @@ pub async fn reset_password(
         return Err(Error::Auth("Reset token has expired".into()));
     }
 
+    // Check if token was already used (prevent reuse)
+    let token_used = user["reset_token_used"].as_bool().unwrap_or(false);
+    if token_used {
+        return Err(Error::Auth("This reset token has already been used. Request a new password reset.".into()));
+    }
+
     // Hash new password and update
     let new_hash = password::hash_password(&body.new_password)?;
     let user_id = claims.sub;
 
+    // CRITICAL FIX: Mark token as USED BEFORE updating password (atomic operation)
     state
         .db
         .update_document(
@@ -1068,6 +1075,8 @@ pub async fn reset_password(
                 "password_hash": new_hash,
                 "reset_token_hash": null,
                 "reset_token_expires": null,
+                "reset_token_used": true,
+                "reset_token_used_at": chrono::Utc::now().to_rfc3339(),
             }),
         )
         .await?;
@@ -1350,6 +1359,30 @@ pub async fn mfa_challenge(
     let claims = jwt::verify_token(&body.challenge_token, &state.jwt_keys)?;
     if claims.typ != "mfa_challenge" {
         return Err(Error::Auth("Invalid challenge token".into()));
+    }
+
+    // CRITICAL FIX: Rate limit TOTP verification attempts to prevent brute force
+    // Max 5 attempts per 15 minutes per user
+    let user_id = &claims.sub;
+    let rate_limit_result = crate::rate_limiter::check_rate_limit(
+        &state.db,
+        user_id,
+        "mfa_attempt",
+        5,
+        900, // 15 minutes in seconds
+    ).await;
+    
+    if let Err(e) = rate_limit_result {
+        // Lock MFA after exceeded attempts
+        let _ = state.db.update_document(
+            "users",
+            user_id,
+            json!({
+                "mfa_locked": true,
+                "mfa_locked_at": chrono::Utc::now().to_rfc3339(),
+            }),
+        ).await;
+        return Err(e);
     }
 
     // Look up user
