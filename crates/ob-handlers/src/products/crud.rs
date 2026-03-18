@@ -247,6 +247,30 @@ pub struct ToggleFavoriteRequest {
     pub user_id: String,
 }
 
+// ─── Bulk Upload Types ──────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkUploadRequest {
+    pub products: Vec<Value>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkProductError {
+    pub index: usize,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkUploadResponse {
+    pub created: usize,
+    pub failed: usize,
+    pub errors: Vec<BulkProductError>,
+    pub product_ids: Vec<String>,
+}
+
 // ─── Router ─────────────────────────────────────────────────────────────────
 
 pub fn router(state: HandlersState) -> Router {
@@ -263,12 +287,229 @@ pub fn router(state: HandlersState) -> Router {
         .route("/api/products/list", post(list_products))
         .route("/api/products/seller-list", post(seller_list))
         .route("/api/products/bulk-update", post(bulk_update_products))
+        .route("/api/products/bulk", post(bulk_upload_products))
         .route("/api/products/update", post(update_product))
         .route("/api/products/toggle-favorite", post(toggle_favorite))
         .with_state(state)
 }
 
 // ─── Handlers ───────────────────────────────────────────────────────────────
+
+// ─── Bulk Upload Handler ────────────────────────────────────────────────────
+
+async fn bulk_upload_products(
+    State(state): State<HandlersState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<BulkUploadRequest>,
+) -> Result<Json<BulkUploadResponse>, ob_core::Error> {
+    let user_id = require_authenticated(&auth)?.to_string();
+    validate_uid("userId", &user_id)?;
+
+    // Check seller/admin role
+    let user = state
+        .db
+        .get_document(collections::USERS, &user_id)
+        .await
+        .map_err(|_| ob_core::Error::NotFound("User not found".into()))?;
+
+    let is_seller_or_admin = user
+        .get(fields::ROLES)
+        .and_then(|v| v.as_array())
+        .map(|roles| {
+            roles
+                .iter()
+                .any(|r| matches!(r.as_str(), Some("seller") | Some("admin")))
+        })
+        .unwrap_or(false);
+
+    if !is_seller_or_admin {
+        return Err(ob_core::Error::Forbidden(
+            "Seller or admin role required".into(),
+        ));
+    }
+
+    // Rate limit: 5 bulk uploads per hour per seller
+    crate::shared::rate_limiter::check_user_rate_limit(
+        &state.db,
+        &user_id,
+        "bulk_upload",
+        5,
+        60,
+    )
+    .await?;
+
+    // Validate batch size
+    if req.products.is_empty() {
+        return Err(ob_core::Error::Validation(
+            "At least one product required".into(),
+        ));
+    }
+
+    if req.products.len() > 100 {
+        return Err(ob_core::Error::Validation(
+            "Maximum 100 products per batch".into(),
+        ));
+    }
+
+    let mut created_products = Vec::new();
+    let mut errors = Vec::new();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Validate all products first
+    for (idx, product_data) in req.products.iter().enumerate() {
+        let mut obj = match product_data.as_object() {
+            Some(o) => o.clone(),
+            None => {
+                errors.push(BulkProductError {
+                    index: idx,
+                    message: "Product must be an object".into(),
+                });
+                continue;
+            }
+        };
+
+        // Required: title
+        let title = obj
+            .get(fields::TITLE)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+
+        if title.is_empty() {
+            errors.push(BulkProductError {
+                index: idx,
+                message: "Title is required".into(),
+            });
+            continue;
+        }
+
+        // Sanitize and validate title
+        let sanitized_title = sanitize_html(title);
+        if let Err(e) = validate_string("title", &sanitized_title, 1, 1000, false) {
+            errors.push(BulkProductError {
+                index: idx,
+                message: e.to_string(),
+            });
+            continue;
+        }
+
+        // Required: priceCents and stockQuantity
+        let price_cents = obj.get(fields::PRICE_CENTS).and_then(|v| v.as_i64());
+        let stock_quantity = obj.get(fields::STOCK_QUANTITY).and_then(|v| v.as_i64());
+
+        if let Err(e) = validate_price_and_stock(price_cents, stock_quantity) {
+            errors.push(BulkProductError {
+                index: idx,
+                message: e.to_string(),
+            });
+            continue;
+        }
+
+        // Required: categoryId
+        let category_id = obj
+            .get(fields::CATEGORY_ID)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+
+        if category_id.is_empty() {
+            errors.push(BulkProductError {
+                index: idx,
+                message: "CategoryId is required".into(),
+            });
+            continue;
+        }
+
+        // Sanitize description if present
+        if let Some(desc) = obj.get(fields::DESCRIPTION).and_then(|v| v.as_str()) {
+            let sanitized_desc = sanitize_html(desc);
+            if let Err(e) = validate_string("description", &sanitized_desc, 0, 5000, false) {
+                errors.push(BulkProductError {
+                    index: idx,
+                    message: e.to_string(),
+                });
+                continue;
+            }
+            obj.insert(fields::DESCRIPTION.to_string(), serde_json::json!(sanitized_desc));
+        }
+
+        // Sanitize title in object
+        obj.insert(fields::TITLE.to_string(), serde_json::json!(sanitized_title));
+
+        created_products.push((idx, obj));
+    }
+
+    // If all failed validation, return early
+    if created_products.is_empty() {
+        return Ok(Json(BulkUploadResponse {
+            created: 0,
+            failed: errors.len(),
+            errors,
+            product_ids: vec![],
+        }));
+    }
+
+    // Create products in database
+    let mut product_ids = Vec::new();
+    let mut failed_count = 0;
+
+    for (idx, mut product) in created_products {
+        // Add seller ID and timestamps
+        product.insert(fields::SELLER_ID.to_string(), serde_json::json!(user_id));
+        product.insert(
+            fields::CREATED_AT.to_string(),
+            serde_json::json!(now.clone()),
+        );
+        product.insert(fields::UPDATED_AT.to_string(), serde_json::json!(now.clone()));
+
+        // Ensure imageUrls is present (can be empty)
+        if !product.contains_key(fields::IMAGE_URLS) {
+            product.insert(fields::IMAGE_URLS.to_string(), serde_json::json!([]));
+        }
+
+        // Attempt to create product
+        match state
+            .db
+            .create_document(collections::PRODUCTS, serde_json::Value::Object(product))
+            .await
+        {
+            Ok(created) => {
+                if let Some(id) = created
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| {
+                        s.strip_prefix(&format!("{}:", collections::PRODUCTS))
+                            .unwrap_or(s)
+                            .to_string()
+                    })
+                {
+                    product_ids.push(id);
+                }
+            }
+            Err(e) => {
+                failed_count += 1;
+                errors.push(BulkProductError {
+                    index: idx,
+                    message: format!("Database error: {}", e),
+                });
+            }
+        }
+    }
+
+    info!(
+        "Bulk upload completed: created={}, failed={}, user_id={}",
+        product_ids.len(),
+        failed_count,
+        user_id
+    );
+
+    Ok(Json(BulkUploadResponse {
+        created: product_ids.len(),
+        failed: failed_count,
+        errors,
+        product_ids,
+    }))
+}
 
 async fn upload_images(
     State(state): State<HandlersState>,

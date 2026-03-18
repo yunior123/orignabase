@@ -698,6 +698,79 @@ async fn system_alerts(State(state): State<AdminState>) -> Result<Json<Value>> {
 }
 
 /// Build the admin router. All routes require admin authentication.
+
+/// POST /_admin/jwt/rotate — Rotate JWT signing keys (admin-only).
+/// Generates new RS256 key pair, moves current to previous, saves metadata.
+async fn rotate_jwt_keys(
+    State(_state): State<AdminState>,
+) -> Result<Json<Value>> {
+    use std::path::Path;
+    
+    // Keys directory (same as used in main.rs)
+    let keys_dir = Path::new("./data/keys");
+    
+    match ob_auth::rotate_keys(keys_dir) {
+        Ok(new_fingerprint) => {
+            tracing::info!(
+                fingerprint = %new_fingerprint,
+                timestamp = %chrono::Utc::now().to_rfc3339(),
+                "JWT keys rotated successfully"
+            );
+            Ok(Json(json!({
+                "status": "rotated",
+                "new_fingerprint": new_fingerprint,
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "message": "New JWT keys generated. Tokens signed before rotation remain valid. Old backups archived."
+            })))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to rotate JWT keys");
+            Err(e)
+        }
+    }
+}
+
+/// GET /_admin/jwt/status — View current JWT key metadata and rotation history.
+async fn jwt_key_status(
+    State(_state): State<AdminState>,
+) -> Result<Json<Value>> {
+    use std::path::Path;
+    
+    let keys_dir = Path::new("./data/keys");
+    let rotation_metadata_path = keys_dir.join("key_rotation.json");
+    
+    if !rotation_metadata_path.exists() {
+        return Ok(Json(json!({
+            "status": "no_rotation_metadata",
+            "message": "Key rotation not yet initialized. Will be created on first rotation."
+        })));
+    }
+
+    match ob_auth::KeyRotationManager::load_from_file(&rotation_metadata_path) {
+        Ok(mgr) => {
+            let fingerprints = mgr.all_fingerprints();
+            Ok(Json(json!({
+                "current_key": {
+                    "fingerprint": mgr.current_key_metadata.fingerprint,
+                    "created_at": mgr.current_key_metadata.created_at.to_rfc3339(),
+                },
+                "previous_keys": mgr.previous_keys_metadata.iter().map(|k| {
+                    json!({
+                        "fingerprint": k.fingerprint,
+                        "created_at": k.created_at.to_rfc3339(),
+                    })
+                }).collect::<Vec<_>>(),
+                "all_fingerprints": fingerprints,
+                "total_keys": fingerprints.len(),
+            })))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to load JWT key metadata");
+            Err(e)
+        }
+    }
+}
+
 pub fn admin_router(state: AdminState) -> axum::Router {
     let protected = axum::Router::new()
         .route("/_admin", axum::routing::get(dashboard))
@@ -731,6 +804,8 @@ pub fn admin_router(state: AdminState) -> axum::Router {
         .route("/_admin/indexes/{name}", axum::routing::delete(drop_index))
         .route("/_admin/usage", axum::routing::get(usage_dashboard))
         .route("/_admin/alerts", axum::routing::get(system_alerts))
+        .route("/_admin/jwt/rotate", axum::routing::post(rotate_jwt_keys))
+        .route("/_admin/jwt/status", axum::routing::get(jwt_key_status))
         .route("/links", axum::routing::post(create_link))
         .route_layer(axum::middleware::from_fn(require_admin_middleware));
 

@@ -12,6 +12,7 @@ pub mod totp;
 pub use email::{EmailConfig, EmailService, EmailTemplate};
 pub use jwt::{
     Claims, JwtKeys, generate_rsa_keys, issue_access_token_with_claims, issue_challenge_token,
+    rotate_keys, KeyRotationManager, fingerprint_public_key,
 };
 pub use middleware::AuthContext;
 pub use oauth::{OAuthProvider, OAuthUserInfo};
