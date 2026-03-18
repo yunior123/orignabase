@@ -284,13 +284,6 @@ mod tests {
         };
         (sub, rx)
     }
-    /// Get total subscription count for a specific connection.
-    pub fn connection_subscription_count(&self, connection_id: &str) -> usize {
-        self.connections
-            .get(connection_id)
-            .map(|subs| subs.len())
-            .unwrap_or(0)
-    }
 
     #[test]
     fn test_subscribe_and_find() {
