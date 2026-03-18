@@ -16,3 +16,4 @@ coverage/
 
 # Test font symlinks (for PDF coverage tests)
 Helvetica-*.ttf
+fuzz/target/
