@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use tracing::{error, info, warn};
 
 use crate::HandlersState;
-use crate::shared::schema::collections;
+use crate::shared::schema::{collections, fields, OrderStatus};
+use ob_database::Transaction;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -223,51 +224,444 @@ async fn store_webhook_event(
 }
 
 // ---------------------------------------------------------------------------
-// Event Handlers (minimal logging implementations)
+// Helper Functions for Database Operations
 // ---------------------------------------------------------------------------
 
+/// Find order by payment intent ID
+async fn find_order_by_payment_intent(
+    state: &HandlersState,
+    payment_intent_id: &str,
+) -> Result<Option<Value>, ob_core::Error> {
+    let rows: Vec<Value> = state
+        .db
+        .query_bind_value(
+            &format!("SELECT * FROM {} WHERE {} = $pi_id LIMIT 1", 
+                collections::ORDERS, 
+                fields::PAYMENT_INTENT_ID
+            ),
+            serde_json::json!({"pi_id": payment_intent_id})
+        )
+        .await?;
+
+    Ok(rows.first().cloned())
+}
+
+/// Find order by metadata order ID from Stripe metadata
+async fn find_order_by_metadata_id(
+    state: &HandlersState,
+    order_id: &str,
+) -> Result<Option<Value>, ob_core::Error> {
+    let rows: Vec<Value> = state
+        .db
+        .query_bind_value(
+            &format!("SELECT * FROM {} WHERE id = $order_id LIMIT 1", 
+                collections::ORDERS
+            ),
+            serde_json::json!({"order_id": order_id})
+        )
+        .await?;
+
+    Ok(rows.first().cloned())
+}
+
+/// Update order status atomically
+async fn update_order_status(
+    state: &HandlersState,
+    order_id: &str,
+    new_status: &str,
+) -> Result<(), ob_core::Error> {
+    let now = chrono::Utc::now().to_rfc3339();
+    
+    state
+        .db
+        .query_bind_value(
+            &format!("UPDATE {} SET {} = $status, updatedAt = $now WHERE id = $order_id",
+                collections::ORDERS,
+                fields::ORDER_STATUS
+            ),
+            serde_json::json!({
+                "order_id": order_id,
+                "status": new_status,
+                "now": now,
+            })
+        )
+        .await?;
+
+    info!(order_id = %order_id, new_status = %new_status, "Order status updated");
+    Ok(())
+}
+
+/// Restore stock for all items in an order (used on refund/cancellation)
+async fn restore_stock_for_order(
+    state: &HandlersState,
+    order: &Value,
+) -> Result<(), ob_core::Error> {
+    let order_id = order
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ob_core::Error::Validation("Order missing id".into()))?;
+
+    let items = order
+        .get(fields::ITEMS)
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    if items.is_empty() {
+        return Ok(());
+    }
+
+    // Build transaction to restore stock for all items
+    let mut tx = Transaction::new();
+
+    for item in items {
+        let product_id = item
+            .get(fields::PRODUCT_ID)
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let quantity = item
+            .get("quantity")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1);
+
+        if !product_id.is_empty() && quantity > 0 {
+            // Build product record ID: "products:productId"
+            let product_record_id = format!("{}:{}", collections::PRODUCTS, product_id);
+            
+            tx.add(
+                &format!("UPDATE {} SET {} += $qty WHERE id = $id",
+                    collections::PRODUCTS,
+                    fields::STOCK_QUANTITY
+                ),
+                Some(serde_json::json!({
+                    "id": product_record_id,
+                    "qty": quantity,
+                }))
+            );
+        }
+    }
+
+    if !tx.is_empty() {
+        tx.commit(&state.db).await?;
+        info!(order_id = %order_id, item_count = items.len(), "Stock restored for order items");
+    }
+
+    Ok(())
+}
+
+/// Decrement stock for all items in an order (used on successful payment)
+async fn decrement_stock_for_order(
+    state: &HandlersState,
+    order: &Value,
+) -> Result<(), ob_core::Error> {
+    let order_id = order
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ob_core::Error::Validation("Order missing id".into()))?;
+
+    let items = order
+        .get(fields::ITEMS)
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    if items.is_empty() {
+        return Ok(());
+    }
+
+    // Build transaction to decrement stock for all items
+    let mut tx = Transaction::new();
+
+    for item in items {
+        let product_id = item
+            .get(fields::PRODUCT_ID)
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let quantity = item
+            .get("quantity")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1);
+
+        if !product_id.is_empty() && quantity > 0 {
+            // Build product record ID: "products:productId"
+            let product_record_id = format!("{}:{}", collections::PRODUCTS, product_id);
+            
+            tx.add(
+                &format!("UPDATE {} SET {} -= $qty WHERE id = $id",
+                    collections::PRODUCTS,
+                    fields::STOCK_QUANTITY
+                ),
+                Some(serde_json::json!({
+                    "id": product_record_id,
+                    "qty": quantity,
+                }))
+            );
+        }
+    }
+
+    if !tx.is_empty() {
+        tx.commit(&state.db).await?;
+        info!(order_id = %order_id, item_count = items.len(), "Stock decremented for order items");
+    }
+
+    Ok(())
+}
+
+/// Mark coupon as redeemed
+async fn mark_coupon_redeemed(
+    state: &HandlersState,
+    order_id: &str,
+    coupon_code: &str,
+) -> Result<(), ob_core::Error> {
+    // Validate coupon code before querying
+    if coupon_code.is_empty() {
+        return Ok(()); // No coupon, skip
+    }
+
+    let coupon_code_safe = coupon_code.to_uppercase();
+    
+    // Try to update coupon use record
+    let now = chrono::Utc::now().to_rfc3339();
+    
+    let rows: Vec<Value> = state
+        .db
+        .query_bind_value(
+            &format!(
+                "UPDATE {} SET redeemedAt = $now WHERE orderId = $order_id AND couponCode = $code",
+                collections::COUPON_USES
+            ),
+            serde_json::json!({
+                "order_id": order_id,
+                "code": coupon_code_safe,
+                "now": now,
+            })
+        )
+        .await
+        .unwrap_or_default();
+
+    if !rows.is_empty() {
+        info!(order_id = %order_id, coupon_code = %coupon_code, "Coupon marked as redeemed");
+    }
+
+    Ok(())
+}
+
+/// Release coupon reservation (undo a reserved coupon)
+async fn release_coupon_reservation(
+    state: &HandlersState,
+    order_id: &str,
+) -> Result<(), ob_core::Error> {
+    // Find any coupon use record for this order and delete it
+    let _rows: Vec<Value> = state
+        .db
+        .query_bind_value(
+            &format!("DELETE FROM {} WHERE orderId = $order_id AND redeemedAt IS NULL",
+                collections::COUPON_USES
+            ),
+            serde_json::json!({"order_id": order_id})
+        )
+        .await
+        .unwrap_or_default();
+
+    info!(order_id = %order_id, "Coupon reservation released");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Event Handlers (full implementations)
+// ---------------------------------------------------------------------------
+
+/// Handle payment_intent.succeeded: order confirmed, stock decremented, coupon marked used
 async fn handle_payment_intent_succeeded(
-    _state: &HandlersState,
+    state: &HandlersState,
     event_data: &Value,
 ) -> Result<(), ob_core::Error> {
-    if let Some(pi_id) = event_data
+    let pi_obj = event_data
         .get("object")
-        .and_then(|o| o.get("id"))
+        .ok_or_else(|| ob_core::Error::Validation("No object in event data".into()))?;
+
+    let pi_id = pi_obj
+        .get("id")
         .and_then(|i| i.as_str())
-    {
-        info!(payment_intent_id = %pi_id, "Payment intent succeeded");
+        .ok_or_else(|| ob_core::Error::Validation("No payment intent ID".into()))?;
+
+    let metadata = pi_obj
+        .get("metadata")
+        .and_then(|m| m.as_object())
+        .ok_or_else(|| ob_core::Error::Validation("No metadata in payment intent".into()))?;
+
+    let order_id = metadata
+        .get("order_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ob_core::Error::Validation("No order_id in metadata".into()))?;
+
+    let coupon_code = metadata
+        .get("coupon_code")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    // Find the order
+    let order = find_order_by_metadata_id(state, order_id)
+        .await?
+        .ok_or_else(|| ob_core::Error::NotFound(format!("Order {} not found", order_id)))?;
+
+    // Verify order is still in pending state
+    let current_status = order
+        .get(fields::ORDER_STATUS)
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if current_status != OrderStatus::PendingPayment.as_str() {
+        warn!(
+            order_id = %order_id,
+            payment_intent_id = %pi_id,
+            current_status = %current_status,
+            "Order not in pending state, skipping confirmation"
+        );
+        return Ok(());
     }
+
+    // Decrement stock
+    decrement_stock_for_order(state, &order).await?;
+
+    // Update order status to confirmed
+    update_order_status(state, order_id, OrderStatus::PaymentAuthorized.as_str()).await?;
+
+    // Store payment intent ID on order
+    state
+        .db
+        .query_bind_value(
+            &format!("UPDATE {} SET {} = $pi_id WHERE id = $order_id",
+                collections::ORDERS,
+                fields::PAYMENT_INTENT_ID
+            ),
+            serde_json::json!({
+                "order_id": order_id,
+                "pi_id": pi_id,
+            })
+        )
+        .await?;
+
+    // Mark coupon as redeemed if one was used
+    if !coupon_code.is_empty() {
+        mark_coupon_redeemed(state, order_id, coupon_code).await?;
+    }
+
+    info!(
+        order_id = %order_id,
+        payment_intent_id = %pi_id,
+        "Payment intent succeeded: order confirmed, stock decremented"
+    );
+
     Ok(())
 }
 
+/// Handle payment_intent.payment_failed: cancel order, release coupon
 async fn handle_payment_intent_failed(
-    _state: &HandlersState,
+    state: &HandlersState,
     event_data: &Value,
 ) -> Result<(), ob_core::Error> {
-    if let Some(pi_id) = event_data
+    let pi_obj = event_data
         .get("object")
-        .and_then(|o| o.get("id"))
+        .ok_or_else(|| ob_core::Error::Validation("No object in event data".into()))?;
+
+    let pi_id = pi_obj
+        .get("id")
         .and_then(|i| i.as_str())
-    {
-        warn!(payment_intent_id = %pi_id, "Payment intent failed");
+        .ok_or_else(|| ob_core::Error::Validation("No payment intent ID".into()))?;
+
+    let metadata = pi_obj
+        .get("metadata")
+        .and_then(|m| m.as_object())
+        .ok_or_else(|| ob_core::Error::Validation("No metadata in payment intent".into()))?;
+
+    let order_id = metadata
+        .get("order_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ob_core::Error::Validation("No order_id in metadata".into()))?;
+
+    // Find the order
+    let order = find_order_by_metadata_id(state, order_id)
+        .await?
+        .ok_or_else(|| ob_core::Error::NotFound(format!("Order {} not found", order_id)))?;
+
+    // Check if still pending (no need to cancel if already processed)
+    let current_status = order
+        .get(fields::ORDER_STATUS)
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if current_status == OrderStatus::PendingPayment.as_str() {
+        // Cancel order
+        update_order_status(state, order_id, OrderStatus::Cancelled.as_str()).await?;
     }
+
+    // Release coupon reservation (unmark as used)
+    release_coupon_reservation(state, order_id).await?;
+
+    warn!(
+        order_id = %order_id,
+        payment_intent_id = %pi_id,
+        "Payment intent failed: order cancelled, coupon released"
+    );
+
     Ok(())
 }
 
+/// Handle payment_intent.canceled: cancel order, release coupon
 async fn handle_payment_intent_canceled(
-    _state: &HandlersState,
+    state: &HandlersState,
     event_data: &Value,
 ) -> Result<(), ob_core::Error> {
-    if let Some(pi_id) = event_data
+    let pi_obj = event_data
         .get("object")
-        .and_then(|o| o.get("id"))
+        .ok_or_else(|| ob_core::Error::Validation("No object in event data".into()))?;
+
+    let pi_id = pi_obj
+        .get("id")
         .and_then(|i| i.as_str())
-    {
-        info!(payment_intent_id = %pi_id, "Payment intent canceled");
+        .ok_or_else(|| ob_core::Error::Validation("No payment intent ID".into()))?;
+
+    let metadata = pi_obj
+        .get("metadata")
+        .and_then(|m| m.as_object())
+        .ok_or_else(|| ob_core::Error::Validation("No metadata in payment intent".into()))?;
+
+    let order_id = metadata
+        .get("order_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ob_core::Error::Validation("No order_id in metadata".into()))?;
+
+    // Find the order
+    let order = find_order_by_metadata_id(state, order_id)
+        .await?
+        .ok_or_else(|| ob_core::Error::NotFound(format!("Order {} not found", order_id)))?;
+
+    // Check if still pending
+    let current_status = order
+        .get(fields::ORDER_STATUS)
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if current_status == OrderStatus::PendingPayment.as_str() {
+        update_order_status(state, order_id, OrderStatus::Cancelled.as_str()).await?;
     }
+
+    // Release coupon reservation
+    release_coupon_reservation(state, order_id).await?;
+
+    info!(
+        order_id = %order_id,
+        payment_intent_id = %pi_id,
+        "Payment intent cancelled: order cancelled, coupon released"
+    );
+
     Ok(())
 }
 
+/// Handle charge.succeeded: log event (actual confirmation happens at payment_intent.succeeded)
 async fn handle_charge_succeeded(
     _state: &HandlersState,
     event_data: &Value,
@@ -282,6 +676,7 @@ async fn handle_charge_succeeded(
     Ok(())
 }
 
+/// Handle charge.failed: log event (actual cancellation happens at payment_intent.payment_failed)
 async fn handle_charge_failed(
     _state: &HandlersState,
     event_data: &Value,
@@ -304,19 +699,88 @@ async fn handle_charge_failed(
     Ok(())
 }
 
+/// Handle charge.refunded: restore stock, update order with refund info
 async fn handle_charge_refunded(
-    _state: &HandlersState,
+    state: &HandlersState,
     event_data: &Value,
 ) -> Result<(), ob_core::Error> {
-    if let Some(charge_id) = event_data
+    let charge_obj = event_data
         .get("object")
-        .and_then(|o| o.get("id"))
+        .ok_or_else(|| ob_core::Error::Validation("No object in event data".into()))?;
+
+    let charge_id = charge_obj
+        .get("id")
         .and_then(|i| i.as_str())
-    {
-        info!(charge_id = %charge_id, "Charge refunded");
+        .ok_or_else(|| ob_core::Error::Validation("No charge ID".into()))?;
+
+    let payment_intent_id = charge_obj
+        .get("payment_intent")
+        .and_then(|i| i.as_str())
+        .ok_or_else(|| ob_core::Error::Validation("No payment intent ID in charge".into()))?;
+
+    let refunded_amount_cents = charge_obj
+        .get("amount_refunded")
+        .and_then(|a| a.as_i64())
+        .ok_or_else(|| ob_core::Error::Validation("No refund amount in charge".into()))?;
+
+    // Find the order by payment intent
+    let order = find_order_by_payment_intent(state, payment_intent_id)
+        .await?
+        .ok_or_else(|| ob_core::Error::NotFound(format!(
+            "Order not found for payment intent {}",
+            payment_intent_id
+        )))?;
+
+    let order_id = order
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ob_core::Error::Validation("Order missing id".into()))?;
+
+    let total_amount_cents = order
+        .get("totalAmountCents")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    // Bounds check: refund cannot exceed order total
+    if refunded_amount_cents > total_amount_cents {
+        return Err(ob_core::Error::Validation(format!(
+            "Refund amount {} exceeds order total {}",
+            refunded_amount_cents, total_amount_cents
+        )));
     }
+
+    // Restore stock for the order
+    restore_stock_for_order(state, &order).await?;
+
+    // Update order with refund info
+    let now = chrono::Utc::now().to_rfc3339();
+    
+    state
+        .db
+        .query_bind_value(
+            &format!(
+                "UPDATE {} SET refundedAmountCents = $refunded, refundedAt = $now WHERE id = $order_id",
+                collections::ORDERS
+            ),
+            serde_json::json!({
+                "order_id": order_id,
+                "refunded": refunded_amount_cents,
+                "now": now,
+            })
+        )
+        .await?;
+
+    info!(
+        order_id = %order_id,
+        charge_id = %charge_id,
+        refunded_amount_cents = refunded_amount_cents,
+        "Charge refunded: stock restored, order updated"
+    );
+
     Ok(())
 }
+
+// Customer and Payment Method events (minimal for now)
 
 async fn handle_customer_created(
     _state: &HandlersState,
