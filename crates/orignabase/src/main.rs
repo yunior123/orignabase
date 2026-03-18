@@ -478,7 +478,7 @@ match /users/{userId} {
         }
         Commands::Schema { action } => {
             let db = DatabaseClient::connect(&config.database).await?;
-            match action {
+
                 SchemaAction::Inspect => {
                     let tables = db.query_raw("INFO FOR DB").await?;
                     println!("{}", serde_json::to_string_pretty(&tables)?);
@@ -662,6 +662,12 @@ async fn serve(config: Config) -> Result<()> {
     // --- Database ---
     let db = DatabaseClient::connect(&config.database).await?;
 
+    // --- Shared HTTP Client ---
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .expect("failed to build HTTP client");
+
     // --- Security Rules ---
     let is_test_mode = std::env::var("OB_TEST_MODE").unwrap_or_default() == "1";
     let rules_path = if is_test_mode && config.security.rules_path == "rules.ob" {
@@ -711,7 +717,7 @@ async fn serve(config: Config) -> Result<()> {
             indexes: HashMap::new(),
         })
         .unwrap_or_default();
-    let search_client = SearchClient::new(search_config);
+    let search_client = SearchClient::new(search_config, http_client.clone());
     let (search_syncer, search_sync_tx) = SearchSyncer::new(search_client.clone());
     tokio::spawn(search_syncer.run());
 
@@ -883,6 +889,12 @@ async fn serve(config: Config) -> Result<()> {
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
 
+    // --- HTTP Client (shared across auth handlers) ---
+    let auth_http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .expect("failed to build auth HTTP client");
+
     let auth_state = AuthState {
         db: db.clone(),
         jwt_keys: jwt_keys.clone(),
@@ -905,6 +917,8 @@ async fn serve(config: Config) -> Result<()> {
         totp_encryption_key,
         base_url: base_url.clone(),
         oauth_state_nonces: Arc::new(dashmap::DashMap::new()),
+        turnstile_secret_key: config.secret("turnstile_secret_key"),
+        http_client: auth_http_client,
     };
 
     // --- Storage ---
@@ -967,7 +981,7 @@ async fn serve(config: Config) -> Result<()> {
         db: db.clone(),
         fcm_project_id: std::env::var("OB_FCM_PROJECT_ID").ok(),
         fcm_service_account: std::env::var("OB_FCM_SERVICE_ACCOUNT").ok(),
-        http_client: reqwest::Client::new(),
+        http_client: http_client.clone(),
     };
 
     // --- Admin ---
