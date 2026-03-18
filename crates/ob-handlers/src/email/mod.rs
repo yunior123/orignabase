@@ -5,12 +5,23 @@
 //! - HTML template generators for order confirmation, seller notification,
 //!   low stock alert, and abandoned cart (bilingual EN/FR, CASL compliant)
 
+pub mod helpers;
+mod templates;
+
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
 
 use crate::shared::schema::email_config;
+
+pub use helpers::{
+    build_order_summary, build_order_summary_from_items, build_seller_order_summary, item_name,
+    item_price_cents, item_quantity, load_user_document, normalize_lang, order_items, record_key,
+    resolve_buyer_contact, resolve_seller_contact, send_order_confirmation_emails,
+    send_shipping_notification, str_field,
+};
+pub use templates::shipping_notification_html;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -32,7 +43,7 @@ pub type Result<T> = std::result::Result<T, EmailError>;
 // Bilingual strings (EN/FR — Quebec Bill 96 compliance)
 // ---------------------------------------------------------------------------
 
-fn t(key: &str, lang: &str) -> &'static str {
+pub(crate) fn t(key: &str, lang: &str) -> &'static str {
     let l = if lang == "fr" { 1 } else { 0 };
     match key {
         "col.product" => ["Product", "Produit"][l],
@@ -149,7 +160,7 @@ fn casl_footer(include_gst: bool, lang: &str) -> String {
 }
 
 /// Wrap content in the standard Origna email shell.
-fn email_wrapper(title: &str, content: &str, include_gst: bool, lang: &str) -> String {
+pub(crate) fn email_wrapper(title: &str, content: &str, include_gst: bool, lang: &str) -> String {
     let footer = casl_footer(include_gst, lang);
     format!(
         r##"<!DOCTYPE html><html><head><meta charset="utf-8"><title>{title}</title></head>
@@ -456,7 +467,7 @@ pub fn abandoned_cart_html(items: &[CartItem], buyer_name: &str, lang: &str) -> 
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn html_escape(s: &str) -> String {
+pub(crate) fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")

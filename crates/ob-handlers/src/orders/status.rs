@@ -8,9 +8,11 @@ use axum::{Json, Router, extract::State, routing::post};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tracing::info;
+use std::collections::HashSet;
+use tracing::{info, warn};
 
 use crate::HandlersState;
+use crate::email::{self, record_key, resolve_seller_contact, send_shipping_notification};
 use crate::shared::schema::{OrderStatus, PaymentStatus, collections, fields};
 use crate::shared::validation::{sanitize_html, validate_string, validate_uid};
 
@@ -194,6 +196,78 @@ fn all_items_delivered(items: &[Value]) -> bool {
 
 fn should_promote_order_to_delivered(payment_status: &str, all_delivered: bool) -> bool {
     all_delivered && payment_status == PaymentStatus::Captured.as_str()
+}
+
+fn mailjet_credentials(state: &HandlersState, order_id: &str) -> Option<(String, String)> {
+    match (
+        state.config.require_secret("mailjet_api_key"),
+        state.config.require_secret("mailjet_secret_key"),
+    ) {
+        (Ok(api_key), Ok(secret_key)) => Some((api_key, secret_key)),
+        (Err(err), _) | (_, Err(err)) => {
+            warn!(order_id = %order_id, error = %err, "Mailjet credentials unavailable; skipping payout scheduled email");
+            None
+        }
+    }
+}
+
+fn html_escape_fragment(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn payout_scheduled_html(order_id: &str, seller_name: &str) -> String {
+    let safe_seller_name = html_escape_fragment(seller_name);
+    let safe_order_id = html_escape_fragment(order_id);
+    format!(
+        "<!DOCTYPE html><html><body style=\"font-family:Arial,Helvetica,sans-serif;background:#f4f4f8;padding:24px;\"><div style=\"max-width:640px;margin:0 auto;background:#fff;padding:32px;border-radius:12px;\"><h2 style=\"margin-top:0;color:#1a1a2e;\">Payout scheduled</h2><p style=\"color:#555;font-size:15px;\">Hi {seller_name},</p><p style=\"color:#555;font-size:15px;\">Order <strong>#{order_id}</strong> has been marked as delivered. Your payout has been scheduled for the next payout run.</p><p style=\"color:#555;font-size:15px;\">You can review payout status from your seller dashboard.</p></div></body></html>",
+        seller_name = safe_seller_name,
+        order_id = safe_order_id,
+    )
+}
+
+async fn send_payout_scheduled_notifications(state: &HandlersState, order: &Value) {
+    let order_id = order
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(record_key)
+        .unwrap_or("");
+    let Some((api_key, secret_key)) = mailjet_credentials(state, order_id) else {
+        return;
+    };
+
+    let mut seller_ids = HashSet::new();
+    for item in items_array(order) {
+        let seller_id = str_field(&item, fields::SELLER_ID);
+        if !seller_id.is_empty() {
+            seller_ids.insert(seller_id.to_string());
+        }
+    }
+
+    for seller_id in seller_ids {
+        let Some((seller_email, seller_name)) = resolve_seller_contact(state, &seller_id).await
+        else {
+            warn!(order_id = %order_id, seller_id = %seller_id, "Seller email unavailable; skipping payout scheduled email");
+            continue;
+        };
+        let html = payout_scheduled_html(order_id, &seller_name);
+        let subject = format!("Payout scheduled for order #{order_id} — Origna");
+        if let Err(err) = email::send_email(
+            &state.http_client,
+            &api_key,
+            &secret_key,
+            &seller_email,
+            &subject,
+            &html,
+        )
+        .await
+        {
+            warn!(order_id = %order_id, seller_id = %seller_id, to = %seller_email, error = %err, "Failed to send payout scheduled email");
+        }
+    }
 }
 
 /// Check if user has admin role.
@@ -527,14 +601,14 @@ async fn update_order_status(
         });
 
         let mut update_data = json!({
-            fields::ITEMS: updated_items,
-            fields::UPDATED_AT: now,
+            fields::ITEMS: updated_items.clone(),
+            fields::UPDATED_AT: now.clone(),
             "lastActorId": req.user_id,
         });
 
         if all_shipped {
             update_data["orderStatus"] = json!(OrderStatus::Shipped.as_str());
-            update_data["shippedAt"] = json!(now);
+            update_data["shippedAt"] = json!(now.clone());
             if let Some(ref tn) = tracking_number {
                 update_data["trackingNumber"] = json!(tn);
                 update_data["carrier"] = json!(carrier.as_deref().unwrap_or(""));
@@ -546,6 +620,25 @@ async fn update_order_status(
             .update_document(collections::ORDERS, &req.order_id, update_data)
             .await
             .map_err(|e| ob_core::Error::Database(format!("Failed to update order: {e}")))?;
+
+        if all_shipped && tracking_number.is_some() {
+            let mut email_order = order.clone();
+            email_order[fields::ITEMS] = json!(updated_items);
+            email_order[fields::ORDER_STATUS] = json!(OrderStatus::Shipped.as_str());
+            email_order["shippedAt"] = json!(now.clone());
+            if let Some(ref tn) = tracking_number {
+                email_order[fields::TRACKING_NUMBER] = json!(tn);
+                email_order["trackingNumber"] = json!(tn);
+            }
+            if let Some(ref c) = carrier {
+                email_order[fields::SHIPPING_CARRIER] = json!(c);
+                email_order["carrier"] = json!(c);
+            }
+            if let Some(ref tn) = tracking_number {
+                send_shipping_notification(&state, &email_order, tn, carrier.as_deref(), None)
+                    .await;
+            }
+        }
 
         return Ok(Json(UpdateOrderStatusResponse {
             success: true,
@@ -597,6 +690,8 @@ async fn update_order_status(
         update_data[fields::ITEMS] = json!(updated_items);
     }
 
+    let email_update_data = update_data.clone();
+
     state
         .db
         .update_document(collections::ORDERS, &req.order_id, update_data)
@@ -623,6 +718,40 @@ async fn update_order_status(
         json!({ "oldStatus": old_status.as_str(), "newStatus": new_status.as_str() }),
     )
     .await;
+
+    if new_status == OrderStatus::Shipped && tracking_number.is_some() {
+        let mut email_order = order.clone();
+        for (key, value) in email_update_data
+            .as_object()
+            .into_iter()
+            .flat_map(|obj| obj.iter())
+        {
+            email_order[key] = value.clone();
+        }
+        if let Some(ref tn) = tracking_number {
+            email_order[fields::TRACKING_NUMBER] = json!(tn);
+            email_order["trackingNumber"] = json!(tn);
+        }
+        if let Some(ref c) = carrier {
+            email_order[fields::SHIPPING_CARRIER] = json!(c);
+            email_order["carrier"] = json!(c);
+        }
+        if let Some(ref tn) = tracking_number {
+            send_shipping_notification(&state, &email_order, tn, carrier.as_deref(), None).await;
+        }
+    }
+
+    if new_status == OrderStatus::Delivered {
+        let mut email_order = order.clone();
+        for (key, value) in email_update_data
+            .as_object()
+            .into_iter()
+            .flat_map(|obj| obj.iter())
+        {
+            email_order[key] = value.clone();
+        }
+        send_payout_scheduled_notifications(&state, &email_order).await;
+    }
 
     Ok(Json(UpdateOrderStatusResponse {
         success: true,

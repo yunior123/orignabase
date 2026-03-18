@@ -1,15 +1,16 @@
 //! Stripe webhook handler.
 //! Validates Stripe webhook signatures and routes events to appropriate handlers.
 
-use axum::{Json, Router, extract::State, extract::Request, routing::post};
+use axum::{Json, Router, extract::Request, extract::State, routing::post};
 use hmac::{Hmac, Mac};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::Sha256;
 use std::collections::HashMap;
 use tracing::{error, info, warn};
 
 use crate::HandlersState;
-use crate::shared::schema::{collections, fields, OrderStatus};
+use crate::email;
+use crate::shared::schema::{OrderStatus, collections, fields};
 use ob_database::Transaction;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -181,15 +182,18 @@ fn verify_stripe_signature(body: &[u8], signature: &str, secret: &str) -> bool {
 // Webhook Deduplication
 // ---------------------------------------------------------------------------
 
-async fn is_duplicate_webhook(state: &HandlersState, event_id: &str) -> Result<bool, ob_core::Error> {
+async fn is_duplicate_webhook(
+    state: &HandlersState,
+    event_id: &str,
+) -> Result<bool, ob_core::Error> {
     // Validate event ID format before querying
     ob_core::validate_surreal_record_id(event_id)?;
-    
+
     let result = state
         .db
         .query_bind_value(
             "SELECT * FROM webhook_events WHERE id = $event_id LIMIT 1",
-            serde_json::json!({"event_id": event_id})
+            serde_json::json!({"event_id": event_id}),
         )
         .await?;
 
@@ -235,11 +239,12 @@ async fn find_order_by_payment_intent(
     let rows: Vec<Value> = state
         .db
         .query_bind_value(
-            &format!("SELECT * FROM {} WHERE {} = $pi_id LIMIT 1", 
-                collections::ORDERS, 
+            &format!(
+                "SELECT * FROM {} WHERE {} = $pi_id LIMIT 1",
+                collections::ORDERS,
                 fields::PAYMENT_INTENT_ID
             ),
-            serde_json::json!({"pi_id": payment_intent_id})
+            serde_json::json!({"pi_id": payment_intent_id}),
         )
         .await?;
 
@@ -254,10 +259,11 @@ async fn find_order_by_metadata_id(
     let rows: Vec<Value> = state
         .db
         .query_bind_value(
-            &format!("SELECT * FROM {} WHERE id = $order_id LIMIT 1", 
+            &format!(
+                "SELECT * FROM {} WHERE id = $order_id LIMIT 1",
                 collections::ORDERS
             ),
-            serde_json::json!({"order_id": order_id})
+            serde_json::json!({"order_id": order_id}),
         )
         .await?;
 
@@ -271,11 +277,12 @@ async fn update_order_status(
     new_status: &str,
 ) -> Result<(), ob_core::Error> {
     let now = chrono::Utc::now().to_rfc3339();
-    
+
     state
         .db
         .query_bind_value(
-            &format!("UPDATE {} SET {} = $status, updatedAt = $now WHERE id = $order_id",
+            &format!(
+                "UPDATE {} SET {} = $status, updatedAt = $now WHERE id = $order_id",
                 collections::ORDERS,
                 fields::ORDER_STATUS
             ),
@@ -283,7 +290,7 @@ async fn update_order_status(
                 "order_id": order_id,
                 "status": new_status,
                 "now": now,
-            })
+            }),
         )
         .await?;
 
@@ -320,24 +327,22 @@ async fn restore_stock_for_order(
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let quantity = item
-            .get("quantity")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(1);
+        let quantity = item.get("quantity").and_then(|v| v.as_i64()).unwrap_or(1);
 
         if !product_id.is_empty() && quantity > 0 {
             // Build product record ID: "products:productId"
             let product_record_id = format!("{}:{}", collections::PRODUCTS, product_id);
-            
+
             tx.add(
-                &format!("UPDATE {} SET {} += $qty WHERE id = $id",
+                &format!(
+                    "UPDATE {} SET {} += $qty WHERE id = $id",
                     collections::PRODUCTS,
                     fields::STOCK_QUANTITY
                 ),
                 Some(serde_json::json!({
                     "id": product_record_id,
                     "qty": quantity,
-                }))
+                })),
             );
         }
     }
@@ -379,24 +384,22 @@ async fn decrement_stock_for_order(
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let quantity = item
-            .get("quantity")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(1);
+        let quantity = item.get("quantity").and_then(|v| v.as_i64()).unwrap_or(1);
 
         if !product_id.is_empty() && quantity > 0 {
             // Build product record ID: "products:productId"
             let product_record_id = format!("{}:{}", collections::PRODUCTS, product_id);
-            
+
             tx.add(
-                &format!("UPDATE {} SET {} -= $qty WHERE id = $id",
+                &format!(
+                    "UPDATE {} SET {} -= $qty WHERE id = $id",
                     collections::PRODUCTS,
                     fields::STOCK_QUANTITY
                 ),
                 Some(serde_json::json!({
                     "id": product_record_id,
                     "qty": quantity,
-                }))
+                })),
             );
         }
     }
@@ -421,10 +424,10 @@ async fn mark_coupon_redeemed(
     }
 
     let coupon_code_safe = coupon_code.to_uppercase();
-    
+
     // Try to update coupon use record
     let now = chrono::Utc::now().to_rfc3339();
-    
+
     let rows: Vec<Value> = state
         .db
         .query_bind_value(
@@ -436,7 +439,7 @@ async fn mark_coupon_redeemed(
                 "order_id": order_id,
                 "code": coupon_code_safe,
                 "now": now,
-            })
+            }),
         )
         .await
         .unwrap_or_default();
@@ -457,16 +460,28 @@ async fn release_coupon_reservation(
     let _rows: Vec<Value> = state
         .db
         .query_bind_value(
-            &format!("DELETE FROM {} WHERE orderId = $order_id AND redeemedAt IS NULL",
+            &format!(
+                "DELETE FROM {} WHERE orderId = $order_id AND redeemedAt IS NULL",
                 collections::COUPON_USES
             ),
-            serde_json::json!({"order_id": order_id})
+            serde_json::json!({"order_id": order_id}),
         )
         .await
         .unwrap_or_default();
 
     info!(order_id = %order_id, "Coupon reservation released");
     Ok(())
+}
+
+fn str_field<'a>(value: &'a Value, field: &str) -> &'a str {
+    value.get(field).and_then(|v| v.as_str()).unwrap_or("")
+}
+
+async fn send_payment_authorized_emails(
+    state: &HandlersState,
+    order: &Value,
+) -> Result<(), ob_core::Error> {
+    email::send_order_confirmation_emails(state, order).await
 }
 
 // ---------------------------------------------------------------------------
@@ -533,20 +548,25 @@ async fn handle_payment_intent_succeeded(
     state
         .db
         .query_bind_value(
-            &format!("UPDATE {} SET {} = $pi_id WHERE id = $order_id",
+            &format!(
+                "UPDATE {} SET {} = $pi_id WHERE id = $order_id",
                 collections::ORDERS,
                 fields::PAYMENT_INTENT_ID
             ),
             serde_json::json!({
                 "order_id": order_id,
                 "pi_id": pi_id,
-            })
+            }),
         )
         .await?;
 
     // Mark coupon as redeemed if one was used
     if !coupon_code.is_empty() {
         mark_coupon_redeemed(state, order_id, coupon_code).await?;
+    }
+
+    if let Err(err) = send_payment_authorized_emails(state, &order).await {
+        warn!(order_id = %order_id, error = %err, "Failed to prepare payment success emails");
     }
 
     info!(
@@ -726,10 +746,12 @@ async fn handle_charge_refunded(
     // Find the order by payment intent
     let order = find_order_by_payment_intent(state, payment_intent_id)
         .await?
-        .ok_or_else(|| ob_core::Error::NotFound(format!(
-            "Order not found for payment intent {}",
-            payment_intent_id
-        )))?;
+        .ok_or_else(|| {
+            ob_core::Error::NotFound(format!(
+                "Order not found for payment intent {}",
+                payment_intent_id
+            ))
+        })?;
 
     let order_id = order
         .get("id")
@@ -754,7 +776,7 @@ async fn handle_charge_refunded(
 
     // Update order with refund info
     let now = chrono::Utc::now().to_rfc3339();
-    
+
     state
         .db
         .query_bind_value(
