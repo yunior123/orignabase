@@ -1,5 +1,6 @@
 use crate::{AppState, Config, Result};
 use axum::Router;
+use axum::http::HeaderValue;
 use std::time::Duration;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
@@ -8,6 +9,7 @@ use tower_http::trace::TraceLayer;
 
 /// Build the Axum router with all middleware.
 pub fn build_router(state: AppState) -> Router {
+    let is_test_mode = std::env::var("OB_TEST_MODE").unwrap_or_default() == "1";
     Router::new()
         .route("/health", axum::routing::get(health_check))
         .layer(CompressionLayer::new())
@@ -16,13 +18,36 @@ pub fn build_router(state: AppState) -> Router {
             Duration::from_secs(30),
         ))
         .layer(TraceLayer::new_for_http())
-        .layer(
-            CorsLayer::new()
-                .allow_origin(tower_http::cors::Any)
-                .allow_methods(tower_http::cors::Any)
-                .allow_headers(tower_http::cors::Any),
-        )
+        .layer(build_cors_layer(is_test_mode))
         .with_state(state)
+}
+
+/// Build CORS layer with explicit origin whitelist.
+/// CRITICAL FIX: Replace .allow_origin(Any) with specific production domains.
+fn build_cors_layer(is_test_mode: bool) -> CorsLayer {
+    let mut allowed_origins = vec![
+        "https://orignagta.ca".parse::<HeaderValue>().unwrap(),
+        "https://www.orignagta.ca".parse::<HeaderValue>().unwrap(),
+        "https://dev.orignagta.ca".parse::<HeaderValue>().unwrap(),
+        "https://staging.orignagta.ca".parse::<HeaderValue>().unwrap(),
+    ];
+
+    // Allow localhost ONLY in test mode (for local development)
+    if is_test_mode {
+        allowed_origins.push("http://localhost:3000".parse::<HeaderValue>().unwrap());
+        allowed_origins.push("http://localhost:5173".parse::<HeaderValue>().unwrap());
+    }
+
+    let mut cors = CorsLayer::new()
+        .allow_credentials();
+
+    for origin in allowed_origins {
+        cors = cors.allow_origin(origin);
+    }
+
+    cors
+        .allow_methods(tower_http::cors::Any)
+        .allow_headers(tower_http::cors::Any)
 }
 
 async fn health_check() -> &'static str {
