@@ -1,0 +1,172 @@
+# OrignaBase Rust Backend — 12 Critical Issues & Fixes
+
+**Audit Date:** 2026-03-18
+**Comprehensive Fix Document:** /Users/yuniorrodriguezosorio/Documents/GitHub/orignabase/RUST_BACKEND_12_FIXES.md
+
+## Executive Summary
+
+**12 security, data integrity, and performance issues identified across OrignaBase (Rust backend)**
+- 3 CRITICAL issues (payout stub, float math, rate limiter bypass)
+- 5 HIGH risk issues (indexes, concurrency, auth weaknesses)
+- 4 MEDIUM risk issues (validation, warehouse check)
+
+**Total Effort:** 15 hours | **Critical Path:** 6 hours (P0 issues)
+
+---
+
+## Issues at a Glance
+
+### CRITICAL (Fix Immediately)
+1. **Payout Implementation Incomplete** (cron/mod.rs:271–285)
+   - Payouts marked "completed" WITHOUT calling Stripe Transfer API
+   - Sellers paid $0 while orders show paid
+   - Fix: Implement stripe_create_transfer() call with Idempotency-Key
+
+2. **Float Math in Shipping** (shipping_calc/mod.rs)
+   - All calculations in f64 dollars → rounding errors accumulate
+   - Sellers charged/refunded wrong amounts
+   - Fix: Convert to i64 cents, divide only at display layer
+
+3. **Rate Limiter X-Forwarded-For Bypass** (shared/rate_limiter.rs)
+   - Trusts X-Forwarded-For from any source
+   - Attacker spoofs IP → rate limits useless
+   - Fix: Only trust from 127.0.0.1 (Caddy proxy)
+
+### HIGH (Fix Within Sprint)
+4. **Missing DB Indexes** (ratings.rs, questions.rs, favorites)
+   - No indexes on (productId, createdAt), (userId, productId)
+   - N+1 queries, slow pagination, high DB load
+   - Fix: Add SurrealDB DEFINE INDEX statements in new shared/indexes.rs
+
+5. **Refund + Payout Race Condition** (orders/refunds.rs:333–336)
+   - Payout processes while refund tries to reverse → ledger inconsistency
+   - Partially fixed (payout status check), needs transaction isolation
+   - Fix: Add SurrealDB transaction with payoutLocked flag
+
+6. **Subscription Double-Create** (payments/subscriptions.rs:200–230)
+   - Race condition: two simultaneous requests create duplicates
+   - User charged twice
+   - Fix: Check for active subscription BEFORE creation
+
+7. **Password Reset Token Reuse** (ob-auth/routes.rs)
+   - Token valid forever → attacker can reset password anytime
+   - Fix: Mark token used immediately after verification
+
+8. **TOTP Brute-Force Vulnerability** (ob-auth/routes.rs)
+   - No rate limiting on TOTP attempts
+   - 6-digit code crackable (~1M attempts)
+   - Fix: Max 5 attempts per 15 minutes, lock MFA after exceeded
+
+### MEDIUM (Quality Improvements)
+9. **OAuth State Nonce Memory Leak** (ob-auth/routes.rs)
+   - In-memory HashMap grows unbounded → memory exhaustion DoS
+   - Fix: Use DB storage or add TTL cleanup cron job
+
+10. **Phone Number Validation** (addresses/mod.rs)
+    - Invalid phone numbers break SMS notifications
+    - Fix: Add E.164 format validation (+14165551234)
+
+11. **Postal Code Validation** (addresses/mod.rs)
+    - Invalid postal codes fail shipping lookups
+    - Fix: Enforce Canadian format [A-Z]\d[A-Z] \d[A-Z]\d
+
+12. **Multi-Seller Warehouse Validation** (shipping_calc/mod.rs)
+    - Shipping calculated without verifying seller has warehouse
+    - Fix: Validate warehouseAddress before calculation
+
+---
+
+## Impact Assessment
+
+| Issue | Impact | Users Affected | Revenue Impact |
+|-------|--------|----------------|----------------|
+| Payout stub | $0 paid to sellers | All sellers | Critical |
+| Float math | Pricing inconsistency | All transactions | High |
+| Rate limiter | Auth bypass | Attackers | Critical |
+| Missing indexes | 10–100x slower search | All search users | Medium |
+| Refund race | Ledger corruption | <1% of refunds | High |
+| Subscription dupe | Double charges | <0.1% of subs | Medium |
+| Token reuse | Account takeover | Phishing targets | High |
+| TOTP brute | Account compromise | Admin + sellers | High |
+
+---
+
+## Implementation Plan
+
+### Phase 1: Critical Path (6 hours, blocks all else)
+1. Issue #3: Payout Stripe transfers (2h) → seller trust restored
+2. Issue #2: Shipping float-to-cents refactor (3h) → financial data safety
+3. Issue #9: X-Forwarded-For validation (1h) → attack surface reduced
+
+### Phase 2: High Risk (6 hours, next sprint)
+4. Issue #1: Add indexes (1h)
+5. Issue #4: Refund transaction lock (1h)
+6. Issue #5: Subscription duplicate check (1h)
+7. Issue #6: Token reuse prevention (1h)
+8. Issue #8: TOTP rate limiting (1h)
+9. Issue #7: OAuth state cleanup (1h)
+
+### Phase 3: Quality (3 hours, backlog)
+10–12: Validation + warehouse check (3h total)
+
+---
+
+## Testing Checklist
+
+**Before Merging Each Fix:**
+- [ ] No new cargo audit warnings
+- [ ] Unit tests pass: `cargo test --all`
+- [ ] Integration tests pass: dev DB tests
+
+**Critical Tests:**
+- [ ] Payout: Test Stripe transfer with test account, verify transfer ID in DB
+- [ ] Shipping: 100+ calculations produce consistent results
+- [ ] Refund race: Concurrent refund + payout doesn't double-process
+- [ ] Subscription: Duplicate creation rejected
+- [ ] TOTP: Locked after 5 failures
+- [ ] Rate limit: Spoofed X-Forwarded-For doesn't bypass limits
+
+---
+
+## Files & Locations
+
+**Main Documentation:**
+- `/Users/yuniorrodriguezosorio/Documents/GitHub/orignabase/RUST_BACKEND_12_FIXES.md` — Full audit (1034 lines)
+- `/Users/yuniorrodriguezosorio/.claude/projects/-Users-yuniorrodriguezosorio-Documents-GitHub-origna-gta/memory/MEMORY.md` — Summary in MEMORY
+
+**Key Source Files to Modify:**
+- `crates/ob-handlers/src/cron/mod.rs` — Payout fix (#3)
+- `crates/ob-handlers/src/shipping_calc/mod.rs` — Float math (#2), warehouse validation (#12)
+- `crates/ob-handlers/src/shared/rate_limiter.rs` — X-Forwarded-For validation (#9)
+- `crates/ob-handlers/src/shared/indexes.rs` — NEW, for indexes (#1)
+- `crates/ob-handlers/src/orders/refunds.rs` — Refund race condition (#4)
+- `crates/ob-handlers/src/payments/subscriptions.rs` — Duplicate check (#5)
+- `crates/ob-auth/src/routes.rs` — Token reuse (#6), TOTP brute-force (#8), OAuth leak (#7)
+- `crates/ob-handlers/src/addresses/mod.rs` — Phone + postal validation (#10–11)
+
+---
+
+## Risk Mitigation
+
+**Deployment Strategy:**
+1. Deploy P0 fixes in single batch (critical path)
+2. Run 48h validation on prod (payout transfers, rate limits)
+3. Deploy P1 fixes in next sprint
+4. P2 fixes on backlog (no production risk)
+
+**Rollback Plan:**
+- Each fix should be independently revertible (no data migrations)
+- Payout fix: if Stripe transfer fails, mark status "failed" (safe)
+- Shipping fix: backward compatible (divide by 100 in API response)
+
+---
+
+## Next Steps
+
+1. **Review** full audit document (1034 lines)
+2. **Prioritize** P0 fixes for immediate sprint
+3. **Assign** ownership (1 dev per module)
+4. **Implement** with comprehensive test coverage
+5. **Deploy** P0 before next seller payout cycle
+6. **Monitor** Stripe webhook success rate + payout completion
+
