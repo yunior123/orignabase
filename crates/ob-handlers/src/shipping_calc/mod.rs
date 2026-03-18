@@ -411,6 +411,40 @@ async fn calculate_shipping(
     // (calculated after all sellers, applied at the end)
 
     for seller_items in by_seller.values() {
+        // CRITICAL FIX #12: Validate seller has warehouse configured
+        let first_item = seller_items.first();
+        if let Some(first) = first_item {
+            let seller_id = first.seller_id.as_deref().unwrap_or("unknown");
+            
+            // Check if seller has warehouse address configured
+            let seller = state.db.get_document(collections::USERS, seller_id)
+                .await
+                .map_err(|_| ob_core::Error::NotFound(
+                    format!("Seller {} not found", seller_id)
+                ))?;
+            
+            let warehouse_addr = seller
+                .get("warehouseAddress")
+                .and_then(|v| v.as_object());
+            
+            if warehouse_addr.is_none() {
+                return Err(ob_core::Error::Validation(
+                    format!("Seller {} has no warehouse configured. Please contact seller to set up warehouse address.", seller_id)
+                ));
+            }
+            
+            // Validate warehouse has required fields
+            let warehouse_province = warehouse_addr
+                .and_then(|w| w.get("province"))
+                .and_then(|v| v.as_str());
+            
+            if warehouse_province.is_none() {
+                return Err(ob_core::Error::Validation(
+                    format!("Seller {} warehouse missing province field", seller_id)
+                ));
+            }
+        }
+        
         // Filter to chargeable items
         let chargeable: Vec<&ShippingItem> = seller_items
             .iter()
