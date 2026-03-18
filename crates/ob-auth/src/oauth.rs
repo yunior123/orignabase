@@ -1,5 +1,6 @@
 use ob_core::{Error, Result};
 use serde::{Deserialize, Serialize};
+use jsonwebtoken::{decode_header, Algorithm, DecodingKey, Validation, decode};
 
 /// User info extracted from an OAuth provider after token verification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,8 +53,6 @@ struct GoogleTokenExchangeResponse {
 }
 
 /// Verify a Google ID token by calling Google's tokeninfo endpoint.
-/// In production, you'd verify the JWT signature locally using Google's public keys.
-/// This approach is simpler and works for server-side verification.
 pub async fn verify_google_id_token(
     id_token: &str,
     expected_client_id: &str,
@@ -93,7 +92,6 @@ pub async fn verify_google_id_token(
 }
 
 /// Exchange a Google authorization code for tokens, then verify the returned ID token.
-/// Uses the provided http_client instead of creating a new one.
 pub async fn exchange_google_authorization_code(
     http_client: &reqwest::Client,
     authorization_code: &str,
@@ -154,8 +152,97 @@ struct AppleTokenResponse {
     access_token: Option<String>,
 }
 
+/// CRITICAL FIX: Fetch JWKS from a remote URL
+async fn fetch_jwks(url: &str, http_client: &reqwest::Client) -> Result<serde_json::Value> {
+    let resp = http_client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| Error::Auth(format!("Failed to fetch JWKS: {e}")))?;
+
+    if !resp.status().is_success() {
+        return Err(Error::Auth("JWKS endpoint returned error".into()));
+    }
+
+    resp.json()
+        .await
+        .map_err(|e| Error::Auth(format!("Failed to parse JWKS: {e}")))
+}
+
+/// CRITICAL FIX: Extract kid (key ID) from JWT header
+fn get_kid_from_token(token: &str) -> Result<String> {
+    let header = decode_header(token)
+        .map_err(|_| Error::Auth("Failed to decode JWT header".into()))?;
+    
+    header.kid
+        .ok_or_else(|| Error::Auth("JWT missing 'kid' header".into()))
+}
+
+/// CRITICAL FIX: Find public key in JWKS by kid
+fn find_public_key_in_jwks(jwks: &serde_json::Value, kid: &str) -> Result<String> {
+    let keys = jwks["keys"]
+        .as_array()
+        .ok_or_else(|| Error::Auth("Invalid JWKS format".into()))?;
+
+    for key_data in keys {
+        if key_data["kid"].as_str() == Some(kid) {
+            // Return PEM-formatted public key from x5c (certificate chain)
+            return key_data["x5c"]
+                .as_array()
+                .and_then(|certs| certs.first())
+                .and_then(|cert| cert.as_str())
+                .ok_or_else(|| Error::Auth("Certificate not found in JWKS".into()))
+                .map(|cert| format!(
+                    "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----",
+                    cert
+                ))
+        }
+    }
+
+    Err(Error::Auth("Public key not found in JWKS".into()))
+}
+
+/// CRITICAL FIX: Verify Apple ID token signature using Apple's JWKS
+async fn verify_apple_id_token_with_signature(
+    id_token: &str,
+    http_client: &reqwest::Client,
+) -> Result<AppleTokenInfo> {
+    // Fetch Apple's JWKS
+    let jwks = fetch_jwks(
+        "https://appleid.apple.com/auth/keys",
+        http_client,
+    ).await?;
+
+    // Extract kid from JWT header
+    let kid = get_kid_from_token(id_token)?;
+    
+    // Find matching public key in JWKS
+    let cert_pem = find_public_key_in_jwks(&jwks, &kid)?;
+
+    // Create decoding key from certificate
+    let decoding_key = DecodingKey::from_ec_pem(cert_pem.as_bytes())
+        .map_err(|e| Error::Auth(format!("Invalid EC certificate: {e}")))?;
+
+    // Verify JWT signature with ES256 algorithm
+    let validation = Validation::new(Algorithm::ES256);
+    
+    let token_data = decode::<AppleTokenInfo>(
+        id_token,
+        &decoding_key,
+        &validation,
+    ).map_err(|e| Error::Auth(format!("JWT verification failed: {e}")))?;
+
+    let claims = token_data.claims;
+
+    // Validate required claims
+    if claims.sub.is_empty() {
+        return Err(Error::Auth("Empty 'sub' claim in Apple token".into()));
+    }
+
+    Ok(claims)
+}
+
 /// Exchange an Apple authorization code for tokens, then extract user info.
-/// Uses the provided http_client instead of creating a new one.
 pub async fn exchange_apple_authorization_code(
     http_client: &reqwest::Client,
     authorization_code: &str,
@@ -190,17 +277,8 @@ pub async fn exchange_apple_authorization_code(
         .id_token
         .ok_or_else(|| Error::Auth("No ID token in Apple response".into()))?;
 
-    // Decode JWT claims (Apple tokens can be verified without signature check in dev)
-    let parts: Vec<&str> = id_token.split('.').collect();
-    if parts.len() != 3 {
-        return Err(Error::Auth("Invalid Apple ID token format".into()));
-    }
-
-    let payload = parts[1];
-    let decoded = base64_decode(payload)
-        .map_err(|_| Error::Auth("Failed to decode Apple token payload".into()))?;
-    let claims: AppleTokenInfo = serde_json::from_slice(&decoded)
-        .map_err(|_| Error::Auth("Failed to parse Apple token claims".into()))?;
+    // CRITICAL FIX: Verify JWT signature instead of base64 decode
+    let claims = verify_apple_id_token_with_signature(&id_token, http_client).await?;
 
     Ok(OAuthUserInfo {
         provider_id: claims.sub,
@@ -227,8 +305,50 @@ struct OidcTokenResponse {
     access_token: Option<String>,
 }
 
+/// CRITICAL FIX: Verify OIDC ID token signature using provider's JWKS
+async fn verify_oidc_id_token_with_signature(
+    id_token: &str,
+    jwks_uri: &str,
+    http_client: &reqwest::Client,
+) -> Result<OidcTokenInfo> {
+    // Fetch OIDC provider's JWKS
+    let jwks = fetch_jwks(jwks_uri, http_client).await?;
+
+    // Extract kid from JWT header
+    let kid = get_kid_from_token(id_token)?;
+    
+    // Find matching public key in JWKS
+    let cert_pem = find_public_key_in_jwks(&jwks, &kid)?;
+
+    // Try both RSA and EC keys depending on algorithm
+    let decoding_key = DecodingKey::from_rsa_pem(cert_pem.as_bytes())
+        .or_else(|_| DecodingKey::from_ec_pem(cert_pem.as_bytes()))
+        .map_err(|e| Error::Auth(format!("Invalid certificate: {e}")))?;
+
+    // Verify JWT signature (try RS256 first, then ES256)
+    let validation = Validation::new(Algorithm::RS256);
+    
+    let token_data = decode::<OidcTokenInfo>(
+        id_token,
+        &decoding_key,
+        &validation,
+    ).or_else(|_| {
+        let validation_ec = Validation::new(Algorithm::ES256);
+        decode::<OidcTokenInfo>(id_token, &decoding_key, &validation_ec)
+    })
+    .map_err(|e| Error::Auth(format!("JWT verification failed: {e}")))?;
+
+    let claims = token_data.claims;
+
+    // Validate required claims
+    if claims.sub.is_empty() {
+        return Err(Error::Auth("Empty 'sub' claim in OIDC token".into()));
+    }
+
+    Ok(claims)
+}
+
 /// Exchange an OIDC authorization code for tokens, then extract user info.
-/// Uses the provided http_client instead of creating a new one.
 pub async fn exchange_oidc_authorization_code(
     http_client: &reqwest::Client,
     token_endpoint: &str,
@@ -264,17 +384,16 @@ pub async fn exchange_oidc_authorization_code(
         .id_token
         .ok_or_else(|| Error::Auth("No ID token in OIDC response".into()))?;
 
-    // Decode JWT claims
-    let parts: Vec<&str> = id_token.split('.').collect();
-    if parts.len() != 3 {
-        return Err(Error::Auth("Invalid OIDC ID token format".into()));
-    }
+    // Extract JWKS URI from OIDC discovery (simplified: assume standard path)
+    // In production, fetch from /.well-known/openid-configuration
+    let issuer = token_endpoint
+        .split("/token")
+        .next()
+        .ok_or_else(|| Error::Auth("Invalid token endpoint".into()))?;
+    let jwks_uri = format!("{}/.well-known/openid-configuration", issuer);
 
-    let payload = parts[1];
-    let decoded = base64_decode(payload)
-        .map_err(|_| Error::Auth("Failed to decode OIDC token payload".into()))?;
-    let claims: OidcTokenInfo = serde_json::from_slice(&decoded)
-        .map_err(|_| Error::Auth("Failed to parse OIDC token claims".into()))?;
+    // CRITICAL FIX: Verify JWT signature instead of base64 decode
+    let claims = verify_oidc_id_token_with_signature(&id_token, &jwks_uri, http_client).await?;
 
     Ok(OAuthUserInfo {
         provider_id: claims.sub,
