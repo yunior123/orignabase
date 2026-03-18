@@ -373,6 +373,36 @@ async fn create_checkout_session(
                 )));
             }
         }
+
+    // --- Seller Stripe Connect onboarding check (CRITICAL FIX: P0) ---
+    for seller_id in &unique_seller_ids {
+        if let Ok(seller) = state.db.get_document(collections::USERS, seller_id).await {
+            // Verify seller has completed Stripe Connect onboarding
+            let onboarding_completed = seller
+                .get(fields::ONBOARDING_COMPLETED)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !onboarding_completed {
+                return Err(ob_core::Error::Validation(format!(
+                    "Seller {} has not completed Stripe Connect onboarding. Cannot accept orders from this seller.",
+                    seller_id
+                )));
+            }
+            
+            // Verify payouts are enabled
+            let payouts_enabled = seller
+                .get(fields::PAYOUTS_ENABLED)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !payouts_enabled {
+                return Err(ob_core::Error::Validation(format!(
+                    "Seller {} cannot currently accept payments.",
+                    seller_id
+                )));
+            }
+        }
+    }
+
     }
 
     // --- Duplicate order detection (5-minute window) ---
@@ -444,10 +474,13 @@ async fn create_checkout_session(
         form_data.push((format!("line_items[{}][quantity]", i), qty.to_string()));
     }
 
+    let idempotency_key = format!("checkout_{}_{}", order_id, chrono::Utc::now().timestamp_millis());
+    
     let stripe_response = state
         .http_client
         .post(format!("{}/checkout/sessions", state.stripe_base_url))
         .basic_auth(stripe_key, None::<&str>)
+        .header("Idempotency-Key", &idempotency_key)
         .form(&form_data)
         .send()
         .await
