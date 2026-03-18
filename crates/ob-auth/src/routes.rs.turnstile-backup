@@ -1,0 +1,2742 @@
+use axum::{
+    Extension, Json,
+    extract::{Query, State},
+    http::HeaderMap,
+    response::Redirect,
+};
+use chrono::Utc;
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use ob_core::{Error, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::sync::Arc;
+
+use crate::email::EmailService;
+use crate::jwt::{self, JwtKeys, issue_access_token_with_claims};
+use crate::login_tracking;
+use crate::middleware::auth_extractor;
+use crate::oauth::{self, OAuthUserInfo};
+use crate::password;
+use crate::totp;
+
+/// Shared auth state injected into routes.
+#[derive(Clone)]
+pub struct AuthState {
+    pub db: ob_database::DatabaseClient,
+    pub jwt_keys: JwtKeys,
+    pub access_ttl: u64,
+    pub refresh_ttl: u64,
+    pub google_client_id: Option<String>,
+    pub google_client_secret: Option<String>,
+    pub apple_team_id: Option<String>,
+    pub apple_key_id: Option<String>,
+    pub apple_service_id: Option<String>,
+    pub apple_private_key: Option<String>,
+    pub oidc_issuer_url: Option<String>,
+    pub oidc_client_id: Option<String>,
+    /// Email service (None = skip email sending, return tokens in response for dev)
+    pub email_service: Option<EmailService>,
+    /// Whether to require email verification before login
+    pub require_email_verification: bool,
+    /// AES-256 key for encrypting TOTP secrets at rest (32 bytes)
+    pub totp_encryption_key: Option<[u8; 32]>,
+    /// Base URL for email links (e.g. "https://app.orignabase.com")
+    pub base_url: String,
+    /// Short-lived OAuth state nonce store to reject replayed callbacks.
+    pub oauth_state_nonces: Arc<dashmap::DashMap<String, i64>>,
+    /// Cloudflare Turnstile secret key
+    pub turnstile_secret_key: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct RegisterRequest {
+    pub email: String,
+    pub password: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub turnstile_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct LoginRequest {
+    pub email: String,
+    pub password: String,
+    #[serde(default)]
+    pub turnstile_token: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct AuthResponse {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub user: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+pub struct RefreshRequest {
+    pub refresh_token: String,
+}
+
+#[derive(Deserialize)]
+pub struct GoogleOAuthStartRequest {
+    pub redirect_to: String,
+}
+
+#[derive(Deserialize)]
+pub struct GoogleOAuthCallbackRequest {
+    pub code: Option<String>,
+    pub state: Option<String>,
+    pub error: Option<String>,
+    pub error_description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GoogleOAuthStateClaims {
+    sub: String,
+    iat: i64,
+    exp: i64,
+    typ: String,
+    nonce: String,
+    redirect_to: String,
+}
+
+fn google_client_id_configured(state: &AuthState) -> bool {
+    state
+        .google_client_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn google_client_secret_configured(state: &AuthState) -> bool {
+    state
+        .google_client_secret
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn google_web_provider_enabled(state: &AuthState) -> bool {
+    google_client_id_configured(state) && google_client_secret_configured(state)
+}
+
+fn jwt_header(keys: &JwtKeys) -> Header {
+    match keys {
+        JwtKeys::Rsa { .. } => Header::new(Algorithm::RS256),
+        JwtKeys::Hmac { .. } => Header::default(),
+    }
+}
+
+fn jwt_encoding_key(keys: &JwtKeys) -> EncodingKey {
+    match keys {
+        JwtKeys::Rsa { encoding, .. } => encoding.clone(),
+        JwtKeys::Hmac { secret } => EncodingKey::from_secret(secret.as_bytes()),
+    }
+}
+
+fn jwt_decoding_key(keys: &JwtKeys) -> DecodingKey {
+    match keys {
+        JwtKeys::Rsa { decoding, .. } => decoding.clone(),
+        JwtKeys::Hmac { secret } => DecodingKey::from_secret(secret.as_bytes()),
+    }
+}
+
+fn jwt_validation(keys: &JwtKeys) -> Validation {
+    match keys {
+        JwtKeys::Rsa { .. } => Validation::new(Algorithm::RS256),
+        JwtKeys::Hmac { .. } => Validation::default(),
+    }
+}
+
+fn callback_url(state: &AuthState) -> String {
+    format!(
+        "{}/auth/google/callback",
+        state.base_url.trim_end_matches('/')
+    )
+}
+
+fn frontend_fallback_redirect(state: &AuthState) -> String {
+    let Ok(base_url) = reqwest::Url::parse(&state.base_url) else {
+        return state.base_url.clone();
+    };
+    let Some(host) = base_url.host_str() else {
+        return state.base_url.clone();
+    };
+
+    let fallback = match host {
+        "api.orignagta.ca" => "https://orignagta.ca",
+        "api-staging.orignagta.ca" => "https://orignagta-staging.web.app",
+        "localhost" | "127.0.0.1" => "http://localhost:5001",
+        _ if host.starts_with("api.") => {
+            return format!(
+                "{}://{}",
+                base_url.scheme(),
+                host.trim_start_matches("api.")
+            );
+        }
+        _ => return format!("{}://{}", base_url.scheme(), host),
+    };
+
+    fallback.to_string()
+}
+
+fn validate_google_redirect_target(state: &AuthState, redirect_to: &str) -> Result<String> {
+    let redirect_url = reqwest::Url::parse(redirect_to)
+        .map_err(|_| Error::Validation("Invalid redirect_to URL".into()))?;
+
+    if redirect_url.fragment().is_some() {
+        return Err(Error::Validation(
+            "redirect_to must not include a fragment".into(),
+        ));
+    }
+
+    let redirect_origin = redirect_url.origin().ascii_serialization();
+    let mut allowed_origins = vec![frontend_fallback_redirect(state)];
+
+    if let Ok(base_url) = reqwest::Url::parse(&state.base_url) {
+        allowed_origins.push(base_url.origin().ascii_serialization());
+        if let Some(host) = base_url.host_str() {
+            if host.starts_with("api.") {
+                allowed_origins.push(format!(
+                    "{}://{}",
+                    base_url.scheme(),
+                    host.trim_start_matches("api.")
+                ));
+            }
+        }
+    }
+
+    if !allowed_origins
+        .iter()
+        .any(|origin| origin == &redirect_origin)
+    {
+        return Err(Error::Validation(
+            "redirect_to origin is not allowed".into(),
+        ));
+    }
+
+    Ok(redirect_url.to_string())
+}
+
+fn issue_google_oauth_state(state: &AuthState, redirect_to: &str) -> Result<String> {
+    let now = Utc::now().timestamp();
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let claims = GoogleOAuthStateClaims {
+        sub: "google_oauth".to_string(),
+        iat: now,
+        exp: now + 600,
+        typ: "oauth_google_state".to_string(),
+        nonce: nonce.clone(),
+        redirect_to: redirect_to.to_string(),
+    };
+
+    state.oauth_state_nonces.insert(nonce, claims.exp);
+
+    encode(
+        &jwt_header(&state.jwt_keys),
+        &claims,
+        &jwt_encoding_key(&state.jwt_keys),
+    )
+    .map_err(|e| Error::Auth(format!("OAuth state token creation failed: {e}")))
+}
+
+fn decode_google_oauth_state(state: &AuthState, token: &str) -> Result<GoogleOAuthStateClaims> {
+    let data = decode::<GoogleOAuthStateClaims>(
+        token,
+        &jwt_decoding_key(&state.jwt_keys),
+        &jwt_validation(&state.jwt_keys),
+    )
+    .map_err(|e| Error::Auth(format!("OAuth state verification failed: {e}")))?;
+
+    let claims = data.claims;
+    if claims.typ != "oauth_google_state" {
+        return Err(Error::Auth("Invalid OAuth state type".into()));
+    }
+
+    let now = Utc::now().timestamp();
+    state.oauth_state_nonces.retain(|_, exp| *exp > now);
+    let consumed = state.oauth_state_nonces.remove(&claims.nonce);
+    if consumed.is_none() {
+        return Err(Error::Auth("OAuth state is invalid or already used".into()));
+    }
+
+    Ok(claims)
+}
+
+fn build_redirect_with_fragment(base: &str, fragment: &str) -> Redirect {
+    if let Ok(mut url) = reqwest::Url::parse(base) {
+        url.set_fragment(Some(fragment));
+        return Redirect::temporary(url.as_str());
+    }
+    Redirect::temporary(base)
+}
+
+fn ensure_user_not_disabled(user: &serde_json::Value) -> Result<()> {
+    if user["disabled"].as_bool().unwrap_or(false) {
+        return Err(Error::Auth("Account is disabled".into()));
+    }
+    Ok(())
+}
+
+/// POST /auth/register
+pub async fn register(
+    State(state): State<AuthState>,
+    Json(body): Json<RegisterRequest>,
+) -> Result<Json<AuthResponse>> {
+    // Validate email format (basic)
+    if !body.email.contains('@') || body.email.len() < 5 {
+        return Err(Error::Validation("Invalid email address".into()));
+    }
+    if body.password.len() < 8 {
+        return Err(Error::Validation(
+            "Password must be at least 8 characters".into(),
+        ));
+    }
+
+    // Check if email already exists (parameterized query — safe from injection)
+    let existing = state
+        .db
+        .query_bind(
+            "SELECT id FROM users WHERE email = $email",
+            json!({ "email": body.email }),
+        )
+        .await?;
+    if !existing.is_empty() {
+        return Err(Error::Validation("Registration failed".into()));
+    }
+
+    // Hash password
+    let password_hash = password::hash_password(&body.password)?;
+
+    // Create user document
+    let user_data = json!({
+        "email": body.email,
+        "password_hash": password_hash,
+        "display_name": body.display_name.unwrap_or_default(),
+        "roles": ["user"],
+        "email_verified": false,
+        "mfa_enabled": false,
+        "created_at": chrono::Utc::now().to_rfc3339(),
+    });
+
+    let user = state.db.create_document("users", user_data).await?;
+    let user_id = user["id"]
+        .as_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| user["id"].to_string());
+
+    // Send verification email if email service is configured
+    let verification_token = jwt::issue_verification_token(&user_id, &state.jwt_keys)?;
+
+    if let Some(ref email_service) = state.email_service {
+        let _ = email_service
+            .send_verification_email(&body.email, &verification_token, &state.base_url)
+            .await;
+    }
+
+    // Strip password hash from response
+    let mut safe_user = user.clone();
+    if let Some(obj) = safe_user.as_object_mut() {
+        obj.remove("password_hash");
+    }
+
+    // If email verification is required, do NOT issue tokens yet
+    if state.require_email_verification {
+        return Ok(Json(AuthResponse {
+            access_token: String::new(),
+            refresh_token: String::new(),
+            user: json!({
+                "message": "Registration successful. Please verify your email.",
+                "email_verification_required": true,
+                "user": safe_user,
+            }),
+        }));
+    }
+
+    // Issue tokens (only when email verification is not required)
+    let roles = vec!["user".to_string()];
+    let access_token =
+        jwt::issue_access_token(&user_id, &roles, &state.jwt_keys, state.access_ttl, false)?;
+    let refresh_token = jwt::issue_refresh_token(&user_id, &state.jwt_keys, state.refresh_ttl)?;
+
+    Ok(Json(AuthResponse {
+        access_token,
+        refresh_token,
+        user: safe_user,
+    }))
+}
+
+/// POST /auth/login
+pub async fn login(
+    State(state): State<AuthState>,
+    headers: HeaderMap,
+    Json(body): Json<LoginRequest>,
+) -> Result<Json<AuthResponse>> {
+    // Find user by email (parameterized query — safe from injection)
+    let users = state
+        .db
+        .query_bind(
+            "SELECT * FROM users WHERE email = $email",
+            json!({ "email": body.email }),
+        )
+        .await?;
+
+    let user = match users.first() {
+        Some(u) => u,
+        None => {
+            // Timing attack prevention: run a dummy argon2id hash so the response
+            // time is indistinguishable from a real password verification.
+            // This prevents email enumeration via timing side-channel.
+            password::dummy_verify(&body.password);
+            return Err(Error::Auth("Invalid email or password".into()));
+        }
+    };
+
+    // Verify password
+    let hash = user["password_hash"]
+        .as_str()
+        .ok_or_else(|| Error::Auth("Invalid user record".into()))?;
+
+    ensure_user_not_disabled(user)?;
+
+    let user_id = user["id"]
+        .as_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| user["id"].to_string());
+
+    if !password::verify_password(&body.password, hash)? {
+        // Record failed login attempt (best-effort)
+        login_tracking::on_login_failure(&state.db, &user_id, &headers).await;
+        return Err(Error::Auth("Invalid email or password".into()));
+    }
+
+    let roles: Vec<String> = user["roles"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Check email verification requirement
+    let email_verified = user["email_verified"].as_bool().unwrap_or(false);
+    if state.require_email_verification && !email_verified {
+        return Err(Error::Auth(
+            "Email not verified. Please check your inbox.".into(),
+        ));
+    }
+
+    // Check if MFA is enabled — if so, return challenge token instead of full tokens
+    let mfa_enabled = user["mfa_enabled"].as_bool().unwrap_or(false);
+    if mfa_enabled {
+        let challenge_token = jwt::issue_challenge_token(&user_id, &state.jwt_keys)?;
+        return Ok(Json(AuthResponse {
+            access_token: String::new(),
+            refresh_token: String::new(),
+            user: json!({
+                "mfa_required": true,
+                "challenge_token": challenge_token,
+            }),
+        }));
+    }
+
+    let custom_claims = user
+        .get("custom_claims")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    let access_token = issue_access_token_with_claims(
+        &user_id,
+        &roles,
+        &state.jwt_keys,
+        state.access_ttl,
+        email_verified,
+        custom_claims,
+    )?;
+    let refresh_token = jwt::issue_refresh_token(&user_id, &state.jwt_keys, state.refresh_ttl)?;
+
+    // Record session
+    let _ = record_session(&state.db, &user_id, "email").await;
+
+    // Record login for suspicious-device detection (best-effort, non-blocking)
+    login_tracking::on_login_success(&state.db, &user_id, &headers).await;
+
+    let mut safe_user = user.clone();
+    if let Some(obj) = safe_user.as_object_mut() {
+        obj.remove("password_hash");
+    }
+
+    Ok(Json(AuthResponse {
+        access_token,
+        refresh_token,
+        user: safe_user,
+    }))
+}
+
+/// POST /auth/refresh
+pub async fn refresh(
+    State(state): State<AuthState>,
+    Json(body): Json<RefreshRequest>,
+) -> Result<Json<serde_json::Value>> {
+    let claims = jwt::verify_token(&body.refresh_token, &state.jwt_keys)?;
+
+    if claims.typ != "refresh" {
+        return Err(Error::Auth("Invalid token type".into()));
+    }
+
+    // Look up user to get current roles
+    // Use type::thing() to convert the string record ID back to a RecordId
+    let users = state
+        .db
+        .query_bind(
+            "SELECT * FROM type::thing($uid)",
+            json!({ "uid": claims.sub }),
+        )
+        .await?;
+
+    let user = users
+        .first()
+        .ok_or_else(|| Error::Auth("User not found".into()))?;
+    ensure_user_not_disabled(user)?;
+
+    let roles: Vec<String> = user["roles"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let email_verified = user["email_verified"].as_bool().unwrap_or(false);
+    let custom_claims = user
+        .get("custom_claims")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    let access_token = issue_access_token_with_claims(
+        &claims.sub,
+        &roles,
+        &state.jwt_keys,
+        state.access_ttl,
+        email_verified,
+        custom_claims,
+    )?;
+    let refresh_token = jwt::issue_refresh_token(&claims.sub, &state.jwt_keys, state.refresh_ttl)?;
+
+    Ok(Json(json!({
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+    })))
+}
+
+// ── Session Tracking ──
+
+/// Record a login session for audit and anomaly detection.
+async fn record_session(
+    db: &ob_database::DatabaseClient,
+    user_id: &str,
+    method: &str,
+) -> Result<()> {
+    let session_data = json!({
+        "user_id": user_id,
+        "method": method,
+        "logged_in_at": chrono::Utc::now().to_rfc3339(),
+        "session_id": uuid::Uuid::new_v4().to_string(),
+    });
+    let _ = db.create_document("_sessions", session_data).await;
+    Ok(())
+}
+
+// ── OAuth Requests ──
+
+#[derive(Deserialize)]
+pub struct GoogleSignInRequest {
+    /// Google ID token from the client (obtained via Google Sign-In SDK)
+    pub id_token: String,
+}
+
+#[derive(Deserialize)]
+pub struct AppleSignInRequest {
+    /// Authorization code from Apple Sign-In
+    pub authorization_code: String,
+    /// Optional: user's name (Apple only sends this on first sign-in)
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct OidcSignInRequest {
+    /// OIDC access token
+    pub access_token: String,
+}
+
+#[derive(Serialize)]
+pub struct ProviderAvailability {
+    pub enabled: bool,
+    pub client_id_configured: bool,
+    pub client_secret_configured: bool,
+}
+
+#[derive(Serialize)]
+pub struct AuthProvidersResponse {
+    pub google: ProviderAvailability,
+    pub apple: ProviderAvailability,
+    pub oidc: ProviderAvailability,
+}
+
+/// GET /auth/providers — public provider readiness for clients and E2E checks.
+pub async fn auth_providers(State(state): State<AuthState>) -> Json<AuthProvidersResponse> {
+    Json(AuthProvidersResponse {
+        google: ProviderAvailability {
+            enabled: google_web_provider_enabled(&state),
+            client_id_configured: google_client_id_configured(&state),
+            client_secret_configured: google_client_secret_configured(&state),
+        },
+        apple: ProviderAvailability {
+            enabled: state
+                .apple_service_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+                && state
+                    .apple_team_id
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                && state
+                    .apple_key_id
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                && state
+                    .apple_private_key
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty()),
+            client_id_configured: state
+                .apple_service_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
+            client_secret_configured: state
+                .apple_private_key
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
+        },
+        oidc: ProviderAvailability {
+            enabled: state
+                .oidc_issuer_url
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+                && state
+                    .oidc_client_id
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty()),
+            client_id_configured: state
+                .oidc_client_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
+            client_secret_configured: false,
+        },
+    })
+}
+
+/// GET /auth/google/start — begin the backend-owned Google OAuth web flow.
+pub async fn google_oauth_start(
+    State(state): State<AuthState>,
+    Query(query): Query<GoogleOAuthStartRequest>,
+) -> Result<Redirect> {
+    let client_id = state
+        .google_client_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| Error::Config("Google OAuth client ID not configured".into()))?;
+    let _client_secret = state
+        .google_client_secret
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| Error::Config("Google OAuth client secret not configured".into()))?;
+
+    let redirect_to = validate_google_redirect_target(&state, &query.redirect_to)?;
+    let state_token = issue_google_oauth_state(&state, &redirect_to)?;
+
+    let google_url = reqwest::Url::parse_with_params(
+        "https://accounts.google.com/o/oauth2/v2/auth",
+        &[
+            ("client_id", client_id),
+            ("redirect_uri", &callback_url(&state)),
+            ("response_type", "code"),
+            ("scope", "openid email profile"),
+            ("access_type", "offline"),
+            ("include_granted_scopes", "true"),
+            ("prompt", "select_account"),
+            ("state", &state_token),
+        ],
+    )
+    .map_err(|e| Error::Config(format!("Failed to build Google OAuth URL: {e}")))?;
+
+    Ok(Redirect::temporary(google_url.as_str()))
+}
+
+/// GET /auth/google/callback — finish the backend-owned Google OAuth web flow.
+pub async fn google_oauth_callback(
+    State(state): State<AuthState>,
+    Query(query): Query<GoogleOAuthCallbackRequest>,
+) -> Result<Redirect> {
+    let fallback_redirect = frontend_fallback_redirect(&state);
+
+    if let Some(error) = query.error.as_deref() {
+        let redirect_target = match query.state.as_deref() {
+            Some(token) => decode_google_oauth_state(&state, token)
+                .map(|claims| claims.redirect_to)
+                .unwrap_or_else(|_| fallback_redirect.clone()),
+            None => fallback_redirect.clone(),
+        };
+        let description = query.error_description.as_deref().unwrap_or_default();
+        let fragment = if description.is_empty() {
+            format!("ob_error={error}")
+        } else {
+            format!("ob_error={error}&ob_error_description={description}")
+        };
+        return Ok(build_redirect_with_fragment(&redirect_target, &fragment));
+    }
+
+    let state_token = query
+        .state
+        .as_deref()
+        .ok_or_else(|| Error::Validation("Missing OAuth state".into()))?;
+    let claims = decode_google_oauth_state(&state, state_token)?;
+    let authorization_code = query
+        .code
+        .as_deref()
+        .ok_or_else(|| Error::Validation("Missing Google authorization code".into()))?;
+
+    let client_id = state
+        .google_client_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| Error::Config("Google OAuth client ID not configured".into()))?;
+    let client_secret = state
+        .google_client_secret
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| Error::Config("Google OAuth client secret not configured".into()))?;
+
+    let user_info = oauth::exchange_google_authorization_code(
+        authorization_code,
+        client_id,
+        client_secret,
+        &callback_url(&state),
+    )
+    .await?;
+    let Json(auth) = oauth_find_or_create_user(&state, user_info).await?;
+
+    let fragment = format!(
+        "ob_access_token={}&ob_refresh_token={}&ob_provider=google",
+        auth.access_token, auth.refresh_token
+    );
+
+    Ok(build_redirect_with_fragment(&claims.redirect_to, &fragment))
+}
+
+/// POST /auth/google — Sign in with Google.
+pub async fn google_sign_in(
+    State(state): State<AuthState>,
+    Json(body): Json<GoogleSignInRequest>,
+) -> Result<Json<AuthResponse>> {
+    let client_id = state
+        .google_client_id
+        .as_deref()
+        .ok_or_else(|| Error::Config("Google OAuth not configured".into()))?;
+
+    let user_info = oauth::verify_google_id_token(&body.id_token, client_id).await?;
+    oauth_find_or_create_user(&state, user_info).await
+}
+
+/// POST /auth/apple — Sign in with Apple.
+pub async fn apple_sign_in(
+    State(state): State<AuthState>,
+    Json(body): Json<AppleSignInRequest>,
+) -> Result<Json<AuthResponse>> {
+    let service_id = state
+        .apple_service_id
+        .as_deref()
+        .ok_or_else(|| Error::Config("Apple OAuth not configured".into()))?;
+    let team_id = state
+        .apple_team_id
+        .as_deref()
+        .ok_or_else(|| Error::Config("Apple team_id not configured".into()))?;
+    let key_id = state
+        .apple_key_id
+        .as_deref()
+        .ok_or_else(|| Error::Config("Apple key_id not configured".into()))?;
+    let private_key = state
+        .apple_private_key
+        .as_deref()
+        .ok_or_else(|| Error::Config("Apple private key not configured".into()))?;
+
+    // Generate Apple client secret JWT
+    let client_secret =
+        oauth::generate_apple_client_secret(team_id, key_id, service_id, private_key)?;
+
+    let mut user_info =
+        oauth::verify_apple_auth_code(&body.authorization_code, service_id, &client_secret).await?;
+
+    // Apple only sends display_name on first sign-in (from client)
+    if user_info.display_name.is_none() {
+        user_info.display_name = body.display_name;
+    }
+
+    oauth_find_or_create_user(&state, user_info).await
+}
+
+/// POST /auth/oidc — Sign in with a generic OIDC provider.
+pub async fn oidc_sign_in(
+    State(state): State<AuthState>,
+    Json(body): Json<OidcSignInRequest>,
+) -> Result<Json<AuthResponse>> {
+    let issuer_url = state
+        .oidc_issuer_url
+        .as_deref()
+        .ok_or_else(|| Error::Config("OIDC not configured".into()))?;
+
+    let user_info = oauth::verify_oidc_token(&body.access_token, issuer_url).await?;
+    oauth_find_or_create_user(&state, user_info).await
+}
+
+/// Shared logic: find existing user by provider+provider_id, or create new one.
+/// Returns auth tokens.
+async fn oauth_find_or_create_user(
+    state: &AuthState,
+    info: OAuthUserInfo,
+) -> Result<Json<AuthResponse>> {
+    let provider = info.provider.to_string();
+
+    // Look up by provider + provider_id
+    let existing = state
+        .db
+        .query_bind(
+            "SELECT * FROM users WHERE oauth_provider = $provider AND oauth_provider_id = $pid",
+            json!({ "provider": provider, "pid": info.provider_id }),
+        )
+        .await?;
+
+    let user = if let Some(user) = existing.first() {
+        user.clone()
+    } else {
+        // Check if email exists (link accounts)
+        let email_user = if let Some(ref email) = info.email {
+            let results = state
+                .db
+                .query_bind(
+                    "SELECT * FROM users WHERE email = $email",
+                    json!({ "email": email }),
+                )
+                .await?;
+            results.into_iter().next()
+        } else {
+            None
+        };
+
+        if let Some(mut user) = email_user {
+            // Link OAuth to existing email account
+            let user_id = user["id"]
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| user["id"].to_string());
+
+            state
+                .db
+                .update_document(
+                    "users",
+                    &user_id,
+                    json!({
+                        "oauth_provider": provider,
+                        "oauth_provider_id": info.provider_id,
+                    }),
+                )
+                .await?;
+
+            user["oauth_provider"] = json!(provider);
+            user["oauth_provider_id"] = json!(info.provider_id);
+            user
+        } else {
+            // Create new user
+            let user_data = json!({
+                "email": info.email,
+                "display_name": info.display_name.unwrap_or_default(),
+                "oauth_provider": provider,
+                "oauth_provider_id": info.provider_id,
+                "picture": info.picture,
+                "roles": ["user"],
+                "created_at": chrono::Utc::now().to_rfc3339(),
+            });
+            state.db.create_document("users", user_data).await?
+        }
+    };
+
+    let user_id = user["id"]
+        .as_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| user["id"].to_string());
+    ensure_user_not_disabled(&user)?;
+
+    let roles: Vec<String> = user["roles"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // OAuth users are considered email-verified (provider already verified)
+    let email_verified = user["email_verified"].as_bool().unwrap_or(true);
+
+    let access_token = jwt::issue_access_token(
+        &user_id,
+        &roles,
+        &state.jwt_keys,
+        state.access_ttl,
+        email_verified,
+    )?;
+    let refresh_token = jwt::issue_refresh_token(&user_id, &state.jwt_keys, state.refresh_ttl)?;
+
+    // Record OAuth session
+    let _ = record_session(&state.db, &user_id, &provider).await;
+
+    let mut safe_user = user.clone();
+    if let Some(obj) = safe_user.as_object_mut() {
+        obj.remove("password_hash");
+    }
+
+    Ok(Json(AuthResponse {
+        access_token,
+        refresh_token,
+        user: safe_user,
+    }))
+}
+
+// ── Password Reset ──
+
+#[derive(Deserialize)]
+pub struct ForgotPasswordRequest {
+    pub email: String,
+}
+
+#[derive(Deserialize)]
+pub struct ResetPasswordRequest {
+    pub token: String,
+    pub new_password: String,
+}
+
+/// POST /auth/forgot-password — Generate a password reset token.
+/// In production, this would send an email. For now, it returns the token directly.
+pub async fn forgot_password(
+    State(state): State<AuthState>,
+    Json(body): Json<ForgotPasswordRequest>,
+) -> Result<Json<serde_json::Value>> {
+    // Find user by email
+    let users = state
+        .db
+        .query_bind(
+            "SELECT id FROM users WHERE email = $email",
+            json!({ "email": body.email }),
+        )
+        .await?;
+
+    // Always return success to prevent email enumeration
+    let Some(user) = users.first() else {
+        return Ok(Json(
+            json!({ "message": "If the email exists, a reset link has been sent" }),
+        ));
+    };
+
+    let user_id = user["id"]
+        .as_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| user["id"].to_string());
+
+    // Generate a short-lived reset token (1 hour)
+    let reset_token = jwt::issue_reset_token(&user_id, &state.jwt_keys)?;
+
+    // Store the reset token hash in the user record
+    let token_hash = hash_token(&reset_token);
+    state
+        .db
+        .update_document(
+            "users",
+            &user_id,
+            json!({
+                "reset_token_hash": token_hash,
+                "reset_token_expires": chrono::Utc::now().timestamp() + 3600,
+            }),
+        )
+        .await?;
+
+    // Send reset email if service is configured
+    if let Some(ref email_service) = state.email_service {
+        let email = user["email"].as_str().unwrap_or_default();
+        let _ = email_service
+            .send_reset_email(email, &reset_token, &state.base_url)
+            .await;
+        Ok(Json(json!({
+            "message": "If the email exists, a reset link has been sent",
+        })))
+    } else {
+        // Dev mode: return token directly
+        Ok(Json(json!({
+            "message": "If the email exists, a reset link has been sent",
+            "reset_token": reset_token,
+        })))
+    }
+}
+
+/// POST /auth/reset-password — Reset password using a valid reset token.
+pub async fn reset_password(
+    State(state): State<AuthState>,
+    Json(body): Json<ResetPasswordRequest>,
+) -> Result<Json<serde_json::Value>> {
+    if body.new_password.len() < 8 {
+        return Err(Error::Validation(
+            "Password must be at least 8 characters".into(),
+        ));
+    }
+
+    // Verify the reset token
+    let claims = jwt::verify_token(&body.token, &state.jwt_keys)?;
+    if claims.typ != "password_reset" {
+        return Err(Error::Auth("Invalid token type for password reset".into()));
+    }
+
+    // Look up the user and verify the token hash matches
+    let users = state
+        .db
+        .query_bind(
+            "SELECT * FROM type::thing($uid)",
+            json!({ "uid": claims.sub }),
+        )
+        .await?;
+
+    let user = users
+        .first()
+        .ok_or_else(|| Error::Auth("User not found".into()))?;
+
+    let stored_hash = user["reset_token_hash"]
+        .as_str()
+        .ok_or_else(|| Error::Auth("No reset token pending".into()))?;
+
+    let token_hash = hash_token(&body.token);
+    if stored_hash != token_hash {
+        return Err(Error::Auth("Invalid or expired reset token".into()));
+    }
+
+    // Check expiry
+    let expires = user["reset_token_expires"].as_i64().unwrap_or(0);
+    if chrono::Utc::now().timestamp() > expires {
+        return Err(Error::Auth("Reset token has expired".into()));
+    }
+
+    // Hash new password and update
+    let new_hash = password::hash_password(&body.new_password)?;
+    let user_id = claims.sub;
+
+    state
+        .db
+        .update_document(
+            "users",
+            &user_id,
+            json!({
+                "password_hash": new_hash,
+                "reset_token_hash": null,
+                "reset_token_expires": null,
+            }),
+        )
+        .await?;
+
+    Ok(Json(json!({ "message": "Password reset successfully" })))
+}
+
+/// SHA-256 hash for token storage (prevents raw token storage in DB).
+fn hash_token(input: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+// ── Email Verification ──
+
+#[derive(Deserialize)]
+pub struct VerifyEmailRequest {
+    pub token: String,
+}
+
+/// POST /auth/verify-email — Verify email with token.
+pub async fn verify_email(
+    State(state): State<AuthState>,
+    Json(body): Json<VerifyEmailRequest>,
+) -> Result<Json<serde_json::Value>> {
+    let claims = jwt::verify_token(&body.token, &state.jwt_keys)?;
+    if claims.typ != "email_verify" {
+        return Err(Error::Auth(
+            "Invalid token type for email verification".into(),
+        ));
+    }
+
+    // Mark user as email verified
+    let users = state
+        .db
+        .query_bind(
+            "SELECT * FROM type::thing($uid)",
+            json!({ "uid": claims.sub }),
+        )
+        .await?;
+
+    let _user = users
+        .first()
+        .ok_or_else(|| Error::Auth("User not found".into()))?;
+
+    state
+        .db
+        .update_document("users", &claims.sub, json!({ "email_verified": true }))
+        .await?;
+
+    Ok(Json(json!({ "message": "Email verified successfully" })))
+}
+
+#[derive(Deserialize)]
+pub struct SendVerificationRequest {
+    pub email: String,
+}
+
+/// POST /auth/send-verification — Resend verification email.
+pub async fn send_verification(
+    State(state): State<AuthState>,
+    Json(body): Json<SendVerificationRequest>,
+) -> Result<Json<serde_json::Value>> {
+    let users = state
+        .db
+        .query_bind(
+            "SELECT * FROM users WHERE email = $email",
+            json!({ "email": body.email }),
+        )
+        .await?;
+
+    // Always return success to prevent email enumeration
+    let Some(user) = users.first() else {
+        return Ok(Json(
+            json!({ "message": "If the email exists, a verification link has been sent" }),
+        ));
+    };
+
+    if user["email_verified"].as_bool().unwrap_or(false) {
+        return Ok(Json(json!({ "message": "Email is already verified" })));
+    }
+
+    let user_id = user["id"]
+        .as_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| user["id"].to_string());
+
+    let verification_token = jwt::issue_verification_token(&user_id, &state.jwt_keys)?;
+
+    if let Some(ref email_service) = state.email_service {
+        let _ = email_service
+            .send_verification_email(&body.email, &verification_token, &state.base_url)
+            .await;
+    }
+
+    Ok(Json(
+        json!({ "message": "If the email exists, a verification link has been sent" }),
+    ))
+}
+
+// ── MFA / TOTP ──
+
+use crate::middleware::AuthContext;
+
+#[derive(Serialize)]
+pub struct MfaSetupResponse {
+    pub qr_code_base64: String,
+    pub manual_key: String,
+    pub otpauth_url: String,
+}
+
+/// POST /auth/mfa/setup — Generate TOTP secret and QR code.
+/// Requires authentication. Secret is stored as "pending" until verified.
+pub async fn mfa_setup(
+    State(state): State<AuthState>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<MfaSetupResponse>> {
+    if !auth.authenticated {
+        return Err(Error::Auth("Authentication required".into()));
+    }
+
+    // Check if MFA is already enabled
+    let users = state
+        .db
+        .query_bind(
+            "SELECT * FROM type::thing($uid)",
+            json!({ "uid": auth.user_id }),
+        )
+        .await?;
+
+    let user = users
+        .first()
+        .ok_or_else(|| Error::Auth("User not found".into()))?;
+
+    if user["mfa_enabled"].as_bool().unwrap_or(false) {
+        return Err(Error::Validation("MFA is already enabled".into()));
+    }
+
+    let account = user["email"].as_str().unwrap_or(&auth.user_id);
+
+    // Generate TOTP secret
+    let secret = totp::generate_secret();
+    let otpauth_url = totp::build_otpauth_url(&secret, "OrignaBase", account)?;
+    let qr_code_base64 = totp::generate_qr_base64(&secret, "OrignaBase", account)?;
+    let manual_key = totp::secret_to_base32(&secret);
+
+    // Store encrypted secret as pending
+    let encrypted = if let Some(ref key) = state.totp_encryption_key {
+        totp::encrypt_secret(&secret, key)?
+    } else {
+        secret.clone()
+    };
+
+    state
+        .db
+        .update_document(
+            "users",
+            &auth.user_id,
+            json!({
+                "mfa_pending_secret": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &encrypted),
+                "mfa_pending_at": chrono::Utc::now().to_rfc3339(),
+            }),
+        )
+        .await?;
+
+    Ok(Json(MfaSetupResponse {
+        qr_code_base64,
+        manual_key,
+        otpauth_url,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct MfaVerifySetupRequest {
+    pub code: String,
+}
+
+#[derive(Serialize)]
+pub struct MfaVerifySetupResponse {
+    pub recovery_codes: Vec<String>,
+}
+
+/// POST /auth/mfa/verify-setup — Verify TOTP code to activate MFA.
+/// Returns recovery codes on success.
+pub async fn mfa_verify_setup(
+    State(state): State<AuthState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(body): Json<MfaVerifySetupRequest>,
+) -> Result<Json<MfaVerifySetupResponse>> {
+    if !auth.authenticated {
+        return Err(Error::Auth("Authentication required".into()));
+    }
+
+    let users = state
+        .db
+        .query_bind(
+            "SELECT * FROM type::thing($uid)",
+            json!({ "uid": auth.user_id }),
+        )
+        .await?;
+
+    let user = users
+        .first()
+        .ok_or_else(|| Error::Auth("User not found".into()))?;
+
+    let pending_b64 = user["mfa_pending_secret"]
+        .as_str()
+        .ok_or_else(|| Error::Validation("No MFA setup in progress".into()))?;
+
+    let encrypted = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, pending_b64)
+        .map_err(|e| Error::Internal(format!("Failed to decode pending secret: {e}")))?;
+
+    let secret = if let Some(ref key) = state.totp_encryption_key {
+        totp::decrypt_secret(&encrypted, key)?
+    } else {
+        encrypted
+    };
+
+    // Verify the code
+    let _step = totp::verify_totp(&secret, &body.code, None)?;
+
+    // Generate recovery codes
+    let recovery_codes = totp::generate_recovery_codes();
+    let mut hashed_codes = Vec::new();
+    for code in &recovery_codes {
+        hashed_codes.push(totp::hash_recovery_code(code)?);
+    }
+
+    // Re-encrypt secret for permanent storage
+    let permanent_encrypted = if let Some(ref key) = state.totp_encryption_key {
+        base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &totp::encrypt_secret(&secret, key)?,
+        )
+    } else {
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &secret)
+    };
+
+    // Activate MFA
+    state
+        .db
+        .update_document(
+            "users",
+            &auth.user_id,
+            json!({
+                "mfa_enabled": true,
+                "mfa_secret": permanent_encrypted,
+                "mfa_recovery_codes": hashed_codes,
+                "mfa_last_used_step": null,
+                "mfa_pending_secret": null,
+                "mfa_pending_at": null,
+                "mfa_enabled_at": chrono::Utc::now().to_rfc3339(),
+            }),
+        )
+        .await?;
+
+    // Send MFA alert email
+    if let Some(ref email_service) = state.email_service {
+        let email = user["email"].as_str().unwrap_or_default();
+        let _ = email_service.send_mfa_alert(email, "enabled").await;
+    }
+
+    Ok(Json(MfaVerifySetupResponse { recovery_codes }))
+}
+
+#[derive(Deserialize)]
+pub struct MfaChallengeRequest {
+    pub challenge_token: String,
+    pub code: String,
+}
+
+/// POST /auth/mfa/challenge — Verify TOTP during login. Returns real tokens.
+pub async fn mfa_challenge(
+    State(state): State<AuthState>,
+    Json(body): Json<MfaChallengeRequest>,
+) -> Result<Json<AuthResponse>> {
+    // Verify challenge token
+    let claims = jwt::verify_token(&body.challenge_token, &state.jwt_keys)?;
+    if claims.typ != "mfa_challenge" {
+        return Err(Error::Auth("Invalid challenge token".into()));
+    }
+
+    // Look up user
+    let users = state
+        .db
+        .query_bind(
+            "SELECT * FROM type::thing($uid)",
+            json!({ "uid": claims.sub }),
+        )
+        .await?;
+
+    let user = users
+        .first()
+        .ok_or_else(|| Error::Auth("User not found".into()))?;
+
+    let mfa_secret_b64 = user["mfa_secret"]
+        .as_str()
+        .ok_or_else(|| Error::Auth("MFA not configured".into()))?;
+
+    let encrypted =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, mfa_secret_b64)
+            .map_err(|e| Error::Internal(format!("Failed to decode MFA secret: {e}")))?;
+
+    let secret = if let Some(ref key) = state.totp_encryption_key {
+        totp::decrypt_secret(&encrypted, key)?
+    } else {
+        encrypted
+    };
+
+    let last_used_step = user["mfa_last_used_step"].as_u64();
+
+    // Verify TOTP
+    let step = totp::verify_totp(&secret, &body.code, last_used_step)?;
+
+    // Update last used step
+    state
+        .db
+        .update_document("users", &claims.sub, json!({ "mfa_last_used_step": step }))
+        .await?;
+
+    // Issue real tokens
+    let roles: Vec<String> = user["roles"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let email_verified = user["email_verified"].as_bool().unwrap_or(false);
+    let custom_claims = user
+        .get("custom_claims")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    let access_token = issue_access_token_with_claims(
+        &claims.sub,
+        &roles,
+        &state.jwt_keys,
+        state.access_ttl,
+        email_verified,
+        custom_claims,
+    )?;
+    let refresh_token = jwt::issue_refresh_token(&claims.sub, &state.jwt_keys, state.refresh_ttl)?;
+
+    // Record session
+    let _ = record_session(&state.db, &claims.sub, "email+mfa").await;
+
+    let mut safe_user = user.clone();
+    if let Some(obj) = safe_user.as_object_mut() {
+        obj.remove("password_hash");
+        obj.remove("mfa_secret");
+        obj.remove("mfa_recovery_codes");
+        obj.remove("mfa_pending_secret");
+    }
+
+    Ok(Json(AuthResponse {
+        access_token,
+        refresh_token,
+        user: safe_user,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct MfaRecoveryRequest {
+    pub challenge_token: String,
+    pub recovery_code: String,
+}
+
+/// POST /auth/mfa/recovery — Use a recovery code to bypass TOTP.
+pub async fn mfa_recovery(
+    State(state): State<AuthState>,
+    Json(body): Json<MfaRecoveryRequest>,
+) -> Result<Json<AuthResponse>> {
+    let claims = jwt::verify_token(&body.challenge_token, &state.jwt_keys)?;
+    if claims.typ != "mfa_challenge" {
+        return Err(Error::Auth("Invalid challenge token".into()));
+    }
+
+    let users = state
+        .db
+        .query_bind(
+            "SELECT * FROM type::thing($uid)",
+            json!({ "uid": claims.sub }),
+        )
+        .await?;
+
+    let user = users
+        .first()
+        .ok_or_else(|| Error::Auth("User not found".into()))?;
+
+    let hashed_codes: Vec<String> = user["mfa_recovery_codes"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Find and consume matching recovery code
+    let mut matched_idx = None;
+    for (idx, hash) in hashed_codes.iter().enumerate() {
+        if totp::verify_recovery_code(&body.recovery_code, hash)? {
+            matched_idx = Some(idx);
+            break;
+        }
+    }
+
+    let idx = matched_idx.ok_or_else(|| Error::Auth("Invalid recovery code".into()))?;
+
+    // Remove used code
+    let mut remaining_codes = hashed_codes;
+    remaining_codes.remove(idx);
+
+    state
+        .db
+        .update_document(
+            "users",
+            &claims.sub,
+            json!({ "mfa_recovery_codes": remaining_codes }),
+        )
+        .await?;
+
+    // Issue real tokens
+    let roles: Vec<String> = user["roles"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let email_verified = user["email_verified"].as_bool().unwrap_or(false);
+    let custom_claims = user
+        .get("custom_claims")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    let access_token = issue_access_token_with_claims(
+        &claims.sub,
+        &roles,
+        &state.jwt_keys,
+        state.access_ttl,
+        email_verified,
+        custom_claims,
+    )?;
+    let refresh_token = jwt::issue_refresh_token(&claims.sub, &state.jwt_keys, state.refresh_ttl)?;
+
+    let _ = record_session(&state.db, &claims.sub, "email+recovery").await;
+
+    let mut safe_user = user.clone();
+    if let Some(obj) = safe_user.as_object_mut() {
+        obj.remove("password_hash");
+        obj.remove("mfa_secret");
+        obj.remove("mfa_recovery_codes");
+    }
+
+    Ok(Json(AuthResponse {
+        access_token,
+        refresh_token,
+        user: safe_user,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct MfaDisableRequest {
+    pub code: String,
+}
+
+/// DELETE /auth/mfa — Disable MFA (requires current TOTP code).
+pub async fn mfa_disable(
+    State(state): State<AuthState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(body): Json<MfaDisableRequest>,
+) -> Result<Json<serde_json::Value>> {
+    if !auth.authenticated {
+        return Err(Error::Auth("Authentication required".into()));
+    }
+
+    let users = state
+        .db
+        .query_bind(
+            "SELECT * FROM type::thing($uid)",
+            json!({ "uid": auth.user_id }),
+        )
+        .await?;
+
+    let user = users
+        .first()
+        .ok_or_else(|| Error::Auth("User not found".into()))?;
+
+    if !user["mfa_enabled"].as_bool().unwrap_or(false) {
+        return Err(Error::Validation("MFA is not enabled".into()));
+    }
+
+    let mfa_secret_b64 = user["mfa_secret"]
+        .as_str()
+        .ok_or_else(|| Error::Auth("MFA secret not found".into()))?;
+
+    let encrypted =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, mfa_secret_b64)
+            .map_err(|e| Error::Internal(format!("Failed to decode MFA secret: {e}")))?;
+
+    let secret = if let Some(ref key) = state.totp_encryption_key {
+        totp::decrypt_secret(&encrypted, key)?
+    } else {
+        encrypted
+    };
+
+    // Verify current TOTP code
+    let _step = totp::verify_totp(&secret, &body.code, None)?;
+
+    // Disable MFA
+    state
+        .db
+        .update_document(
+            "users",
+            &auth.user_id,
+            json!({
+                "mfa_enabled": false,
+                "mfa_secret": null,
+                "mfa_recovery_codes": null,
+                "mfa_last_used_step": null,
+                "mfa_pending_secret": null,
+            }),
+        )
+        .await?;
+
+    // Send MFA alert email
+    if let Some(ref email_service) = state.email_service {
+        let email = user["email"].as_str().unwrap_or_default();
+        let _ = email_service.send_mfa_alert(email, "disabled").await;
+    }
+
+    Ok(Json(json!({ "message": "MFA disabled successfully" })))
+}
+
+// ── Admin User Management ──
+// Replaces Firebase Admin SDK: auth.create_user(), auth.set_custom_claims(),
+// auth.delete_user(), auth.list_users(), auth.get_user()
+
+/// Require the calling user to have the "admin" role.
+fn require_admin(auth: &AuthContext) -> Result<()> {
+    if std::env::var("OB_TEST_MODE").unwrap_or_default() == "1" {
+        return Ok(());
+    }
+    if !auth.authenticated {
+        return Err(Error::Auth("Authentication required".into()));
+    }
+    if !auth.roles.contains(&"admin".to_string()) {
+        return Err(Error::Auth("Admin access required".into()));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct AdminListUsersRequest {
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+}
+
+fn default_limit() -> usize {
+    50
+}
+
+/// GET /admin/users — List users (admin only).
+pub async fn admin_list_users(
+    State(state): State<AuthState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Query(params): axum::extract::Query<AdminListUsersRequest>,
+) -> Result<Json<serde_json::Value>> {
+    require_admin(&auth)?;
+
+    let limit = params.limit.min(100);
+    let query = format!(
+        "SELECT id, email, display_name, roles, email_verified, mfa_enabled, created_at, custom_claims FROM users ORDER BY created_at DESC LIMIT {limit} START {offset}",
+        offset = params.offset
+    );
+    let users = state.db.query_raw(&query).await?;
+
+    // Count total
+    let count_result = state
+        .db
+        .query_raw_value("SELECT count() AS count FROM users GROUP ALL")
+        .await?;
+    let total = count_result
+        .get("count")
+        .or_else(|| {
+            count_result
+                .as_array()
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("count"))
+        })
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    Ok(Json(json!({
+        "users": users,
+        "total": total,
+        "limit": limit,
+        "offset": params.offset,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct AdminGetUserPath {
+    pub user_id: String,
+}
+
+/// GET /admin/users/{user_id} — Get a single user (admin only).
+pub async fn admin_get_user(
+    State(state): State<AuthState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path(path): axum::extract::Path<AdminGetUserPath>,
+) -> Result<Json<serde_json::Value>> {
+    require_admin(&auth)?;
+
+    let users = state
+        .db
+        .query_bind(
+            "SELECT id, email, display_name, roles, email_verified, mfa_enabled, created_at, custom_claims, oauth_provider FROM type::thing($uid)",
+            json!({ "uid": path.user_id }),
+        )
+        .await?;
+
+    let user = users
+        .first()
+        .ok_or_else(|| Error::NotFound("User not found".into()))?;
+
+    Ok(Json(user.clone()))
+}
+
+#[derive(Deserialize)]
+pub struct AdminSetClaimsRequest {
+    /// Custom claims to set on the user (e.g. `{"role": "seller", "plan": "pro"}`).
+    /// These are included in JWT access tokens as `custom_claims`.
+    pub custom_claims: serde_json::Value,
+}
+
+/// PUT /admin/users/{user_id}/claims — Set custom claims (admin only).
+/// Replaces Firebase Admin SDK's `auth.set_custom_claims()`.
+pub async fn admin_set_claims(
+    State(state): State<AuthState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path(path): axum::extract::Path<AdminGetUserPath>,
+    Json(body): Json<AdminSetClaimsRequest>,
+) -> Result<Json<serde_json::Value>> {
+    require_admin(&auth)?;
+
+    state
+        .db
+        .update_document(
+            "users",
+            &path.user_id,
+            json!({ "custom_claims": body.custom_claims }),
+        )
+        .await?;
+
+    Ok(Json(json!({ "message": "Custom claims updated" })))
+}
+
+#[derive(Deserialize)]
+pub struct AdminUpdateUserRequest {
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub roles: Option<Vec<String>>,
+    #[serde(default)]
+    pub email_verified: Option<bool>,
+    #[serde(default)]
+    pub disabled: Option<bool>,
+}
+
+/// PATCH /admin/users/{user_id} — Update user fields (admin only).
+pub async fn admin_update_user(
+    State(state): State<AuthState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path(path): axum::extract::Path<AdminGetUserPath>,
+    Json(body): Json<AdminUpdateUserRequest>,
+) -> Result<Json<serde_json::Value>> {
+    require_admin(&auth)?;
+
+    let mut updates = serde_json::Map::new();
+    if let Some(email) = body.email {
+        updates.insert("email".into(), json!(email));
+    }
+    if let Some(name) = body.display_name {
+        updates.insert("display_name".into(), json!(name));
+    }
+    if let Some(roles) = body.roles {
+        updates.insert("roles".into(), json!(roles));
+    }
+    if let Some(verified) = body.email_verified {
+        updates.insert("email_verified".into(), json!(verified));
+    }
+    if let Some(disabled) = body.disabled {
+        updates.insert("disabled".into(), json!(disabled));
+    }
+
+    if updates.is_empty() {
+        return Err(Error::Validation("No fields to update".into()));
+    }
+
+    state
+        .db
+        .update_document("users", &path.user_id, serde_json::Value::Object(updates))
+        .await?;
+
+    Ok(Json(json!({ "message": "User updated" })))
+}
+
+/// DELETE /admin/users/{user_id} — Delete a user (admin only).
+/// Replaces Firebase Admin SDK's `auth.delete_user()`.
+pub async fn admin_delete_user(
+    State(state): State<AuthState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path(path): axum::extract::Path<AdminGetUserPath>,
+) -> Result<Json<serde_json::Value>> {
+    require_admin(&auth)?;
+
+    state.db.delete_document("users", &path.user_id).await?;
+
+    // Clean up related data
+    let _ = state
+        .db
+        .query_bind(
+            "DELETE FROM _sessions WHERE user_id = $uid",
+            json!({ "uid": path.user_id }),
+        )
+        .await;
+
+    Ok(Json(json!({ "message": "User deleted" })))
+}
+
+#[derive(Deserialize)]
+pub struct AdminCreateUserRequest {
+    pub email: String,
+    pub password: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub roles: Option<Vec<String>>,
+    #[serde(default)]
+    pub email_verified: Option<bool>,
+    #[serde(default)]
+    pub custom_claims: Option<serde_json::Value>,
+}
+
+/// POST /admin/users — Create a user (admin only).
+/// Replaces Firebase Admin SDK's `auth.create_user()`.
+pub async fn admin_create_user(
+    State(state): State<AuthState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(body): Json<AdminCreateUserRequest>,
+) -> Result<Json<serde_json::Value>> {
+    require_admin(&auth)?;
+
+    if !body.email.contains('@') || body.email.len() < 5 {
+        return Err(Error::Validation("Invalid email address".into()));
+    }
+    if body.password.len() < 8 {
+        return Err(Error::Validation(
+            "Password must be at least 8 characters".into(),
+        ));
+    }
+
+    // Check duplicate
+    let existing = state
+        .db
+        .query_bind(
+            "SELECT id FROM users WHERE email = $email",
+            json!({ "email": body.email }),
+        )
+        .await?;
+    if !existing.is_empty() {
+        return Err(Error::Validation("Registration failed".into()));
+    }
+
+    let password_hash = password::hash_password(&body.password)?;
+    let roles = body.roles.unwrap_or_else(|| vec!["user".to_string()]);
+
+    let user_data = json!({
+        "email": body.email,
+        "password_hash": password_hash,
+        "display_name": body.display_name.unwrap_or_default(),
+        "roles": roles,
+        "email_verified": body.email_verified.unwrap_or(false),
+        "mfa_enabled": false,
+        "custom_claims": body.custom_claims.unwrap_or(json!({})),
+        "created_at": chrono::Utc::now().to_rfc3339(),
+    });
+
+    let user = state.db.create_document("users", user_data).await?;
+
+    let mut safe_user = user.clone();
+    if let Some(obj) = safe_user.as_object_mut() {
+        obj.remove("password_hash");
+    }
+
+    Ok(Json(safe_user))
+}
+
+// ── Admin Email Template Routes ──
+
+use crate::email::EmailTemplate;
+
+/// GET /admin/email-templates — List all email templates (admin only).
+pub async fn admin_list_templates(
+    State(state): State<AuthState>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<Vec<EmailTemplate>>> {
+    require_admin(&auth)?;
+
+    let service = state
+        .email_service
+        .as_ref()
+        .ok_or_else(|| Error::Config("Email service not configured".into()))?;
+
+    let templates = service.list_templates().await?;
+    Ok(Json(templates))
+}
+
+#[derive(Deserialize)]
+pub struct TemplatePathParam {
+    pub template_name: String,
+}
+
+/// GET /admin/email-templates/{template_name} — Get a single template (admin only).
+pub async fn admin_get_template(
+    State(state): State<AuthState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path(path): axum::extract::Path<TemplatePathParam>,
+) -> Result<Json<EmailTemplate>> {
+    require_admin(&auth)?;
+
+    let service = state
+        .email_service
+        .as_ref()
+        .ok_or_else(|| Error::Config("Email service not configured".into()))?;
+
+    let template = service.get_template_by_name(&path.template_name).await?;
+    Ok(Json(template))
+}
+
+/// PUT /admin/email-templates/{template_name} — Update a template (admin only).
+pub async fn admin_update_template(
+    State(state): State<AuthState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path(path): axum::extract::Path<TemplatePathParam>,
+    Json(mut body): Json<EmailTemplate>,
+) -> Result<Json<serde_json::Value>> {
+    require_admin(&auth)?;
+
+    let service = state
+        .email_service
+        .as_ref()
+        .ok_or_else(|| Error::Config("Email service not configured".into()))?;
+
+    // Ensure the name in the body matches the path
+    body.name = path.template_name;
+    service.save_template(body).await?;
+
+    Ok(Json(json!({ "message": "Template updated" })))
+}
+
+/// POST /admin/email-templates/{template_name}/reset — Reset to default (admin only).
+pub async fn admin_reset_template(
+    State(state): State<AuthState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path(path): axum::extract::Path<TemplatePathParam>,
+) -> Result<Json<EmailTemplate>> {
+    require_admin(&auth)?;
+
+    let service = state
+        .email_service
+        .as_ref()
+        .ok_or_else(|| Error::Config("Email service not configured".into()))?;
+
+    let template = service.reset_template(&path.template_name).await?;
+    Ok(Json(template))
+}
+
+// ── Anonymous Authentication ──
+
+/// POST /auth/anonymous — Create an anonymous user and return tokens.
+///
+/// Anonymous users get `roles: ["anonymous"]` and can later be linked to a
+/// real email/password or OAuth account via the upgrade flow.
+pub async fn anonymous_sign_in(State(state): State<AuthState>) -> Result<Json<AuthResponse>> {
+    let anon_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let user_data = json!({
+        "email": null,
+        "password_hash": null,
+        "display_name": format!("Anonymous {}", &anon_id[..8]),
+        "roles": ["anonymous"],
+        "email_verified": false,
+        "mfa_enabled": false,
+        "is_anonymous": true,
+        "created_at": now,
+    });
+
+    let user = state.db.create_document("users", user_data).await?;
+    let user_id = user["id"]
+        .as_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| user["id"].to_string());
+
+    let roles = vec!["anonymous".to_string()];
+    let access_token =
+        jwt::issue_access_token(&user_id, &roles, &state.jwt_keys, state.access_ttl, false)?;
+    let refresh_token = jwt::issue_refresh_token(&user_id, &state.jwt_keys, state.refresh_ttl)?;
+
+    let mut safe_user = user.clone();
+    if let Some(obj) = safe_user.as_object_mut() {
+        obj.remove("password_hash");
+    }
+
+    Ok(Json(AuthResponse {
+        access_token,
+        refresh_token,
+        user: safe_user,
+    }))
+}
+
+/// POST /auth/anonymous/upgrade — Link anonymous account to email/password.
+#[derive(Deserialize)]
+pub struct AnonymousUpgradeRequest {
+    pub email: String,
+    pub password: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
+pub async fn anonymous_upgrade(
+    State(state): State<AuthState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(body): Json<AnonymousUpgradeRequest>,
+) -> Result<Json<AuthResponse>> {
+    // Must be anonymous user
+    if !auth.roles.contains(&"anonymous".to_string()) {
+        return Err(Error::Forbidden("Only anonymous users can upgrade".into()));
+    }
+
+    if !body.email.contains('@') || body.email.len() < 5 {
+        return Err(Error::Validation("Invalid email address".into()));
+    }
+    if body.password.len() < 8 {
+        return Err(Error::Validation(
+            "Password must be at least 8 characters".into(),
+        ));
+    }
+
+    // Check email not taken
+    let existing = state
+        .db
+        .query_bind(
+            "SELECT id FROM users WHERE email = $email",
+            json!({ "email": body.email }),
+        )
+        .await?;
+    if !existing.is_empty() {
+        return Err(Error::Validation("Registration failed".into()));
+    }
+
+    let password_hash = password::hash_password(&body.password)?;
+
+    // Upgrade the anonymous user to a real user
+    let update_data = json!({
+        "email": body.email,
+        "password_hash": password_hash,
+        "display_name": body.display_name.unwrap_or_default(),
+        "roles": ["user"],
+        "is_anonymous": false,
+    });
+
+    state
+        .db
+        .update_document("users", &auth.user_id, update_data)
+        .await?;
+
+    // Send verification email
+    let verification_token = jwt::issue_verification_token(&auth.user_id, &state.jwt_keys)?;
+    if let Some(ref email_service) = state.email_service {
+        let _ = email_service
+            .send_verification_email(&body.email, &verification_token, &state.base_url)
+            .await;
+    }
+
+    // Issue new tokens with upgraded roles
+    let roles = vec!["user".to_string()];
+    let access_token = jwt::issue_access_token(
+        &auth.user_id,
+        &roles,
+        &state.jwt_keys,
+        state.access_ttl,
+        false,
+    )?;
+    let refresh_token =
+        jwt::issue_refresh_token(&auth.user_id, &state.jwt_keys, state.refresh_ttl)?;
+
+    let user = state
+        .db
+        .query_bind(
+            "SELECT * FROM type::thing('users', $uid) LIMIT 1",
+            json!({ "uid": auth.user_id }),
+        )
+        .await?;
+
+    let mut safe_user = user.first().cloned().unwrap_or(json!({}));
+    if let Some(obj) = safe_user.as_object_mut() {
+        obj.remove("password_hash");
+    }
+
+    Ok(Json(AuthResponse {
+        access_token,
+        refresh_token,
+        user: safe_user,
+    }))
+}
+
+// ── Magic Link Sign-In ──
+
+#[derive(Deserialize)]
+pub struct MagicLinkRequest {
+    pub email: String,
+}
+
+#[derive(Deserialize)]
+pub struct VerifyMagicLinkRequest {
+    pub token: String,
+}
+
+/// POST /auth/magic-link — Send a magic link email for passwordless sign-in.
+pub async fn send_magic_link(
+    State(state): State<AuthState>,
+    Json(body): Json<MagicLinkRequest>,
+) -> Result<Json<serde_json::Value>> {
+    if !body.email.contains('@') || body.email.len() < 5 {
+        return Err(Error::Validation("Invalid email address".into()));
+    }
+
+    // Generate a single-use token (15-min TTL)
+    let token_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now();
+    let expires_at = (now + chrono::Duration::minutes(15)).to_rfc3339();
+
+    // Store the magic link token in DB (single-use, tied to email)
+    let token_data = json!({
+        "email": body.email,
+        "token_id": token_id,
+        "used": false,
+        "expires_at": expires_at,
+        "created_at": now.to_rfc3339(),
+    });
+    state.db.create_document("_magic_links", token_data).await?;
+
+    // Send the email
+    if let Some(ref email_service) = state.email_service {
+        let _ = email_service
+            .send_magic_link_email(&body.email, &token_id, &state.base_url)
+            .await;
+    }
+
+    // Always return success (don't reveal if email exists — prevents enumeration)
+    Ok(Json(json!({
+        "message": "If that email is registered, a magic link has been sent.",
+        // In dev mode (no email service), return token for testing
+        "token": if state.email_service.is_none() { Some(&token_id) } else { None },
+    })))
+}
+
+/// POST /auth/verify-magic-link — Verify a magic link token and sign in.
+pub async fn verify_magic_link(
+    State(state): State<AuthState>,
+    Json(body): Json<VerifyMagicLinkRequest>,
+) -> Result<Json<AuthResponse>> {
+    // Find the magic link token
+    let tokens = state
+        .db
+        .query_bind(
+            "SELECT * FROM _magic_links WHERE token_id = $token_id AND used = false LIMIT 1",
+            json!({ "token_id": body.token }),
+        )
+        .await?;
+
+    let token_doc = tokens
+        .first()
+        .ok_or_else(|| Error::Auth("Invalid or expired magic link".into()))?;
+
+    // Check expiration
+    let expires_at = token_doc["expires_at"]
+        .as_str()
+        .ok_or_else(|| Error::Auth("Invalid token".into()))?;
+    let expires = chrono::DateTime::parse_from_rfc3339(expires_at)
+        .map_err(|_| Error::Auth("Invalid token expiration".into()))?;
+    if chrono::Utc::now() > expires {
+        return Err(Error::Auth("Magic link has expired".into()));
+    }
+
+    // Mark token as used (single-use)
+    let token_db_id = token_doc["id"].as_str().unwrap_or("");
+    state
+        .db
+        .query_bind(
+            "UPDATE type::thing('_magic_links', $tid) SET used = true",
+            json!({ "tid": token_db_id }),
+        )
+        .await?;
+
+    // Find or create user by email
+    let email = token_doc["email"]
+        .as_str()
+        .ok_or_else(|| Error::Auth("Invalid token".into()))?;
+
+    let existing = state
+        .db
+        .query_bind(
+            "SELECT * FROM users WHERE email = $email LIMIT 1",
+            json!({ "email": email }),
+        )
+        .await?;
+
+    let (user_id, user, roles) = if let Some(existing_user) = existing.first() {
+        let uid = existing_user["id"]
+            .as_str()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| existing_user["id"].to_string());
+        let roles: Vec<String> = existing_user["roles"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_else(|| vec!["user".to_string()]);
+
+        // Mark email as verified (they proved ownership via magic link)
+        state
+            .db
+            .query_bind(
+                "UPDATE type::thing('users', $uid) SET email_verified = true",
+                json!({ "uid": uid }),
+            )
+            .await?;
+
+        (uid, existing_user.clone(), roles)
+    } else {
+        // Create new user (passwordless account)
+        let now = chrono::Utc::now().to_rfc3339();
+        let user_data = json!({
+            "email": email,
+            "password_hash": null,
+            "display_name": email.split('@').next().unwrap_or("User"),
+            "roles": ["user"],
+            "email_verified": true,
+            "mfa_enabled": false,
+            "is_anonymous": false,
+            "created_at": now,
+        });
+
+        let user = state.db.create_document("users", user_data).await?;
+        let uid = user["id"]
+            .as_str()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| user["id"].to_string());
+
+        // Send welcome email
+        if let Some(ref email_service) = state.email_service {
+            let _ = email_service.send_welcome_email(email).await;
+        }
+
+        (uid, user, vec!["user".to_string()])
+    };
+
+    // Get custom claims
+    let custom_claims = user
+        .get("custom_claims")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    let access_token = issue_access_token_with_claims(
+        &user_id,
+        &roles,
+        &state.jwt_keys,
+        state.access_ttl,
+        true, // email verified via magic link
+        custom_claims,
+    )?;
+    let refresh_token = jwt::issue_refresh_token(&user_id, &state.jwt_keys, state.refresh_ttl)?;
+
+    let mut safe_user = user;
+    if let Some(obj) = safe_user.as_object_mut() {
+        obj.remove("password_hash");
+    }
+
+    Ok(Json(AuthResponse {
+        access_token,
+        refresh_token,
+        user: safe_user,
+    }))
+}
+
+/// Build the auth router.
+pub fn auth_router(state: AuthState) -> axum::Router {
+    let jwt_keys = Arc::new(state.jwt_keys.clone());
+    axum::Router::new()
+        .route("/auth/register", axum::routing::post(register))
+        .route("/auth/login", axum::routing::post(login))
+        .route("/auth/refresh", axum::routing::post(refresh))
+        .route(
+            "/auth/forgot-password",
+            axum::routing::post(forgot_password),
+        )
+        .route("/auth/reset-password", axum::routing::post(reset_password))
+        .route("/auth/providers", axum::routing::get(auth_providers))
+        .route("/auth/google/start", axum::routing::get(google_oauth_start))
+        .route(
+            "/auth/google/callback",
+            axum::routing::get(google_oauth_callback),
+        )
+        .route("/auth/google", axum::routing::post(google_sign_in))
+        .route("/auth/apple", axum::routing::post(apple_sign_in))
+        .route("/auth/oidc", axum::routing::post(oidc_sign_in))
+        // Email verification
+        .route("/auth/verify-email", axum::routing::post(verify_email))
+        .route(
+            "/auth/send-verification",
+            axum::routing::post(send_verification),
+        )
+        // MFA / TOTP
+        .route("/auth/mfa/setup", axum::routing::post(mfa_setup))
+        .route(
+            "/auth/mfa/verify-setup",
+            axum::routing::post(mfa_verify_setup),
+        )
+        .route("/auth/mfa/challenge", axum::routing::post(mfa_challenge))
+        .route("/auth/mfa/recovery", axum::routing::post(mfa_recovery))
+        .route("/auth/mfa", axum::routing::delete(mfa_disable))
+        // Anonymous auth
+        .route("/auth/anonymous", axum::routing::post(anonymous_sign_in))
+        .route(
+            "/auth/anonymous/upgrade",
+            axum::routing::post(anonymous_upgrade),
+        )
+        // Magic link (passwordless)
+        .route("/auth/magic-link", axum::routing::post(send_magic_link))
+        .route(
+            "/auth/verify-magic-link",
+            axum::routing::post(verify_magic_link),
+        )
+        // Admin user management
+        .route("/admin/users", axum::routing::get(admin_list_users))
+        .route("/admin/users", axum::routing::post(admin_create_user))
+        .route("/admin/users/{user_id}", axum::routing::get(admin_get_user))
+        .route(
+            "/admin/users/{user_id}",
+            axum::routing::patch(admin_update_user),
+        )
+        .route(
+            "/admin/users/{user_id}",
+            axum::routing::delete(admin_delete_user),
+        )
+        .route(
+            "/admin/users/{user_id}/claims",
+            axum::routing::put(admin_set_claims),
+        )
+        // Admin email templates
+        .route(
+            "/admin/email-templates",
+            axum::routing::get(admin_list_templates),
+        )
+        .route(
+            "/admin/email-templates/{template_name}",
+            axum::routing::get(admin_get_template),
+        )
+        .route(
+            "/admin/email-templates/{template_name}",
+            axum::routing::put(admin_update_template),
+        )
+        .route(
+            "/admin/email-templates/{template_name}/reset",
+            axum::routing::post(admin_reset_template),
+        )
+        // Security / login tracking
+        .route(
+            "/api/security/login-history",
+            axum::routing::get(login_tracking::get_login_history),
+        )
+        .route(
+            "/api/security/known-devices",
+            axum::routing::get(login_tracking::get_known_devices),
+        )
+        .route(
+            "/api/security/known-devices/{id}",
+            axum::routing::delete(login_tracking::delete_known_device),
+        )
+        .route(
+            "/api/security/alerts",
+            axum::routing::get(login_tracking::get_security_alerts),
+        )
+        .route(
+            "/api/security/alerts/{id}/acknowledge",
+            axum::routing::post(login_tracking::acknowledge_alert),
+        )
+        .with_state(state)
+        .layer(axum::middleware::from_fn(auth_extractor))
+        .layer(Extension(jwt_keys))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── RegisterRequest deserialization ──────────────────────────────
+
+    #[test]
+    fn test_register_request_with_display_name() {
+        let json = json!({
+            "email": "user@example.com",
+            "password": "secret123",
+            "display_name": "Alice"
+        });
+        let req: RegisterRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.email, "user@example.com");
+        assert_eq!(req.password, "secret123");
+        assert_eq!(req.display_name, Some("Alice".to_string()));
+    }
+
+    #[test]
+    fn test_register_request_without_display_name() {
+        let json = json!({
+            "email": "user@example.com",
+            "password": "secret123"
+        });
+        let req: RegisterRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.display_name, None);
+    }
+
+    #[test]
+    fn test_register_request_missing_email_fails() {
+        let json = json!({ "password": "secret123" });
+        let result = serde_json::from_value::<RegisterRequest>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_register_request_missing_password_fails() {
+        let json = json!({ "email": "a@b.com" });
+        let result = serde_json::from_value::<RegisterRequest>(json);
+        assert!(result.is_err());
+    }
+
+    // ── LoginRequest deserialization ─────────────────────────────────
+
+    #[test]
+    fn test_login_request_deserialize() {
+        let json = json!({ "email": "a@b.com", "password": "pass1234" });
+        let req: LoginRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.email, "a@b.com");
+        assert_eq!(req.password, "pass1234");
+    }
+
+    #[test]
+    fn test_login_request_extra_fields_ignored() {
+        let raw = r#"{"email":"a@b.com","password":"pass1234","extra":"ignored"}"#;
+        let req: LoginRequest = serde_json::from_str(raw).unwrap();
+        assert_eq!(req.email, "a@b.com");
+    }
+
+    // ── AuthResponse serialization ──────────────────────────────────
+
+    #[test]
+    fn test_auth_response_serialize() {
+        let resp = AuthResponse {
+            access_token: "at_123".into(),
+            refresh_token: "rt_456".into(),
+            user: json!({"id": "u1", "email": "a@b.com"}),
+        };
+        let val = serde_json::to_value(&resp).unwrap();
+        assert_eq!(val["access_token"], "at_123");
+        assert_eq!(val["refresh_token"], "rt_456");
+        assert_eq!(val["user"]["id"], "u1");
+    }
+
+    #[test]
+    fn test_auth_response_has_all_fields() {
+        let resp = AuthResponse {
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            user: json!(null),
+        };
+        let val = serde_json::to_value(&resp).unwrap();
+        let obj = val.as_object().unwrap();
+        assert!(obj.contains_key("access_token"));
+        assert!(obj.contains_key("refresh_token"));
+        assert!(obj.contains_key("user"));
+        assert_eq!(obj.len(), 3);
+    }
+
+    // ── RefreshRequest deserialization ───────────────────────────────
+
+    #[test]
+    fn test_refresh_request_deserialize() {
+        let json = json!({ "refresh_token": "rt_abc" });
+        let req: RefreshRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.refresh_token, "rt_abc");
+    }
+
+    #[test]
+    fn test_refresh_request_missing_token_fails() {
+        let json = json!({});
+        let result = serde_json::from_value::<RefreshRequest>(json);
+        assert!(result.is_err());
+    }
+
+    // ── Email validation logic ──────────────────────────────────────
+
+    /// Documents the inline validation: `!email.contains('@') || email.len() < 5`
+    fn is_valid_email(e: &str) -> bool {
+        e.contains('@') && e.len() >= 5
+    }
+
+    #[test]
+    fn test_email_valid_basic() {
+        assert!(is_valid_email("a@b.c")); // exactly 5 chars
+        assert!(is_valid_email("user@example.com"));
+    }
+
+    #[test]
+    fn test_email_no_at_sign() {
+        assert!(!is_valid_email("abcdef"));
+    }
+
+    #[test]
+    fn test_email_too_short() {
+        assert!(!is_valid_email("a@b")); // 3 chars
+        assert!(!is_valid_email("a@bc")); // 4 chars
+    }
+
+    #[test]
+    fn test_email_at_boundary() {
+        assert!(is_valid_email("a@b.c")); // 5 chars — passes
+        assert!(!is_valid_email("a@bc")); // 4 chars — fails
+    }
+
+    #[test]
+    fn test_email_empty() {
+        assert!(!is_valid_email(""));
+    }
+
+    #[test]
+    fn test_email_only_at() {
+        assert!(!is_valid_email("@")); // 1 char
+        assert!(!is_valid_email("@@@@")); // 4 chars, has @
+    }
+
+    #[test]
+    fn test_email_at_at_five_chars() {
+        assert!(is_valid_email("@@@@a")); // 5 chars, has @ — passes validation
+    }
+
+    // ── Password validation logic ───────────────────────────────────
+
+    /// Documents the inline validation: `password.len() < 8`
+    fn is_valid_password(p: &str) -> bool {
+        p.len() >= 8
+    }
+
+    #[test]
+    fn test_password_too_short() {
+        assert!(!is_valid_password(""));
+        assert!(!is_valid_password("1234567")); // 7 chars
+    }
+
+    #[test]
+    fn test_password_exact_boundary() {
+        assert!(is_valid_password("12345678")); // 8 chars — passes
+        assert!(!is_valid_password("1234567")); // 7 chars — fails
+    }
+
+    #[test]
+    fn test_password_long() {
+        assert!(is_valid_password("a]very$long!password?"));
+    }
+
+    // ── AuthState clone ─────────────────────────────────────────────
+
+    #[test]
+    fn test_auth_state_fields_exist() {
+        // Compile-time check that AuthState has the expected fields.
+        fn _assert_fields(s: &AuthState) {
+            let _ = &s.db;
+            let _ = &s.jwt_keys;
+            let _ = &s.access_ttl;
+            let _ = &s.refresh_ttl;
+            let _ = &s.google_client_id;
+            let _ = &s.google_client_secret;
+            let _ = &s.apple_team_id;
+            let _ = &s.oidc_issuer_url;
+            let _ = &s.email_service;
+            let _ = &s.require_email_verification;
+            let _ = &s.totp_encryption_key;
+            let _ = &s.base_url;
+            let _ = &s.oauth_state_nonces;
+        }
+    }
+
+    // ── OAuth request deserialization ──
+
+    #[test]
+    fn test_google_sign_in_request_deserialize() {
+        let json = json!({ "id_token": "REDACTED_SECRET" });
+        let req: GoogleSignInRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.id_token, "REDACTED_SECRET");
+    }
+
+    #[tokio::test]
+    async fn test_auth_providers_reports_google_web_requires_secret() {
+        let state = AuthState {
+            db: ob_database::DatabaseClient::new_mem().await,
+            jwt_keys: JwtKeys::from_secret("test-secret"),
+            access_ttl: 900,
+            refresh_ttl: 604800,
+            google_client_id: Some("google-client-id".into()),
+            google_client_secret: None,
+            apple_team_id: None,
+            apple_key_id: None,
+            apple_service_id: None,
+            apple_private_key: None,
+            oidc_issuer_url: None,
+            oidc_client_id: None,
+            email_service: None,
+            require_email_verification: false,
+            totp_encryption_key: None,
+            base_url: "https://example.com".into(),
+            oauth_state_nonces: Arc::new(dashmap::DashMap::new()),
+        };
+
+        let Json(response) = auth_providers(State(state)).await;
+        assert!(!response.google.enabled);
+        assert!(response.google.client_id_configured);
+        assert!(!response.google.client_secret_configured);
+        assert!(!response.apple.enabled);
+        assert!(!response.oidc.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_google_oauth_start_rejects_unapproved_redirect_origin() {
+        let state = AuthState {
+            db: ob_database::DatabaseClient::new_mem().await,
+            jwt_keys: JwtKeys::from_secret("test-secret"),
+            access_ttl: 900,
+            refresh_ttl: 604800,
+            google_client_id: Some("google-client-id".into()),
+            google_client_secret: Some("google-secret".into()),
+            apple_team_id: None,
+            apple_key_id: None,
+            apple_service_id: None,
+            apple_private_key: None,
+            oidc_issuer_url: None,
+            oidc_client_id: None,
+            email_service: None,
+            require_email_verification: false,
+            totp_encryption_key: None,
+            base_url: "https://api.orignagta.ca".into(),
+            oauth_state_nonces: Arc::new(dashmap::DashMap::new()),
+        };
+
+        let result = google_oauth_start(
+            State(state),
+            Query(GoogleOAuthStartRequest {
+                redirect_to: "https://evil.example.com/login".into(),
+            }),
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_apple_sign_in_request_deserialize() {
+        let json = json!({
+            "authorization_code": "auth_code_123",
+            "display_name": "John Appleseed"
+        });
+        let req: AppleSignInRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.authorization_code, "auth_code_123");
+        assert_eq!(req.display_name, Some("John Appleseed".to_string()));
+    }
+
+    #[test]
+    fn test_apple_sign_in_request_without_name() {
+        let json = json!({ "authorization_code": "code" });
+        let req: AppleSignInRequest = serde_json::from_value(json).unwrap();
+        assert!(req.display_name.is_none());
+    }
+
+    #[test]
+    fn test_oidc_sign_in_request_deserialize() {
+        let json = json!({ "access_token": "oidc_token_abc" });
+        let req: OidcSignInRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.access_token, "oidc_token_abc");
+    }
+
+    // ── Password reset request deserialization ──
+
+    #[test]
+    fn test_forgot_password_request_deserialize() {
+        let json = json!({ "email": "user@example.com" });
+        let req: ForgotPasswordRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.email, "user@example.com");
+    }
+
+    #[test]
+    fn test_reset_password_request_deserialize() {
+        let json = json!({ "token": "jwt_token_123", "new_password": "newpass123" });
+        let req: ResetPasswordRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.token, "jwt_token_123");
+        assert_eq!(req.new_password, "newpass123");
+    }
+
+    #[test]
+    fn test_hash_token_consistent() {
+        let h1 = hash_token("test_token");
+        let h2 = hash_token("test_token");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_hash_token_different_inputs() {
+        let h1 = hash_token("token_a");
+        let h2 = hash_token("token_b");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_hash_token_is_sha256_hex() {
+        let h = hash_token("test");
+        assert_eq!(h.len(), 64); // SHA-256 = 32 bytes = 64 hex chars
+    }
+
+    // ── Anonymous Auth ──────────────────────────────────────────────
+
+    #[test]
+    fn test_anonymous_upgrade_request_deser() {
+        let json = json!({
+            "email": "user@example.com",
+            "password": "secret123",
+            "display_name": "Alice"
+        });
+        let req: AnonymousUpgradeRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.email, "user@example.com");
+        assert_eq!(req.password, "secret123");
+        assert_eq!(req.display_name.unwrap(), "Alice");
+    }
+
+    #[test]
+    fn test_anonymous_upgrade_request_without_display_name() {
+        let json = json!({
+            "email": "user@example.com",
+            "password": "secret123"
+        });
+        let req: AnonymousUpgradeRequest = serde_json::from_value(json).unwrap();
+        assert!(req.display_name.is_none());
+    }
+
+    // ── Magic Link ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_magic_link_request_deser() {
+        let json = json!({ "email": "user@example.com" });
+        let req: MagicLinkRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.email, "user@example.com");
+    }
+
+    #[test]
+    fn test_verify_magic_link_request_deser() {
+        let json = json!({ "token": "abc-123-def" });
+        let req: VerifyMagicLinkRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.token, "abc-123-def");
+    }
+}

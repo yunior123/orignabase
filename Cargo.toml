@@ -13,7 +13,10 @@ members = [
     "crates/ob-admin",
     "crates/ob-functions",
     "crates/ob-analytics",
+    "crates/ob-notifications",
+    "crates/ob-handlers",
 ]
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -30,14 +33,14 @@ tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws", "macros"] }
 axum-extra = { version = "0.10", features = ["typed-header"] }
 tower = { version = "0.5", features = ["full"] }
-tower-http = { version = "0.6", features = ["cors", "compression-gzip", "trace", "timeout", "limit"] }
+tower-http = { version = "0.6", features = ["cors", "compression-gzip", "trace", "timeout", "limit", "fs", "catch-panic", "set-header"] }
 
 # GraphQL
 async-graphql = { version = "7", features = ["chrono", "uuid"] }
 async-graphql-axum = "7"
 
 # Database
-surrealdb = { version = "2", features = ["kv-rocksdb", "protocol-http"] }
+surrealdb = { version = "2", features = ["kv-rocksdb", "kv-mem", "protocol-http", "protocol-ws"] }
 
 # Auth
 argon2 = "0.5"
@@ -72,6 +75,10 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 # Testing
 tokio-test = "0.4"
+proptest = "1"
+insta = { version = "1", features = ["json", "yaml"] }
+rstest = "0.25"
+test-case = "3"
 
 # Benchmarks
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -88,6 +95,8 @@ ob-search = { path = "crates/ob-search" }
 ob-admin = { path = "crates/ob-admin" }
 ob-functions = { path = "crates/ob-functions" }
 ob-analytics = { path = "crates/ob-analytics" }
+ob-notifications = { path = "crates/ob-notifications" }
+ob-handlers = { path = "crates/ob-handlers" }
 
 # Crypto (for signed URLs)
 hmac = "0.12"
@@ -112,11 +121,35 @@ notify = "7"
 # Hex encoding
 hex = "0.4"
 
+# TOTP / MFA
+totp-rs = { version = "5", features = ["gen_secret", "otpauth", "qr"] }
+
+# Encryption (TOTP secrets at rest)
+aes-gcm = "0.10"
+
+# Email / SMTP
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "hostname", "builder", "pool"] }
+
+# Image processing
+image = "0.25"
+
+# File type detection (magic bytes)
+infer = "0.16"
+
+# S3-compatible storage
+aws-sdk-s3 = "1"
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-credential-types = "1"
+
 # WASM runtime (interpreter — lightweight, no JIT/cranelift overhead)
 wasmi = "0.42"
 
 # Dashboard
 dashmap = "6"
+
+# Rate limiting
+governor = "0.10"
+tower_governor = "0.8"
 
 [profile.release]
 lto = true

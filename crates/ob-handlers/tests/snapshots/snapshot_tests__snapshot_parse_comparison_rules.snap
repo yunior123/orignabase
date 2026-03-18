@@ -1,0 +1,56 @@
+---
+source: crates/ob-handlers/tests/snapshot_tests.rs
+expression: result
+---
+{
+    "products": RuleSet {
+        collection: "products",
+        rules: [
+            SecurityRule {
+                operations: [
+                    "read",
+                ],
+                condition: Comparison {
+                    left: Path(
+                        "resource.price",
+                    ),
+                    op: Gt,
+                    right: Number(
+                        100.0,
+                    ),
+                },
+                validation: None,
+            },
+            SecurityRule {
+                operations: [
+                    "update",
+                ],
+                condition: Comparison {
+                    left: Path(
+                        "resource.status",
+                    ),
+                    op: Eq,
+                    right: StringLit(
+                        "active",
+                    ),
+                },
+                validation: None,
+            },
+            SecurityRule {
+                operations: [
+                    "delete",
+                ],
+                condition: Comparison {
+                    left: Path(
+                        "resource.rating",
+                    ),
+                    op: Lt,
+                    right: Number(
+                        2.5,
+                    ),
+                },
+                validation: None,
+            },
+        ],
+    },
+}

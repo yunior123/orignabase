@@ -1,0 +1,113 @@
+---
+source: crates/ob-handlers/tests/snapshot_tests.rs
+assertion_line: 669
+expression: result
+---
+{
+    "*": RuleSet {
+        collection: "*",
+        rules: [
+            SecurityRule {
+                operations: [
+                    "read",
+                ],
+                condition: Bool(
+                    true,
+                ),
+                validation: None,
+            },
+        ],
+    },
+    "users": RuleSet {
+        collection: "users",
+        rules: [
+            SecurityRule {
+                operations: [
+                    "read",
+                ],
+                condition: FunctionCall {
+                    name: "isAuthenticated",
+                    args: [],
+                },
+                validation: None,
+            },
+            SecurityRule {
+                operations: [
+                    "update",
+                ],
+                condition: Or(
+                    [
+                        FunctionCall {
+                            name: "isOwner",
+                            args: [
+                                Path(
+                                    "resource.uid",
+                                ),
+                            ],
+                        },
+                        FunctionCall {
+                            name: "hasRole",
+                            args: [
+                                StringLit(
+                                    "admin",
+                                ),
+                            ],
+                        },
+                    ],
+                ),
+                validation: None,
+            },
+        ],
+    },
+    "orders": RuleSet {
+        collection: "orders",
+        rules: [
+            SecurityRule {
+                operations: [
+                    "read",
+                ],
+                condition: FunctionCall {
+                    name: "isAuthenticated",
+                    args: [],
+                },
+                validation: None,
+            },
+            SecurityRule {
+                operations: [
+                    "create",
+                ],
+                condition: FunctionCall {
+                    name: "isAuthenticated",
+                    args: [],
+                },
+                validation: None,
+            },
+            SecurityRule {
+                operations: [
+                    "update",
+                ],
+                condition: Or(
+                    [
+                        FunctionCall {
+                            name: "isOwner",
+                            args: [
+                                Path(
+                                    "resource.buyer_id",
+                                ),
+                            ],
+                        },
+                        FunctionCall {
+                            name: "hasRole",
+                            args: [
+                                StringLit(
+                                    "admin",
+                                ),
+                            ],
+                        },
+                    ],
+                ),
+                validation: None,
+            },
+        ],
+    },
+}

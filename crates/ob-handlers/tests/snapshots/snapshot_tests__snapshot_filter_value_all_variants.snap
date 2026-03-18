@@ -1,0 +1,11 @@
+---
+source: crates/ob-handlers/tests/snapshot_tests.rs
+expression: json
+---
+[
+  "recent",
+  "popular",
+  "price_low_to_high",
+  "price_high_to_low",
+  "top_rated"
+]

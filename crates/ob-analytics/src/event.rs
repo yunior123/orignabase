@@ -228,12 +228,19 @@ mod tests {
             count: 1500,
             unique_visitors: 423,
             top_paths: vec![
-                PathCount { value: "/".to_string(), count: 800 },
-                PathCount { value: "/products".to_string(), count: 500 },
+                PathCount {
+                    value: "/".to_string(),
+                    count: 800,
+                },
+                PathCount {
+                    value: "/products".to_string(),
+                    count: 500,
+                },
             ],
-            top_referrers: vec![
-                PathCount { value: "google.com".to_string(), count: 300 },
-            ],
+            top_referrers: vec![PathCount {
+                value: "google.com".to_string(),
+                count: 300,
+            }],
         };
 
         let json = serde_json::to_value(&rollup).unwrap();

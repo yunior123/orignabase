@@ -82,7 +82,8 @@ fn parse_interval(schedule: &str) -> Duration {
                     .map(|m| Duration::from_secs(m * 60))
                     .unwrap_or(Duration::from_secs(60))
             } else if let Some(hours) = rest.strip_suffix('h') {
-                hours.parse::<u64>()
+                hours
+                    .parse::<u64>()
                     .map(|h| Duration::from_secs(h * 3600))
                     .unwrap_or(Duration::from_secs(3600))
             } else {

@@ -1,6 +1,6 @@
-import 'dart:convert';
 import 'client.dart';
 import 'field_value.dart';
+import 'graphql_utils.dart';
 
 /// A batch of write operations, similar to Firestore's WriteBatch.
 ///
@@ -87,7 +87,7 @@ class WriteBatch {
     }
     for (final entry in createsByCollection.entries) {
       final response = await _client.graphql(
-        'mutation { batchCreate(collection: "${entry.key}", docs: ${jsonEncode(entry.value)}) }',
+        'mutation { batchCreate(collection: "${entry.key}", docs: ${toGraphQLValue(entry.value)}) }',
       );
       final data = response['data']?['batchCreate'];
       if (data is List) {
@@ -106,7 +106,7 @@ class WriteBatch {
     }
     for (final entry in updatesByCollection.entries) {
       final response = await _client.graphql(
-        'mutation { batchUpdate(collection: "${entry.key}", updates: ${jsonEncode(entry.value)}) }',
+        'mutation { batchUpdate(collection: "${entry.key}", updates: ${toGraphQLValue(entry.value)}) }',
       );
       final data = response['data']?['batchUpdate'];
       if (data is List) {
@@ -123,7 +123,7 @@ class WriteBatch {
     }
     for (final entry in deletesByCollection.entries) {
       await _client.graphql(
-        'mutation { batchDelete(collection: "${entry.key}", ids: ${jsonEncode(entry.value)}) }',
+        'mutation { batchDelete(collection: "${entry.key}", ids: ${toGraphQLValue(entry.value)}) }',
       );
       for (final id in entry.value) {
         results.add({'id': id, 'deleted': true});

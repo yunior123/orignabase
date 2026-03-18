@@ -32,8 +32,42 @@ OrignaBase runs at `http://localhost:8080`. GraphiQL playground at `http://local
 ```bash
 # Prerequisites: Rust 1.85+, SurrealDB v2 running on localhost:8000
 
+source ./scripts/cargo-target-dir.sh
+export_orignabase_cargo_target_dir dev
 cargo run -- serve
 ```
+
+## Rust Build Artifact Hygiene
+
+OrignaBase now keeps Cargo build outputs in separate buckets under `target/` so normal development, tests, and coverage runs do not accumulate into one giant debug tree.
+
+```bash
+source ./scripts/cargo-target-dir.sh
+
+export_orignabase_cargo_target_dir dev
+cargo run -- serve
+
+export_orignabase_cargo_target_dir test
+cargo test --workspace
+
+export_orignabase_cargo_target_dir coverage
+./scripts/coverage.sh --html
+```
+
+Clean managed Rust artifacts when needed:
+
+```bash
+./scripts/clean_rust_artifacts.sh --all
+```
+
+Enforce a hard size cap for Rust build artifacts:
+
+```bash
+ORIGNABASE_MAX_TARGET_GB=30 ./scripts/check_rust_artifacts_size.sh
+./scripts/install_git_hooks.sh
+```
+
+The installed `pre-push` hook blocks pushes if `target/` grows past the configured limit.
 
 ### Configuration
 
@@ -46,6 +80,20 @@ OB_DATABASE__ENDPOINT=localhost:8000
 OB_DATABASE__USERNAME=root
 OB_DATABASE__PASSWORD=root
 OB_AUTH__JWT_SECRET=your-secret-here
+OB_SECRETS__STRIPE_SECRET_KEY=sk_test_...
+OB_SECRETS__STRIPE_WEBHOOK_SECRET=whsec_...
+```
+
+Handler integrations such as checkout, refunds, subscriptions, webhooks, shipping,
+and email require process-level `OB_SECRETS__...` variables. Storing a Stripe key
+in another system is not enough unless it is injected into the OrignaBase process
+environment under the exact `OB_SECRETS__STRIPE_SECRET_KEY` name.
+
+If Stripe CLI is already authenticated on your machine, you can source the real
+test key directly into the OrignaBase process without committing it:
+
+```bash
+eval "$(./scripts/stripe-cli-env.sh test)"
 ```
 
 ## Security Rules
@@ -237,7 +285,54 @@ nats_url = "nats://nats:4222"
 # node_id = "node-1"  # Optional, auto-generated if not set
 ```
 
-Build with cluster support: `cargo build --features ob-realtime/cluster`
+Build with cluster support: `cargo build -p orignabase --features cluster`
+
+## Change Events And Native Triggers
+
+Write operations emitted through GraphQL now produce richer change events with:
+
+- `action`
+- `collection`
+- `document_id`
+- `data`
+- `before_data`
+- `after_data`
+- `timestamp`
+
+That event stream fans out inside `orignabase` to:
+
+- realtime WebSocket subscribers
+- WASM DB triggers
+- native Rust trigger handlers in `ob-handlers`
+- search sync
+- optional NATS JetStream cluster replication
+
+Native Rust triggers currently cover:
+
+- product create, update, and delete search-sync hooks
+- order status, payment refund, item shipped, and item delivered notifications
+- return status notifications
+- stock notification cleanup after successful purchase
+- perishable-order urgent seller alerts
+
+Cluster behavior is intentional:
+
+- local writes execute local side effects once
+- remote cluster events are forwarded to realtime subscribers only
+- remote events are not re-broadcast into native triggers or search sync, which avoids duplicate side effects
+
+Current notification behavior:
+
+- in-app notifications are written to `notifications`
+- email attempts go through Mailjet when configured
+- push attempts go through FCM when configured
+- fallback records are written to `_mail_logs` and `_pending_notifications`
+
+Idempotency and retention:
+
+- notification-side trigger sends claim deterministic records in `webhook_events`
+- Stripe webhooks also log to `webhook_events`
+- these records now include `timestamp`, so the existing stale-webhook cleanup cron can purge them correctly
 
 ## CLI Commands
 

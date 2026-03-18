@@ -1,8 +1,13 @@
 pub mod local;
+pub mod resumable;
 pub mod routes;
+pub mod s3;
 pub mod signed_url;
+pub mod transform;
 
 pub use local::LocalStorage;
+pub use resumable::ResumableUploadManager;
+pub use s3::{S3Config, S3Storage};
 pub use signed_url::SignedUrlGenerator;
 
 use ob_core::Result;

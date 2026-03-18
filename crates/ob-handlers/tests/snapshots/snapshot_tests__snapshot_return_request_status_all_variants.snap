@@ -1,0 +1,10 @@
+---
+source: crates/ob-handlers/tests/snapshot_tests.rs
+expression: json
+---
+[
+  "requested",
+  "approved",
+  "rejected",
+  "completed"
+]

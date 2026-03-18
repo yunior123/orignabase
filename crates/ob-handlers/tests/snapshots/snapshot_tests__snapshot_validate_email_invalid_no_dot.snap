@@ -1,0 +1,5 @@
+---
+source: crates/ob-handlers/tests/snapshot_tests.rs
+expression: err_msg
+---
+Validation error: Invalid email address

@@ -23,6 +23,9 @@ pub enum Error {
     #[error("Validation error: {0}")]
     Validation(String),
 
+    #[error("Unsupported media type: {0}")]
+    UnsupportedMediaType(String),
+
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -36,6 +39,7 @@ impl Error {
             Error::Forbidden(_) => StatusCode::FORBIDDEN,
             Error::NotFound(_) => StatusCode::NOT_FOUND,
             Error::Validation(_) => StatusCode::BAD_REQUEST,
+            Error::UnsupportedMediaType(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -233,5 +237,37 @@ mod tests {
         let e = Error::Database("timeout".into());
         let resp = e.into_response();
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn test_display_unsupported_media_type() {
+        let e = Error::UnsupportedMediaType("text/html not allowed".into());
+        assert_eq!(
+            e.to_string(),
+            "Unsupported media type: text/html not allowed"
+        );
+    }
+
+    #[test]
+    fn test_status_code_unsupported_media_type() {
+        assert_eq!(
+            Error::UnsupportedMediaType("x".into()).status_code(),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+    }
+
+    #[tokio::test]
+    async fn test_into_response_unsupported_media_type() {
+        let e = Error::UnsupportedMediaType("bad type".into());
+        let resp = e.into_response();
+        assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["error"]["code"], 415);
+        assert_eq!(
+            json["error"]["message"],
+            "Unsupported media type: bad type"
+        );
     }
 }

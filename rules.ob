@@ -1,9 +1,315 @@
-// OrignaBase Security Rules
-// Default rules — customize per collection.
+// OrignaBase security rules for the origna_gta data model.
+//
+// Notes:
+// - OrignaBase currently uses `rules <collection> { ... }`, not `collection "name" { ... }`.
+// - Firestore subcollections are represented here as standalone collections: `cart`,
+//   `warehouses`, `review_votes`, `chat_conversations`, and `chat_messages`.
+// - The current DSL cannot express Firestore-style cross-document lookups or array-contains
+//   checks, so seller/order rules rely on denormalized per-document fields where available.
 
 rules users {
+    read: isAuthenticated() && (isOwner(resource.uid) || hasRole("admin"));
+    create: isAuthenticated() && auth.uid == incoming.uid;
+    update: isAuthenticated() && (isOwner(resource.uid) || hasRole("admin"));
+    delete: false;
+    list: hasRole("admin");
+}
+
+rules products {
+    read: true;
+    create: isAuthenticated() && ((hasRole("seller") && auth.uid == incoming.sellerId) || hasRole("admin"));
+    update: isAuthenticated() && (hasRole("admin") || (hasRole("seller") && isOwner(resource.sellerId)));
+    delete: isAuthenticated() && (hasRole("admin") || (hasRole("seller") && isOwner(resource.sellerId)));
+    list: true;
+}
+
+rules orders {
+    read: isAuthenticated() && (
+        hasRole("admin") ||
+        isOwner(resource.userId) ||
+        isOwner(resource.buyerId) ||
+        isOwner(resource.sellerId) ||
+        isOwner(resource.seller_id)
+    );
+    create: hasRole("admin") || isAuthenticated();
+    update: hasRole("admin");
+    delete: false;
+    list: isAuthenticated();
+}
+
+rules product_ratings {
     read: isAuthenticated();
-    create: true;
-    update: isAuthenticated() && isOwner(resource.id);
+    create: false;
+    update: hasRole("admin") || isOwner(resource.sellerId) || isOwner(resource.seller_id);
     delete: hasRole("admin");
+    list: isAuthenticated();
+}
+
+rules cart {
+    read: isAuthenticated() && (
+        isOwner(resource.userId) ||
+        isOwner(resource.ownerId) ||
+        isOwner(resource.uid)
+    );
+    create: isAuthenticated() && (
+        auth.uid == incoming.userId ||
+        auth.uid == incoming.ownerId ||
+        auth.uid == incoming.uid
+    );
+    update: isAuthenticated() && (
+        isOwner(resource.userId) ||
+        isOwner(resource.ownerId) ||
+        isOwner(resource.uid)
+    );
+    delete: isAuthenticated() && (
+        isOwner(resource.userId) ||
+        isOwner(resource.ownerId) ||
+        isOwner(resource.uid)
+    );
+    list: isAuthenticated();
+}
+
+rules warehouses {
+    read: isAuthenticated() && (
+        hasRole("admin") ||
+        isOwner(resource.userId) ||
+        isOwner(resource.ownerId) ||
+        isOwner(resource.sellerId) ||
+        isOwner(resource.uid)
+    );
+    create: false;
+    update: false;
+    delete: false;
+    list: isAuthenticated() && (hasRole("seller") || hasRole("admin"));
+}
+
+rules remote_config {
+    read: true;
+    create: isAuthenticated() && hasRole("admin");
+    update: hasRole("admin");
+    delete: hasRole("admin");
+    list: true;
+}
+
+rules config {
+    read: hasRole("admin");
+    create: false;
+    update: false;
+    delete: false;
+    list: hasRole("admin");
+}
+
+rules admin_logs {
+    read: hasRole("admin");
+    create: false;
+    update: false;
+    delete: false;
+    list: hasRole("admin");
+}
+
+rules security_alerts {
+    read: hasRole("admin");
+    create: false;
+    update: false;
+    delete: false;
+    list: hasRole("admin");
+}
+
+rules rate_limits {
+    read: hasRole("admin");
+    create: false;
+    update: false;
+    delete: false;
+    list: hasRole("admin");
+}
+
+rules webhook_logs {
+    read: hasRole("admin");
+    create: false;
+    update: false;
+    delete: false;
+    list: hasRole("admin");
+}
+
+rules webhook_events {
+    read: hasRole("admin");
+    create: false;
+    update: false;
+    delete: false;
+    list: hasRole("admin");
+}
+
+rules return_requests {
+    read: isAuthenticated() && (
+        hasRole("admin") ||
+        isOwner(resource.buyerId) ||
+        isOwner(resource.userId) ||
+        isOwner(resource.sellerId)
+    );
+    create: false;
+    update: hasRole("admin");
+    delete: false;
+    list: isAuthenticated();
+}
+
+rules coupons {
+    read: hasRole("admin");
+    create: false;
+    update: false;
+    delete: false;
+    list: hasRole("admin");
+}
+
+rules seller_ratings {
+    read: isAuthenticated();
+    create: false;
+    update: false;
+    delete: false;
+    list: isAuthenticated();
+}
+
+rules review_votes {
+    read: isAuthenticated();
+    create: false;
+    update: false;
+    delete: false;
+    list: isAuthenticated();
+}
+
+rules stock_notifications {
+    read: isAuthenticated() && (
+        hasRole("admin") ||
+        isOwner(resource.userId) ||
+        isOwner(resource.ownerId) ||
+        isOwner(resource.uid)
+    );
+    create: false;
+    update: false;
+    delete: false;
+    list: isAuthenticated();
+}
+
+rules chat_conversations {
+    read: isAuthenticated() && (
+        hasRole("admin") ||
+        isOwner(resource.buyerId) ||
+        isOwner(resource.sellerId)
+    );
+    create: isAuthenticated();
+    update: isAuthenticated() && (
+        hasRole("admin") ||
+        isOwner(resource.buyerId) ||
+        isOwner(resource.sellerId)
+    );
+    delete: false;
+    list: isAuthenticated();
+}
+
+rules chat_messages {
+    read: isAuthenticated() && (
+        hasRole("admin") ||
+        isOwner(resource.buyerId) ||
+        isOwner(resource.sellerId) ||
+        isOwner(resource.senderId)
+    );
+    create: isAuthenticated();
+    update: isAuthenticated() && (hasRole("admin") || isOwner(resource.senderId));
+    delete: false;
+    list: isAuthenticated();
+}
+
+rules favorites {
+    read: isAuthenticated() && (
+        isOwner(resource.userId) ||
+        isOwner(resource.ownerId) ||
+        isOwner(resource.uid)
+    );
+    create: isAuthenticated() && (
+        auth.uid == incoming.userId ||
+        auth.uid == incoming.ownerId ||
+        auth.uid == incoming.uid
+    );
+    update: isAuthenticated() && (
+        isOwner(resource.userId) ||
+        isOwner(resource.ownerId) ||
+        isOwner(resource.uid)
+    );
+    delete: isAuthenticated() && (
+        isOwner(resource.userId) ||
+        isOwner(resource.ownerId) ||
+        isOwner(resource.uid)
+    );
+    list: isAuthenticated();
+}
+
+rules addresses {
+    read: isAuthenticated() && (
+        isOwner(resource.userId) ||
+        isOwner(resource.ownerId) ||
+        isOwner(resource.uid)
+    );
+    create: isAuthenticated() && (
+        auth.uid == incoming.userId ||
+        auth.uid == incoming.ownerId ||
+        auth.uid == incoming.uid
+    );
+    update: isAuthenticated() && (
+        isOwner(resource.userId) ||
+        isOwner(resource.ownerId) ||
+        isOwner(resource.uid)
+    );
+    delete: isAuthenticated() && (
+        isOwner(resource.userId) ||
+        isOwner(resource.ownerId) ||
+        isOwner(resource.uid)
+    );
+    list: isAuthenticated();
+}
+
+rules notifications {
+    read: isAuthenticated() && (
+        isOwner(resource.userId) ||
+        isOwner(resource.ownerId) ||
+        isOwner(resource.uid)
+    );
+    create: isAuthenticated() && (
+        auth.uid == incoming.userId ||
+        auth.uid == incoming.ownerId ||
+        auth.uid == incoming.uid
+    );
+    update: isAuthenticated() && (
+        isOwner(resource.userId) ||
+        isOwner(resource.ownerId) ||
+        isOwner(resource.uid)
+    );
+    delete: isAuthenticated() && (
+        isOwner(resource.userId) ||
+        isOwner(resource.ownerId) ||
+        isOwner(resource.uid)
+    );
+    list: isAuthenticated();
+}
+
+rules seller_profiles {
+    read: true;
+    create: isAuthenticated() && auth.uid == incoming.uid;
+    update: isAuthenticated() && isOwner(resource.uid);
+    delete: false;
+    list: true;
+}
+
+rules product_questions {
+    read: true;
+    create: isAuthenticated();
+    update: isAuthenticated() && (hasRole("admin") || isOwner(resource.userId) || isOwner(resource.uid));
+    delete: hasRole("admin");
+    list: true;
+}
+
+rules * {
+    read: false;
+    create: false;
+    update: false;
+    delete: false;
+    list: false;
 }

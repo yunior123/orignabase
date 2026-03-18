@@ -45,6 +45,7 @@ impl SignedUrlGenerator {
     }
 
     /// Verify a signed URL's signature and check expiration.
+    /// Uses constant-time comparison to prevent timing attacks.
     pub fn verify(&self, method: &str, path: &str, expires: u64, signature: &str) -> Result<bool> {
         // Check expiration
         let now = chrono::Utc::now().timestamp() as u64;
@@ -52,11 +53,19 @@ impl SignedUrlGenerator {
             return Err(Error::Auth("Signed URL has expired".into()));
         }
 
-        // Verify signature
+        // Verify signature using HMAC's built-in constant-time verification
         let message = format!("{method}:{path}:{expires}");
-        let expected = self.compute_signature(&message)?;
+        let mut mac = HmacSha256::new_from_slice(&self.secret)
+            .map_err(|e| Error::Internal(format!("HMAC init failed: {e}")))?;
+        mac.update(message.as_bytes());
 
-        Ok(expected == signature)
+        // Decode the provided signature from base64
+        let sig_bytes = URL_SAFE_NO_PAD
+            .decode(signature)
+            .map_err(|_| Error::Auth("Invalid signature encoding".into()))?;
+
+        // constant-time comparison via hmac::Mac::verify_slice
+        Ok(mac.verify_slice(&sig_bytes).is_ok())
     }
 
     fn compute_signature(&self, message: &str) -> Result<String> {
@@ -144,7 +153,11 @@ mod tests {
         let expires: u64 = params[0].strip_prefix("expires=").unwrap().parse().unwrap();
         let sig = params[1].strip_prefix("sig=").unwrap();
 
-        assert!(signer.verify("PUT", "docs/report.pdf", expires, sig).unwrap());
+        assert!(
+            signer
+                .verify("PUT", "docs/report.pdf", expires, sig)
+                .unwrap()
+        );
     }
 
     #[test]
@@ -208,7 +221,10 @@ mod tests {
         let result = signer.verify("GET", "file.txt", expired, "any");
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
-        assert!(err_msg.contains("expired"), "Error should mention expiration: {err_msg}");
+        assert!(
+            err_msg.contains("expired"),
+            "Error should mention expiration: {err_msg}"
+        );
     }
 
     #[test]

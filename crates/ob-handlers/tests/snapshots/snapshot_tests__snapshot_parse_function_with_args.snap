@@ -1,0 +1,31 @@
+---
+source: crates/ob-handlers/tests/snapshot_tests.rs
+expression: result
+---
+{
+    "products": RuleSet {
+        collection: "products",
+        rules: [
+            SecurityRule {
+                operations: [
+                    "update",
+                ],
+                condition: FunctionCall {
+                    name: "customCheck",
+                    args: [
+                        StringLit(
+                            "admin",
+                        ),
+                        Number(
+                            42.0,
+                        ),
+                        Path(
+                            "resource.field",
+                        ),
+                    ],
+                },
+                validation: None,
+            },
+        ],
+    },
+}

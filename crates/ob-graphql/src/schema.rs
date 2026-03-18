@@ -3,6 +3,7 @@ use async_graphql::{EmptySubscription, Schema};
 use crate::resolvers::{MutationRoot, QueryRoot};
 use ob_database::DatabaseClient;
 use ob_realtime::registry::ChangeEvent;
+use ob_search::SearchClient;
 use ob_security::RuleEngine;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -23,11 +24,13 @@ pub fn build_schema(
     db: DatabaseClient,
     rules: Arc<RuleEngine>,
     change_tx: mpsc::Sender<ChangeEvent>,
+    search: SearchClient,
 ) -> AppSchema {
     Schema::build(QueryRoot, MutationRoot, EmptySubscription)
         .data(db)
         .data(rules)
         .data(change_tx)
+        .data(search)
         .finish()
 }
 
@@ -59,12 +62,17 @@ mod tests {
         let db = DatabaseClient::connect(&config).await.unwrap();
         let rules = Arc::new(RuleEngine::new(std::collections::HashMap::new()));
         let (change_tx, _change_rx) = tokio::sync::mpsc::channel(16);
+        let search = SearchClient::new(ob_search::SearchConfig::default());
 
-        let schema = build_schema(db, rules, change_tx);
+        let schema = build_schema(db, rules, change_tx, search);
 
         // Introspect — should return type names without error
         let result = schema.execute("{ __schema { types { name } } }").await;
-        assert!(result.errors.is_empty(), "Introspection errors: {:?}", result.errors);
+        assert!(
+            result.errors.is_empty(),
+            "Introspection errors: {:?}",
+            result.errors
+        );
         assert!(!result.data.to_string().is_empty());
     }
 }

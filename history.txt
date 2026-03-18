@@ -1,0 +1,6 @@
+#V2
+SELECT id, email, roles FROM users LIMIT 10;
+SELECT id, email FROM users WHERE email IN ['seller1@example.com', 'seller2@example.com', 'admin@example.com', 'buyer1@example.com', 'buyer2@example.com'];
+UPDATE users:ft54cgk7lehmq992n91u SET roles = ['user', 'seller'];
+UPDATE users:84yrlo04b635jxzjx3lg SET roles = ['user', 'seller'];
+UPDATE users:d9z6tjclnroj1cqbmkfg SET roles = ['user', 'admin'];

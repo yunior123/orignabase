@@ -1,0 +1,14 @@
+---
+source: crates/ob-handlers/tests/snapshot_tests.rs
+expression: json
+---
+[
+  "PENDING",
+  "AUTHORIZED",
+  "CAPTURED",
+  "REFUNDED",
+  "PARTIAL_REFUND",
+  "FAILED",
+  "CANCELLED",
+  "DISPUTED"
+]

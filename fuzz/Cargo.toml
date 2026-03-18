@@ -1,0 +1,40 @@
+[package]
+name = "orignabase-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+ob-security = { path = "../crates/ob-security" }
+ob-auth = { path = "../crates/ob-auth" }
+ob-core = { path = "../crates/ob-core" }
+
+[[bin]]
+name = "fuzz_json_body"
+path = "fuzz_targets/fuzz_json_body.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_security_rules"
+path = "fuzz_targets/fuzz_security_rules.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_jwt"
+path = "fuzz_targets/fuzz_jwt.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_graphql_filter"
+path = "fuzz_targets/fuzz_graphql_filter.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_url_routing"
+path = "fuzz_targets/fuzz_url_routing.rs"
+doc = false

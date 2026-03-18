@@ -1,9 +1,9 @@
 import 'dart:async';
-import 'dart:convert';
 import 'client.dart';
 import 'document.dart';
 import 'errors.dart';
 import 'field_value.dart';
+import 'graphql_utils.dart';
 import 'query.dart';
 import 'realtime.dart';
 import 'subcollection.dart';
@@ -46,7 +46,7 @@ class CollectionRef extends Query {
   /// Add a new document to the collection.
   Future<Document> add(Map<String, dynamic> data) async {
     final response = await client.graphql(
-      'mutation { create(collection: "$collectionName", data: ${jsonEncode(data)}) }',
+      'mutation { create(collection: "$collectionName", data: ${toGraphQLValue(data)}) }',
     );
 
     final result = response['data']?['create'];
@@ -111,7 +111,7 @@ class DocumentRef {
     // Use updateWithFieldValues mutation when FieldValue markers are present
     final mutation = hasFieldValues ? 'updateWithFieldValues' : 'update';
     final response = await _client.graphql(
-      'mutation { $mutation(collection: "$collection", id: "$id", data: ${jsonEncode(processed)}) }',
+      'mutation { $mutation(collection: "$collection", id: "$id", data: ${toGraphQLValue(processed)}) }',
     );
 
     final result = response['data']?[mutation];
@@ -124,7 +124,7 @@ class DocumentRef {
   /// Create or replace the document at this explicit ID.
   Future<Document?> set(Map<String, dynamic> data) async {
     final response = await _client.graphql(
-      'mutation { set(collection: "$collection", id: "$id", data: ${jsonEncode(data)}) }',
+      'mutation { set(collection: "$collection", id: "$id", data: ${toGraphQLValue(data)}) }',
     );
 
     final result = response['data']?['set'];

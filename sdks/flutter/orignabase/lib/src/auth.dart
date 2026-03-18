@@ -272,11 +272,54 @@ class OrignaBaseAuth {
     });
   }
 
+  // ── Security / Login Tracking ──
+
+  /// Get paginated login history for the current user.
+  Future<List<Map<String, dynamic>>> getLoginHistory({int limit = 20, int offset = 0}) async {
+    final response = await _client.request('GET', '/api/security/login-history?limit=$limit&offset=$offset');
+    final records = response['records'] as List<dynamic>? ?? [];
+    return records.map((r) => Map<String, dynamic>.from(r as Map)).toList();
+  }
+
+  /// Get known devices for the current user.
+  Future<List<Map<String, dynamic>>> getKnownDevices() async {
+    final response = await _client.request('GET', '/api/security/known-devices');
+    final devices = response['devices'] as List<dynamic>? ?? [];
+    return devices.map((d) => Map<String, dynamic>.from(d as Map)).toList();
+  }
+
+  /// Remove a known device by ID.
+  Future<void> removeDevice(String deviceId) async {
+    await _client.request('DELETE', '/api/security/known-devices/$deviceId');
+  }
+
+  /// Get unacknowledged security alerts for the current user.
+  Future<List<Map<String, dynamic>>> getSecurityAlerts() async {
+    final response = await _client.request('GET', '/api/security/alerts');
+    final alerts = response['alerts'] as List<dynamic>? ?? [];
+    return alerts.map((a) => Map<String, dynamic>.from(a as Map)).toList();
+  }
+
+  /// Acknowledge a security alert.
+  Future<void> acknowledgeAlert(String alertId) async {
+    await _client.request('POST', '/api/security/alerts/$alertId/acknowledge', body: {});
+  }
+
   /// Sign out the current user.
+  ///
+  /// Clears tokens, disconnects realtime WebSocket subscriptions,
+  /// and purges the offline cache to prevent stale data leaking
+  /// across sessions.
   void signOut() {
     _accessToken = null;
     _refreshToken = null;
     _authStateController.add(AuthState.unauthenticated);
+
+    // Close realtime WebSocket if it was ever opened.
+    _client.closeRealtime();
+
+    // Clear offline cache to prevent stale user data.
+    _client.offline.clearAll();
   }
 
   /// Restore an authenticated session from tokens returned by a web OAuth callback.

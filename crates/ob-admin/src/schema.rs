@@ -25,6 +25,12 @@ pub struct FieldDef {
 
 /// Create a SCHEMAFULL table in SurrealDB from a CollectionSchema.
 pub async fn create_collection(db: &DatabaseClient, schema: &CollectionSchema) -> Result<()> {
+    // Validate all identifiers to prevent SurrealQL injection
+    ob_core::validate_identifier(&schema.name)?;
+    for field in &schema.fields {
+        ob_core::validate_identifier(&field.name)?;
+    }
+
     // Define the table
     let mut query = format!("DEFINE TABLE {} SCHEMAFULL;\n", schema.name);
 
@@ -263,7 +269,10 @@ mod tests {
         // Document that empty string passes the validation predicate (vacuous truth).
         // This is a known edge case — the chars().all() check returns true for "".
         let valid = |name: &str| name.chars().all(|c| c.is_alphanumeric() || c == '_');
-        assert!(valid(""), "Empty string should pass chars().all() due to vacuous truth");
+        assert!(
+            valid(""),
+            "Empty string should pass chars().all() due to vacuous truth"
+        );
     }
 
     #[test]

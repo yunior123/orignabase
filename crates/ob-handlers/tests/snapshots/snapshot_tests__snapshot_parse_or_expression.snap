@@ -1,0 +1,37 @@
+---
+source: crates/ob-handlers/tests/snapshot_tests.rs
+expression: result
+---
+{
+    "products": RuleSet {
+        collection: "products",
+        rules: [
+            SecurityRule {
+                operations: [
+                    "delete",
+                ],
+                condition: Or(
+                    [
+                        FunctionCall {
+                            name: "hasRole",
+                            args: [
+                                StringLit(
+                                    "admin",
+                                ),
+                            ],
+                        },
+                        FunctionCall {
+                            name: "hasRole",
+                            args: [
+                                StringLit(
+                                    "super_admin",
+                                ),
+                            ],
+                        },
+                    ],
+                ),
+                validation: None,
+            },
+        ],
+    },
+}

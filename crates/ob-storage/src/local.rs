@@ -18,8 +18,16 @@ impl LocalStorage {
     }
 
     fn full_path(&self, path: &str) -> PathBuf {
-        // Sanitize: prevent path traversal
-        let sanitized = path.replace("..", "").trim_start_matches('/').to_string();
+        // Sanitize: prevent path traversal (iterative removal handles `....//`)
+        let mut sanitized = path.replace('\\', "/");
+        loop {
+            let next = sanitized.replace("..", "");
+            if next == sanitized {
+                break;
+            }
+            sanitized = next;
+        }
+        let sanitized = sanitized.trim_start_matches('/').to_string();
         self.root.join(sanitized)
     }
 }
@@ -265,7 +273,10 @@ mod tests {
     #[test]
     fn test_content_type_nested_path() {
         assert_eq!(guess_content_type("a/b/c/photo.png"), "image/png");
-        assert_eq!(guess_content_type("/deep/path/file.json"), "application/json");
+        assert_eq!(
+            guess_content_type("/deep/path/file.json"),
+            "application/json"
+        );
     }
 
     #[test]

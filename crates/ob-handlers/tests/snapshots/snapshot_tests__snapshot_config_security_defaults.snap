@@ -1,0 +1,7 @@
+---
+source: crates/ob-handlers/tests/snapshot_tests.rs
+expression: sec_snapshot
+---
+{
+  "rules_path": "rules.ob"
+}

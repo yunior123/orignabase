@@ -1,0 +1,74 @@
+[package]
+name = "ob-handlers"
+description = "OrignaBase business logic handlers for origna_gta marketplace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Workspace crates
+ob-core = { workspace = true }
+ob-database = { workspace = true }
+ob-storage = { workspace = true }
+ob-search = { workspace = true }
+ob-auth = { workspace = true }
+ob-realtime = { workspace = true }
+
+# Web framework
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# HTTP client (Stripe, Mailjet, Geoapify, Turnstile, FCM)
+reqwest = { workspace = true }
+
+# Time & IDs
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Rate limiting
+governor = { workspace = true }
+
+# MFA / TOTP
+totp-rs = { workspace = true }
+
+# Stripe
+async-stripe = { version = "0.41", default-features = false, features = ["runtime-tokio-hyper-rustls", "checkout", "connect", "billing", "webhook-events"] }
+
+# Email (SMTP via lettre, or REST via reqwest for Mailjet)
+lettre = { workspace = true }
+
+# PDF generation
+genpdf = "0.2"
+
+# Crypto
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+
+# Lightweight regex (no proc macro overhead)
+regex-lite = "0.1"
+
+[dev-dependencies]
+tokio = { workspace = true }
+tokio-test = { workspace = true }
+serde_json = { workspace = true }
+proptest = { workspace = true }
+rstest = { workspace = true }
+ob-security = { workspace = true }
+insta = { version = "1", features = ["json", "yaml"] }
+wiremock = "0.6.5"

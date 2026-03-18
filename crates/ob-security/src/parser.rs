@@ -285,10 +285,17 @@ mod tests {
         let result = parse_rules(input).unwrap();
         let rule = &result["products"].rules[0];
         assert!(matches!(rule.condition, Expression::Comparison { .. }));
-        if let Expression::Comparison { ref left, ref op, ref right } = rule.condition {
+        if let Expression::Comparison {
+            ref left,
+            ref op,
+            ref right,
+        } = rule.condition
+        {
             assert!(matches!(left.as_ref(), Expression::Path(p) if p == "resource.price"));
             assert!(matches!(op, CompOp::Gt));
-            assert!(matches!(right.as_ref(), Expression::Number(n) if (*n - 100.0).abs() < f64::EPSILON));
+            assert!(
+                matches!(right.as_ref(), Expression::Number(n) if (*n - 100.0).abs() < f64::EPSILON)
+            );
         }
     }
 
@@ -301,7 +308,12 @@ mod tests {
         "#;
         let result = parse_rules(input).unwrap();
         let rule = &result["products"].rules[0];
-        if let Expression::Comparison { ref left, ref op, ref right } = rule.condition {
+        if let Expression::Comparison {
+            ref left,
+            ref op,
+            ref right,
+        } = rule.condition
+        {
             assert!(matches!(left.as_ref(), Expression::Path(p) if p == "resource.status"));
             assert!(matches!(op, CompOp::Eq));
             assert!(matches!(right.as_ref(), Expression::StringLit(s) if s == "active"));
@@ -418,15 +430,21 @@ mod tests {
 
     #[test]
     fn test_parse_all_comparison_operators() {
-        let ops = vec![(">=", "Gte"), ("<=", "Lte"), ("!=", "Neq"), ("<", "Lt"), ("==", "Eq")];
+        let ops = vec![
+            (">=", "Gte"),
+            ("<=", "Lte"),
+            ("!=", "Neq"),
+            ("<", "Lt"),
+            ("==", "Eq"),
+        ];
         for (op_str, _label) in ops {
-            let input = format!(
-                r#"rules products {{ read: resource.val {op_str} 10; }}"#
-            );
+            let input = format!(r#"rules products {{ read: resource.val {op_str} 10; }}"#);
             let result = parse_rules(&input).unwrap();
             let rule = &result["products"].rules[0];
-            assert!(matches!(rule.condition, Expression::Comparison { .. }),
-                "Failed to parse operator {op_str}");
+            assert!(
+                matches!(rule.condition, Expression::Comparison { .. }),
+                "Failed to parse operator {op_str}"
+            );
         }
     }
 
@@ -501,7 +519,9 @@ mod tests {
         let result = parse_rules(input).unwrap();
         let rule = &result["products"].rules[0];
         if let Expression::Comparison { ref right, .. } = rule.condition {
-            assert!(matches!(right.as_ref(), Expression::Number(n) if (*n - 4.5).abs() < f64::EPSILON));
+            assert!(
+                matches!(right.as_ref(), Expression::Number(n) if (*n - 4.5).abs() < f64::EPSILON)
+            );
         } else {
             panic!("Expected Comparison");
         }
@@ -517,5 +537,303 @@ mod tests {
         let result = parse_rules(input).unwrap();
         let rule = &result["products"].rules[0];
         assert_eq!(rule.operations, vec!["list"]);
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // ---- Wildcard collection name parsing ----
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_parse_wildcard_collection() {
+        let input = r#"
+            rules * {
+                read: true;
+                create: isAuthenticated();
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        assert!(result.contains_key("*"));
+        assert_eq!(result["*"].collection, "*");
+        assert_eq!(result["*"].rules.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_wildcard_with_specific() {
+        let input = r#"
+            rules users {
+                read: isAuthenticated();
+            }
+            rules * {
+                read: true;
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        assert!(result.contains_key("users"));
+        assert!(result.contains_key("*"));
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_wildcard_all_operations() {
+        let input = r#"
+            rules * {
+                read: true;
+                create: isAuthenticated();
+                update: isAuthenticated();
+                delete: hasRole("admin");
+                list: true;
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        let rules = &result["*"];
+        assert_eq!(rules.rules.len(), 5);
+        let ops: Vec<&str> = rules
+            .rules
+            .iter()
+            .flat_map(|r| r.operations.iter().map(|s| s.as_str()))
+            .collect();
+        assert!(ops.contains(&"read"));
+        assert!(ops.contains(&"create"));
+        assert!(ops.contains(&"update"));
+        assert!(ops.contains(&"delete"));
+        assert!(ops.contains(&"list"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // ---- All five operations individually ----
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_parse_all_operations() {
+        for op in &["read", "create", "update", "delete", "list"] {
+            let input = format!("rules products {{ {op}: true; }}");
+            let result = parse_rules(&input).unwrap();
+            assert_eq!(result["products"].rules[0].operations, vec![*op]);
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // ---- Complex expression parsing ----
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_parse_deeply_nested_and_or() {
+        let input = r#"
+            rules products {
+                read: (isAuthenticated() && hasRole("seller")) || (hasRole("admin") && hasRole("verified"));
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        let rule = &result["products"].rules[0];
+        // Top-level should be Or with 2 And branches
+        assert!(matches!(rule.condition, Expression::Or(_)));
+        if let Expression::Or(ref branches) = rule.condition {
+            assert_eq!(branches.len(), 2);
+            assert!(matches!(&branches[0], Expression::And(_)));
+            assert!(matches!(&branches[1], Expression::And(_)));
+        }
+    }
+
+    #[test]
+    fn test_parse_function_no_args() {
+        let input = r#"
+            rules products {
+                read: isAuthenticated();
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        if let Expression::FunctionCall { ref name, ref args } =
+            result["products"].rules[0].condition
+        {
+            assert_eq!(name, "isAuthenticated");
+            assert!(args.is_empty());
+        } else {
+            panic!("Expected FunctionCall");
+        }
+    }
+
+    #[test]
+    fn test_parse_function_multiple_args() {
+        let input = r#"
+            rules products {
+                read: customCheck("admin", 42, resource.field);
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        if let Expression::FunctionCall { ref name, ref args } =
+            result["products"].rules[0].condition
+        {
+            assert_eq!(name, "customCheck");
+            assert_eq!(args.len(), 3);
+            assert!(matches!(&args[0], Expression::StringLit(s) if s == "admin"));
+            assert!(matches!(&args[1], Expression::Number(n) if (*n - 42.0).abs() < f64::EPSILON));
+            assert!(matches!(&args[2], Expression::Path(p) if p == "resource.field"));
+        } else {
+            panic!("Expected FunctionCall");
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // ---- Validate entry parsing ----
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_parse_validate_with_comparison() {
+        let input = r#"
+            rules products {
+                create, update: {
+                    validate: incoming.price > 0;
+                }
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        let rule = &result["products"].rules[0];
+        assert_eq!(rule.operations, vec!["create", "update"]);
+        assert!(matches!(rule.condition, Expression::Bool(true)));
+        assert!(rule.validation.is_some());
+        if let Some(Expression::Comparison { ref op, .. }) = rule.validation {
+            assert!(matches!(op, CompOp::Gt));
+        } else {
+            panic!("Expected validation comparison");
+        }
+    }
+
+    #[test]
+    fn test_parse_validate_with_function() {
+        let input = r#"
+            rules products {
+                create: {
+                    validate: isAuthenticated();
+                }
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        let rule = &result["products"].rules[0];
+        assert!(rule.validation.is_some());
+        if let Some(Expression::FunctionCall { ref name, .. }) = rule.validation {
+            assert_eq!(name, "isAuthenticated");
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // ---- Negative numbers ----
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_parse_negative_number() {
+        let input = r#"
+            rules products {
+                read: resource.temp > -40;
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        if let Expression::Comparison { ref right, .. } = result["products"].rules[0].condition {
+            assert!(
+                matches!(right.as_ref(), Expression::Number(n) if (*n - (-40.0)).abs() < f64::EPSILON)
+            );
+        } else {
+            panic!("Expected Comparison");
+        }
+    }
+
+    #[test]
+    fn test_parse_negative_decimal() {
+        let input = r#"
+            rules products {
+                read: resource.score > -3.5;
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        if let Expression::Comparison { ref right, .. } = result["products"].rules[0].condition {
+            assert!(
+                matches!(right.as_ref(), Expression::Number(n) if (*n - (-3.5)).abs() < f64::EPSILON)
+            );
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // ---- Many collections (stress-like) ----
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_parse_many_collections() {
+        let mut input = String::new();
+        for i in 0..20 {
+            input.push_str(&format!(
+                "rules collection{i} {{ read: true; create: isAuthenticated(); }}\n"
+            ));
+        }
+        let result = parse_rules(&input).unwrap();
+        assert_eq!(result.len(), 20);
+        for i in 0..20 {
+            assert!(result.contains_key(&format!("collection{i}")));
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // ---- Error cases ----
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_parse_error_extra_closing_brace() {
+        assert!(parse_rules("rules products { read: true; }}").is_err());
+    }
+
+    #[test]
+    fn test_parse_error_no_rules_keyword() {
+        assert!(parse_rules("products { read: true; }").is_err());
+    }
+
+    #[test]
+    fn test_parse_error_empty_condition_parens() {
+        assert!(parse_rules("rules products { read: (); }").is_err());
+    }
+
+    #[test]
+    fn test_parse_error_double_operator() {
+        assert!(parse_rules("rules products { read: resource.x >> 5; }").is_err());
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // ---- String literal with spaces ----
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_parse_string_with_spaces() {
+        let input = r#"
+            rules products {
+                read: resource.status == "in review";
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        if let Expression::Comparison { ref right, .. } = result["products"].rules[0].condition {
+            assert!(matches!(right.as_ref(), Expression::StringLit(s) if s == "in review"));
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // ---- Collection name with underscores ----
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_parse_underscore_collection() {
+        let input = r#"
+            rules user_profiles {
+                read: true;
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        assert!(result.contains_key("user_profiles"));
+    }
+
+    #[test]
+    fn test_parse_alphanumeric_collection() {
+        let input = r#"
+            rules collection2024 {
+                read: true;
+            }
+        "#;
+        let result = parse_rules(input).unwrap();
+        assert!(result.contains_key("collection2024"));
     }
 }

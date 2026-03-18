@@ -36,6 +36,13 @@ pub struct FunctionMeta {
     pub updated_at: String,
     /// Size of the WASM binary in bytes.
     pub wasm_size: u64,
+    /// Semantic version for the function (e.g., "1.0.0").
+    #[serde(default = "default_version")]
+    pub version: String,
+}
+
+fn default_version() -> String {
+    "1.0.0".to_string()
 }
 
 /// A registered function with its compiled module.
@@ -69,6 +76,13 @@ impl FunctionRegistry {
         let module = self.runtime.compile(wasm_bytes)?;
         let now = chrono::Utc::now().to_rfc3339();
 
+        // Auto-increment version if function already exists
+        let version = if let Some(existing) = self.functions.get(name) {
+            increment_version(&existing.meta.version)
+        } else {
+            "1.0.0".to_string()
+        };
+
         let meta = FunctionMeta {
             name: name.to_string(),
             triggers,
@@ -76,6 +90,7 @@ impl FunctionRegistry {
             created_at: now.clone(),
             updated_at: now,
             wasm_size: wasm_bytes.len() as u64,
+            version,
         };
 
         self.functions.insert(
@@ -177,6 +192,17 @@ impl FunctionRegistry {
     /// Total number of registered functions.
     pub fn count(&self) -> usize {
         self.functions.len()
+    }
+}
+
+/// Increment the patch version of a semver string (e.g., "1.0.0" → "1.0.1").
+fn increment_version(version: &str) -> String {
+    let parts: Vec<&str> = version.split('.').collect();
+    if parts.len() == 3 {
+        let patch: u32 = parts[2].parse().unwrap_or(0);
+        format!("{}.{}.{}", parts[0], parts[1], patch + 1)
+    } else {
+        format!("{}.1", version)
     }
 }
 
@@ -423,13 +449,17 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
             wasm_size: 1234,
+            version: "1.0.0".to_string(),
         };
 
         let json = serde_json::to_string(&meta).unwrap();
         let deserialized: FunctionMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.name, "test_fn");
         assert_eq!(deserialized.triggers.len(), 3);
-        assert_eq!(deserialized.description, Some("A test function".to_string()));
+        assert_eq!(
+            deserialized.description,
+            Some("A test function".to_string())
+        );
         assert_eq!(deserialized.wasm_size, 1234);
     }
 
@@ -473,7 +503,8 @@ mod tests {
         let reg = make_registry();
         let wasm = make_wasm();
         reg.register("fn_a", &wasm, vec![], None).unwrap();
-        reg.register("fn_b", &wasm, vec![], Some("B".into())).unwrap();
+        reg.register("fn_b", &wasm, vec![], Some("B".into()))
+            .unwrap();
 
         let list = reg.list();
         assert_eq!(list.len(), 2);

@@ -1,0 +1,41 @@
+# OrignaBase Production Configuration
+# Deployed on Hetzner VPS: 204.168.137.16 (or dedicated prod server)
+# All secrets via environment variables
+
+host = "0.0.0.0"
+port = 8080
+
+[database]
+endpoint = "ws://surrealdb:8000"
+namespace = "orignabase"
+name = "main"
+username = "root"
+password = "${OB_DB_PASSWORD}"
+
+[auth]
+jwt_secret = "${OB_JWT_SECRET}"
+access_token_ttl_secs = 900        # 15 minutes
+refresh_token_ttl_secs = 604800    # 7 days
+
+[security]
+rules_path = "/etc/orignabase/rules.ob"
+
+[search]
+url = "http://meilisearch:7700"
+api_key = "${OB_MEILI_KEY}"
+
+[search.indexes.products]
+searchable = ["title", "description", "category"]
+filterable = ["category", "priceCents", "isActive", "sellerId", "isPerishable"]
+sortable = ["priceCents", "createdAt"]
+
+[storage]
+backend = "local"
+root = "/app/data/storage"
+# TODO: Switch to S3/R2 for production
+# backend = "s3"
+# bucket = "orignabase-prod"
+# region = "auto"
+# endpoint = "https://<account-id>.r2.cloudflarestorage.com"
+# access_key = "${OB_S3_ACCESS_KEY}"
+# secret_key = "${OB_S3_SECRET_KEY}"

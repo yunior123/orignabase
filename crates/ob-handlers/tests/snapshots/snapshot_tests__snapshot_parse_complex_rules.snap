@@ -1,0 +1,82 @@
+---
+source: crates/ob-handlers/tests/snapshot_tests.rs
+expression: result
+---
+{
+    "products": RuleSet {
+        collection: "products",
+        rules: [
+            SecurityRule {
+                operations: [
+                    "read",
+                ],
+                condition: Bool(
+                    true,
+                ),
+                validation: None,
+            },
+            SecurityRule {
+                operations: [
+                    "create",
+                ],
+                condition: And(
+                    [
+                        FunctionCall {
+                            name: "isAuthenticated",
+                            args: [],
+                        },
+                        FunctionCall {
+                            name: "hasRole",
+                            args: [
+                                StringLit(
+                                    "seller",
+                                ),
+                            ],
+                        },
+                    ],
+                ),
+                validation: None,
+            },
+            SecurityRule {
+                operations: [
+                    "update",
+                ],
+                condition: Or(
+                    [
+                        FunctionCall {
+                            name: "isOwner",
+                            args: [
+                                Path(
+                                    "resource.seller_id",
+                                ),
+                            ],
+                        },
+                        FunctionCall {
+                            name: "hasRole",
+                            args: [
+                                StringLit(
+                                    "admin",
+                                ),
+                            ],
+                        },
+                    ],
+                ),
+                validation: None,
+            },
+            SecurityRule {
+                operations: [
+                    "delete",
+                ],
+                condition: FunctionCall {
+                    name: "hasRole",
+                    args: [
+                        StringLit(
+                            "admin",
+                        ),
+                    ],
+                },
+                validation: None,
+            },
+        ],
+    },
+}

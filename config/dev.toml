@@ -1,0 +1,33 @@
+# OrignaBase Development Configuration
+# For local development against VPS SurrealDB
+
+host = "127.0.0.1"
+port = 8080
+
+[database]
+endpoint = "ws://localhost:8000"
+namespace = "orignabase"
+name = "dev"
+username = "root"
+password = "root"
+
+[auth]
+jwt_secret = "dev-secret-change-in-production"
+access_token_ttl_secs = 3600       # 1 hour (longer for dev)
+refresh_token_ttl_secs = 604800    # 7 days
+
+[security]
+rules_path = "rules.ob"
+
+[search]
+url = "http://localhost:7700"
+api_key = "dev-meilisearch-key"
+
+[search.indexes.products]
+searchable = ["title", "description", "category"]
+filterable = ["category", "priceCents", "isActive", "sellerId", "isPerishable"]
+sortable = ["priceCents", "createdAt"]
+
+[storage]
+backend = "local"
+root = "./data/storage"

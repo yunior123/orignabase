@@ -162,21 +162,22 @@ fn bench_password_hashing(c: &mut Criterion) {
 }
 
 fn bench_jwt(c: &mut Criterion) {
-    use ob_auth::jwt::{issue_access_token, verify_token};
+    use ob_auth::jwt::{JwtKeys, issue_access_token, verify_token};
 
+    let keys = JwtKeys::from_secret("benchmark_secret_key");
     let mut group = c.benchmark_group("jwt");
 
     group.bench_function("issue_token", |b| {
         b.iter(|| {
             black_box(
-                issue_access_token("user_123", &["user".to_string()], "secret", 900).unwrap(),
+                issue_access_token("user_123", &["user".to_string()], &keys, 900, true).unwrap(),
             );
         });
     });
 
-    let token = issue_access_token("user_123", &["user".to_string()], "secret", 900).unwrap();
+    let token = issue_access_token("user_123", &["user".to_string()], &keys, 900, true).unwrap();
     group.bench_function("verify_token", |b| {
-        b.iter(|| black_box(verify_token(&token, "secret").unwrap()));
+        b.iter(|| black_box(verify_token(&token, &keys).unwrap()));
     });
 
     group.finish();

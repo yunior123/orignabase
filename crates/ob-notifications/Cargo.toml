@@ -1,0 +1,22 @@
+[package]
+name = "ob-notifications"
+description = "Push notifications — FCM HTTP v1 + APNs proxy, device token management"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ob-core = { workspace = true }
+ob-database = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true }
+jsonwebtoken = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

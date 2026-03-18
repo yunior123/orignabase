@@ -6,3 +6,13 @@
 docker/.env.staging
 docker/.env.prod
 .DS_Store
+orignabase.toml
+secrets-staging.json
+secrets-prod.json
+
+# Coverage
+coverage/
+*.profraw
+
+# Test font symlinks (for PDF coverage tests)
+Helvetica-*.ttf

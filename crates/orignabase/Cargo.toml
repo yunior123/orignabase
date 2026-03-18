@@ -9,6 +9,10 @@ license.workspace = true
 name = "orignabase"
 path = "src/main.rs"
 
+[features]
+default = []
+cluster = ["ob-realtime/cluster"]
+
 [dependencies]
 ob-core = { workspace = true }
 ob-database = { workspace = true }
@@ -21,6 +25,8 @@ ob-search = { workspace = true }
 ob-admin = { workspace = true }
 ob-functions = { workspace = true }
 ob-analytics = { workspace = true }
+ob-notifications = { workspace = true }
+ob-handlers = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
@@ -33,7 +39,15 @@ anyhow = { workspace = true }
 async-graphql = { workspace = true }
 async-graphql-axum = { workspace = true }
 clap = { version = "4", features = ["derive"] }
+dirs-next = "2"
+toml = { workspace = true }
 reqwest = { workspace = true }
+hex = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+governor = { workspace = true }
+tower_governor = { workspace = true }
+dashmap = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
@@ -41,7 +55,26 @@ reqwest = { workspace = true }
 uuid = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
+hmac = "0.12"
+sha1 = "0.10"
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+futures-util = "0.3"
+proptest = { workspace = true }
+insta = { workspace = true }
+rstest = { workspace = true }
+ob-core = { workspace = true }
+ob-auth = { workspace = true }
+ob-handlers = { workspace = true }
+ob-security = { workspace = true }
 
 [[bench]]
 name = "core_benchmarks"
+harness = false
+
+[[bench]]
+name = "throughput_bench"
+harness = false
+
+[[bench]]
+name = "comprehensive_bench"
 harness = false

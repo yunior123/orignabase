@@ -1,0 +1,5 @@
+---
+source: crates/ob-handlers/tests/snapshot_tests.rs
+expression: output
+---
+Just a regular message without any contact info

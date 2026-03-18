@@ -1,0 +1,30 @@
+---
+source: crates/ob-handlers/tests/snapshot_tests.rs
+expression: result
+---
+{
+    "products": RuleSet {
+        collection: "products",
+        rules: [
+            SecurityRule {
+                operations: [
+                    "create",
+                ],
+                condition: Bool(
+                    true,
+                ),
+                validation: Some(
+                    Comparison {
+                        left: Path(
+                            "incoming.price",
+                        ),
+                        op: Gt,
+                        right: Number(
+                            0.0,
+                        ),
+                    },
+                ),
+            },
+        ],
+    },
+}

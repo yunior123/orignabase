@@ -1,0 +1,66 @@
+version: "3.8"
+
+# CI-optimized: no volumes, no Caddy, kv-mem for speed
+services:
+  surrealdb:
+    image: surrealdb/surrealdb:v2
+    command: start --user root --pass root memory
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.12
+    environment:
+      MEILI_MASTER_KEY: test_master_key
+      MEILI_NO_ANALYTICS: "true"
+    ports:
+      - "7700:7700"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  orignabase:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      OB_BASE_URL: http://orignabase:8080
+      OB_DATABASE__ENDPOINT: ws://surrealdb:8000
+      OB_DATABASE__USERNAME: root
+      OB_DATABASE__PASSWORD: root
+      OB_DATABASE__NAMESPACE: orignabase
+      OB_DATABASE__NAME: test
+      OB_SEARCH__URL: http://meilisearch:7700
+      OB_SEARCH__API_KEY: test_master_key
+      OB_AUTH__JWT_SECRET: test_jwt_secret_for_ci_only
+      OB_AUTH__ACCESS_TOKEN_TTL_SECS: "900"
+      OB_AUTH__REFRESH_TOKEN_TTL_SECS: "604800"
+      OB_AUTH__GOOGLE_CLIENT_ID: ${OB_AUTH__GOOGLE_CLIENT_ID:-}
+      OB_AUTH__GOOGLE_CLIENT_SECRET: ${OB_AUTH__GOOGLE_CLIENT_SECRET:-}
+      OB_TEST_MODE: "1"
+      OB_SECURITY__RULES_PATH: /etc/orignabase/rules.test.ob
+      OB_HOST: 0.0.0.0
+      OB_PORT: "8080"
+      OB_SECRETS__STRIPE_SECRET_KEY: ${OB_SECRETS__STRIPE_SECRET_KEY:-}
+      OB_SECRETS__STRIPE_WEBHOOK_SECRET: ${OB_SECRETS__STRIPE_WEBHOOK_SECRET:-}
+    ports:
+      - "8080:8080"
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+      meilisearch:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 512M

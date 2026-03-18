@@ -20,6 +20,8 @@ mod inner {
         pub collection: String,
         pub document_id: String,
         pub data: serde_json::Value,
+        pub before_data: Option<serde_json::Value>,
+        pub after_data: Option<serde_json::Value>,
         pub timestamp: String,
         /// Node ID that originated the event (to avoid echo).
         pub origin_node: String,
@@ -36,6 +38,8 @@ mod inner {
                 collection: event.collection.clone(),
                 document_id: event.document_id.clone(),
                 data: event.data.clone(),
+                before_data: event.before_data.clone(),
+                after_data: event.after_data.clone(),
                 timestamp: event.timestamp.clone(),
                 origin_node: node_id.to_string(),
             }
@@ -52,6 +56,8 @@ mod inner {
                 collection: self.collection.clone(),
                 document_id: self.document_id.clone(),
                 data: self.data.clone(),
+                before_data: self.before_data.clone(),
+                after_data: self.after_data.clone(),
                 timestamp: self.timestamp.clone(),
             }
         }
@@ -124,9 +130,7 @@ mod inner {
                 ..Default::default()
             };
 
-            jetstream
-                .get_or_create_stream(stream_config)
-                .await?;
+            jetstream.get_or_create_stream(stream_config).await?;
 
             tracing::info!(
                 node_id = %self.config.node_id,
@@ -136,9 +140,7 @@ mod inner {
 
             // Create a durable consumer for this node
             let consumer_name = format!("orignabase-node-{}", &self.config.node_id[..8]);
-            let stream = jetstream
-                .get_stream(&self.config.stream_name)
-                .await?;
+            let stream = jetstream.get_stream(&self.config.stream_name).await?;
 
             let consumer = stream
                 .get_or_create_consumer(
@@ -159,9 +161,7 @@ mod inner {
             let subscriber_node_id = node_id.clone();
             let subscriber_handle = tokio::spawn(async move {
                 while let Some(Ok(msg)) = messages.next().await {
-                    if let Ok(event) =
-                        serde_json::from_slice::<ClusterEvent>(&msg.payload)
-                    {
+                    if let Ok(event) = serde_json::from_slice::<ClusterEvent>(&msg.payload) {
                         // Skip events from this node (avoid echo)
                         if event.origin_node == subscriber_node_id {
                             let _ = msg.ack().await;
@@ -191,10 +191,7 @@ mod inner {
 
                 match serde_json::to_vec(&cluster_event) {
                     Ok(payload) => {
-                        if let Err(e) = jetstream
-                            .publish(subject.clone(), payload.into())
-                            .await
-                        {
+                        if let Err(e) = jetstream.publish(subject.clone(), payload.into()).await {
                             tracing::error!(subject = %subject, error = %e, "Failed to publish to NATS");
                         }
                     }
@@ -213,6 +210,59 @@ mod inner {
 
 #[cfg(feature = "cluster")]
 pub use inner::*;
+
+#[cfg(all(test, feature = "cluster"))]
+mod tests {
+    use super::ClusterEvent;
+    use crate::registry::{ChangeAction, ChangeEvent};
+
+    #[test]
+    fn cluster_event_round_trips_before_and_after_data() {
+        let change = ChangeEvent {
+            action: ChangeAction::Update,
+            collection: "orders".to_string(),
+            document_id: "orders:123".to_string(),
+            data: serde_json::json!({"status": "shipped"}),
+            before_data: Some(serde_json::json!({"status": "processing"})),
+            after_data: Some(serde_json::json!({"status": "shipped"})),
+            timestamp: "2026-03-10T12:00:00Z".to_string(),
+        };
+
+        let cluster = ClusterEvent::from_change(&change, "node-a");
+        assert_eq!(cluster.origin_node, "node-a");
+        assert_eq!(cluster.before_data, change.before_data);
+        assert_eq!(cluster.after_data, change.after_data);
+
+        let restored = cluster.to_change_event();
+        assert_eq!(restored.action, ChangeAction::Update);
+        assert_eq!(restored.collection, "orders");
+        assert_eq!(restored.document_id, "orders:123");
+        assert_eq!(restored.data, change.data);
+        assert_eq!(restored.before_data, change.before_data);
+        assert_eq!(restored.after_data, change.after_data);
+        assert_eq!(restored.timestamp, change.timestamp);
+    }
+
+    #[test]
+    fn cluster_event_unknown_action_defaults_to_update_without_losing_payload() {
+        let cluster = ClusterEvent {
+            action: "unexpected".to_string(),
+            collection: "returns".to_string(),
+            document_id: "returns:r1".to_string(),
+            data: serde_json::json!({"status": "received"}),
+            before_data: Some(serde_json::json!({"status": "requested"})),
+            after_data: Some(serde_json::json!({"status": "received"})),
+            timestamp: "2026-03-10T12:05:00Z".to_string(),
+            origin_node: "node-b".to_string(),
+        };
+
+        let restored = cluster.to_change_event();
+        assert_eq!(restored.action, ChangeAction::Update);
+        assert_eq!(restored.before_data, cluster.before_data);
+        assert_eq!(restored.after_data, cluster.after_data);
+        assert_eq!(restored.data, cluster.data);
+    }
+}
 
 /// No-op types when cluster feature is disabled.
 #[cfg(not(feature = "cluster"))]

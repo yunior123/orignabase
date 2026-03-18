@@ -72,6 +72,8 @@ pub async fn emit_change(
         action,
         collection: collection.to_string(),
         document_id: document_id.to_string(),
+        before_data: None,
+        after_data: Some(data.clone()),
         data,
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
@@ -96,6 +98,7 @@ mod tests {
             id: "sub1".to_string(),
             collection: "products".to_string(),
             filter_hash: 0,
+            document_id: None,
             user_id: None,
             sender: sub_tx,
         };
@@ -140,6 +143,7 @@ mod tests {
             id: "sub1".to_string(),
             collection: "products".to_string(),
             filter_hash: 0,
+            document_id: None,
             user_id: None,
             sender: sub_tx,
         };
@@ -176,6 +180,8 @@ mod tests {
             action: ChangeAction::Create,
             collection: "products".to_string(),
             document_id: "products:xyz".to_string(),
+            before_data: None,
+            after_data: Some(serde_json::json!({"title": "Widget", "price": 9.99})),
             data: serde_json::json!({"title": "Widget", "price": 9.99}),
             timestamp: "2026-03-08T12:00:00Z".to_string(),
         };
@@ -193,6 +199,8 @@ mod tests {
             action: ChangeAction::Update,
             collection: "orders".to_string(),
             document_id: "orders:123".to_string(),
+            before_data: Some(serde_json::json!({"status": "processing"})),
+            after_data: Some(serde_json::json!({"status": "shipped"})),
             data: serde_json::json!({"status": "shipped"}),
             timestamp: "2026-03-08T14:00:00Z".to_string(),
         };
@@ -231,6 +239,8 @@ mod tests {
             action: ChangeAction::Delete,
             collection: "users".to_string(),
             document_id: "users:u1".to_string(),
+            before_data: Some(serde_json::json!({"name": "User"})),
+            after_data: None,
             data: serde_json::json!(null),
             timestamp: "2026-03-08T16:00:00Z".to_string(),
         };
@@ -266,6 +276,9 @@ mod tests {
         assert_eq!(event.data["key"], "value");
         // timestamp should be a non-empty RFC3339 string
         assert!(!event.timestamp.is_empty());
-        assert!(event.timestamp.contains('T'), "timestamp should be RFC3339 format");
+        assert!(
+            event.timestamp.contains('T'),
+            "timestamp should be RFC3339 format"
+        );
     }
 }

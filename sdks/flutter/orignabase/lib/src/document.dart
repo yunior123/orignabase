@@ -36,7 +36,24 @@ class Document {
       ..remove('_rev')
       ..remove('_created')
       ..remove('_updated');
+    // SurrealDB returns nanosecond-precision timestamps (9 decimal digits).
+    // Dart's DateTime.parse only supports up to microseconds (6 digits).
+    // Truncate any ISO-8601 strings with >6 subsecond digits.
+    _normalizeTimestamps(data);
     return Document(id: id, collection: collection, data: data);
+  }
+
+  static final _nanoPattern = RegExp(r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6})\d+');
+
+  static void _normalizeTimestamps(Map<String, dynamic> data) {
+    for (final key in data.keys.toList()) {
+      final v = data[key];
+      if (v is String) {
+        data[key] = v.replaceAllMapped(_nanoPattern, (m) => m.group(1)!);
+      } else if (v is Map<String, dynamic>) {
+        _normalizeTimestamps(v);
+      }
+    }
   }
 
   @override

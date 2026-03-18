@@ -1,4 +1,6 @@
+import 'dart:typed_data';
 import 'package:test/test.dart';
+import 'package:http/http.dart' as http;
 import 'package:orignabase/orignabase.dart';
 
 void main() {
@@ -28,6 +30,8 @@ void main() {
       final ob = OrignaBase.initialize(url: 'http://localhost:8080');
       expect(ob.auth.currentState.isAuthenticated, false);
       expect(ob.auth.accessToken, isNull);
+      expect(ob.auth.currentUserId, isNull);
+      expect(ob.auth.isEmailVerified, isFalse);
       ob.dispose();
     });
 
@@ -226,6 +230,66 @@ void main() {
     test('OrignaBaseStorage can be accessed from client', () {
       final ob = OrignaBase.initialize(url: 'http://localhost:8080');
       expect(ob.storage, isA<OrignaBaseStorage>());
+      ob.dispose();
+    });
+
+    test('uploadResumable returns UploadTask', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final data = Uint8List.fromList(List.filled(1000, 42));
+      final task = ob.storage.uploadResumable('test.bin', data);
+      expect(task, isA<UploadTask>());
+      expect(task.future, isA<Future>());
+      task.future.catchError((_) => <String, dynamic>{}); // suppress network error
+      ob.dispose();
+    });
+
+    test('uploadResumable with custom chunk size', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final data = Uint8List.fromList(List.filled(500, 0));
+      final task = ob.storage.uploadResumable('x.bin', data,
+          contentType: 'application/octet-stream', chunkSize: 100);
+      expect(task, isA<UploadTask>());
+      task.future.catchError((_) => <String, dynamic>{}); // suppress network error
+      ob.dispose();
+    });
+
+    test('UploadProgress fraction calculation', () {
+      final p = UploadProgress(
+          bytesTransferred: 500, totalBytes: 1000, sessionId: 'abc');
+      expect(p.fraction, 0.5);
+      expect(p.isComplete, false);
+    });
+
+    test('UploadProgress complete state', () {
+      final p = UploadProgress(
+          bytesTransferred: 1000, totalBytes: 1000, sessionId: 'abc');
+      expect(p.fraction, 1.0);
+      expect(p.isComplete, true);
+    });
+
+    test('UploadProgress zero total', () {
+      final p = UploadProgress(
+          bytesTransferred: 0, totalBytes: 0, sessionId: 'abc');
+      expect(p.fraction, 0.0);
+    });
+
+    test('resumeUpload returns UploadTask', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final data = Uint8List.fromList([1, 2, 3]);
+      final task = ob.storage.resumeUpload('session-123', data);
+      expect(task, isA<UploadTask>());
+      expect(task.sessionId, 'session-123');
+      task.future.catchError((_) => <String, dynamic>{}); // suppress network error
+      ob.dispose();
+    });
+
+    test('UploadTask onProgress setter', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final data = Uint8List.fromList([1, 2, 3]);
+      final task = ob.storage.uploadResumable('x.bin', data);
+      task.onProgress = (p) {};
+      expect(task, isA<UploadTask>());
+      task.future.catchError((_) => <String, dynamic>{}); // suppress network error
       ob.dispose();
     });
   });
@@ -758,6 +822,183 @@ void main() {
     });
   });
 
+  // === OFFLINE CACHE TESTS ===
+
+  group('OfflineCache', () {
+    late OfflineCache cache;
+
+    setUp(() {
+      cache = OfflineCache();
+    });
+
+    tearDown(() {
+      cache.dispose();
+    });
+
+    test('initial state', () {
+      expect(cache.isOnline, true);
+      expect(cache.pendingCount, 0);
+    });
+
+    test('cache and retrieve document', () async {
+      final doc = Document(
+        id: 'doc1',
+        collection: 'products',
+        data: {'title': 'Widget', 'price': 29.99},
+      );
+      await cache.cacheDocument('products', doc);
+      final cached = await cache.getCachedDocument('products', 'doc1');
+      expect(cached, isNotNull);
+      expect(cached!.id, 'doc1');
+      expect(cached['title'], 'Widget');
+      expect(cached['price'], 29.99);
+    });
+
+    test('cache miss returns null', () async {
+      final cached = await cache.getCachedDocument('products', 'nonexistent');
+      expect(cached, isNull);
+    });
+
+    test('cache query results', () async {
+      final docs = [
+        Document(id: 'd1', collection: 'items', data: {'name': 'A'}),
+        Document(id: 'd2', collection: 'items', data: {'name': 'B'}),
+      ];
+      await cache.cacheQueryResult('items', 'status_active', docs);
+      final cached = await cache.getCachedQueryResult('items', 'status_active');
+      expect(cached, isNotNull);
+      expect(cached!.length, 2);
+      expect(cached[0].id, 'd1');
+      expect(cached[1].id, 'd2');
+    });
+
+    test('query cache miss returns null', () async {
+      final cached = await cache.getCachedQueryResult('items', 'unknown_query');
+      expect(cached, isNull);
+    });
+
+    test('enqueue write increments pending count', () {
+      cache.enqueueWrite(
+        collection: 'products',
+        operation: 'create',
+        data: {'title': 'New'},
+      );
+      expect(cache.pendingCount, 1);
+
+      cache.enqueueWrite(
+        collection: 'products',
+        operation: 'update',
+        documentId: 'doc1',
+        data: {'title': 'Updated'},
+      );
+      expect(cache.pendingCount, 2);
+    });
+
+    test('remove pending write', () {
+      cache.enqueueWrite(
+        collection: 'products',
+        operation: 'create',
+        data: {'title': 'New'},
+      );
+      final writes = cache.pendingWrites;
+      expect(writes.length, 1);
+
+      cache.removePendingWrite(writes.first.id);
+      expect(cache.pendingCount, 0);
+    });
+
+    test('clearAll removes everything', () async {
+      final doc = Document(id: 'd1', collection: 'test', data: {'x': 1});
+      await cache.cacheDocument('test', doc);
+      cache.enqueueWrite(collection: 'test', operation: 'create', data: {});
+      expect(cache.pendingCount, 1);
+
+      await cache.clearAll();
+      expect(cache.pendingCount, 0);
+      final cached = await cache.getCachedDocument('test', 'd1');
+      expect(cached, isNull);
+    });
+
+    test('invalidateCollection removes collection data', () async {
+      final doc = Document(id: 'd1', collection: 'products', data: {'x': 1});
+      await cache.cacheDocument('products', doc);
+      await cache.invalidateCollection('products');
+      final cached = await cache.getCachedDocument('products', 'd1');
+      expect(cached, isNull);
+    });
+
+    test('isOnline toggle', () {
+      expect(cache.isOnline, true);
+      cache.isOnline = false;
+      expect(cache.isOnline, false);
+      cache.isOnline = true;
+      expect(cache.isOnline, true);
+    });
+
+    test('PendingWrite serialization roundtrip', () {
+      final write = PendingWrite(
+        id: 'pw_1',
+        collection: 'orders',
+        operation: 'create',
+        data: {'total': 99.99},
+        documentId: 'ord_1',
+      );
+      final json = write.toJson();
+      final restored = PendingWrite.fromJson(json);
+      expect(restored.id, 'pw_1');
+      expect(restored.collection, 'orders');
+      expect(restored.operation, 'create');
+      expect(restored.data?['total'], 99.99);
+      expect(restored.documentId, 'ord_1');
+    });
+  });
+
+  // === IN-MEMORY STORAGE TESTS ===
+
+  group('InMemoryStorage', () {
+    late InMemoryStorage storage;
+
+    setUp(() {
+      storage = InMemoryStorage();
+    });
+
+    test('write and read', () async {
+      await storage.write('key1', 'value1');
+      final result = await storage.read('key1');
+      expect(result, 'value1');
+    });
+
+    test('read missing key returns null', () async {
+      final result = await storage.read('missing');
+      expect(result, isNull);
+    });
+
+    test('remove key', () async {
+      await storage.write('key1', 'value1');
+      await storage.remove('key1');
+      final result = await storage.read('key1');
+      expect(result, isNull);
+    });
+
+    test('removeByPrefix removes matching keys', () async {
+      await storage.write('doc:products:1', 'a');
+      await storage.write('doc:products:2', 'b');
+      await storage.write('doc:orders:1', 'c');
+      await storage.removeByPrefix('doc:products:');
+      expect(await storage.read('doc:products:1'), isNull);
+      expect(await storage.read('doc:products:2'), isNull);
+      expect(await storage.read('doc:orders:1'), 'c');
+    });
+
+    test('clear removes all keys', () async {
+      await storage.write('k1', 'v1');
+      await storage.write('k2', 'v2');
+      await storage.clear();
+      expect(await storage.read('k1'), isNull);
+      expect(await storage.read('k2'), isNull);
+    });
+  });
+
   group('Auth extended', () {
     test('AuthState unauthenticated constant', () {
       const state = AuthState.unauthenticated;
@@ -786,6 +1027,962 @@ void main() {
       expect(state.roles, ['admin', 'editor']);
       expect(state.roles.length, 2);
       expect(state.email, 'test@example.com');
+    });
+
+    test('AuthState with MFA required', () {
+      const state = AuthState(
+        status: AuthStatus.unauthenticated,
+        mfaRequired: true,
+        challengeToken: 'challenge_abc',
+      );
+      expect(state.isAuthenticated, false);
+      expect(state.mfaRequired, true);
+      expect(state.challengeToken, 'challenge_abc');
+    });
+
+    test('AuthState defaults - mfa not required', () {
+      const state = AuthState(status: AuthStatus.authenticated);
+      expect(state.mfaRequired, false);
+      expect(state.challengeToken, isNull);
+    });
+
+    test('MfaSetupResult holds QR data', () {
+      final result = MfaSetupResult(
+        qrCodeBase64: 'base64data',
+        manualKey: 'JBSWY3DPEHPK3PXP',
+        appleOtpauthUrl: 'apple-otpauth://...',
+      );
+      expect(result.qrCodeBase64, 'base64data');
+      expect(result.manualKey, 'JBSWY3DPEHPK3PXP');
+      expect(result.appleOtpauthUrl, isNotNull);
+    });
+  });
+
+  // ── FieldValue ──
+
+  group('FieldValue', () {
+    test('serverTimestamp creates correct API map', () {
+      final fv = FieldValue.serverTimestamp();
+      final map = fv.toApiMap('updated_at');
+      expect(map, {'updated_at': {'_serverTimestamp': true}});
+    });
+
+    test('increment creates correct API map', () {
+      final fv = FieldValue.increment(5);
+      final map = fv.toApiMap('views');
+      expect(map, {'views': {'_increment': 5}});
+    });
+
+    test('increment negative for decrement', () {
+      final fv = FieldValue.increment(-1);
+      final map = fv.toApiMap('stock');
+      expect(map, {'stock': {'_increment': -1}});
+    });
+
+    test('arrayUnion creates correct API map', () {
+      final fv = FieldValue.arrayUnion(['tag1', 'tag2']);
+      final map = fv.toApiMap('tags');
+      expect(map, {'tags': {'_arrayUnion': ['tag1', 'tag2']}});
+    });
+
+    test('arrayRemove creates correct API map', () {
+      final fv = FieldValue.arrayRemove(['old']);
+      final map = fv.toApiMap('tags');
+      expect(map, {'tags': {'_arrayRemove': ['old']}});
+    });
+
+    test('delete creates correct API map', () {
+      final fv = FieldValue.delete();
+      final map = fv.toApiMap('temp_field');
+      expect(map, {'temp_field': {'_deleteField': true}});
+    });
+
+    test('toString is readable', () {
+      expect(FieldValue.serverTimestamp().toString(), contains('serverTimestamp'));
+      expect(FieldValue.increment(3).toString(), contains('3'));
+    });
+  });
+
+  // ── WriteBatch ──
+
+  group('WriteBatch', () {
+    test('starts empty', () {
+      final client = OrignaBase.initialize(url: 'http://localhost:8080');
+      final batch = client.batch();
+      expect(batch.isEmpty, true);
+      expect(batch.length, 0);
+      client.dispose();
+    });
+
+    test('tracks operations', () {
+      final client = OrignaBase.initialize(url: 'http://localhost:8080');
+      final batch = client.batch();
+      batch.create('products', {'title': 'A'});
+      batch.update('products', 'id1', {'title': 'B'});
+      batch.delete('products', 'id2');
+      expect(batch.length, 3);
+      expect(batch.isEmpty, false);
+      client.dispose();
+    });
+  });
+
+  // ── QuerySnapshot with cursor pagination ──
+
+  group('QuerySnapshot cursor pagination', () {
+    test('hasMore defaults to false', () {
+      final snapshot = QuerySnapshot(docs: []);
+      expect(snapshot.hasMore, false);
+      expect(snapshot.lastDocument, isNull);
+    });
+
+    test('lastDocument returns last doc', () {
+      final docs = [
+        Document(id: 'a', collection: 'test', data: {}),
+        Document(id: 'b', collection: 'test', data: {}),
+        Document(id: 'c', collection: 'test', data: {}),
+      ];
+      final snapshot = QuerySnapshot(docs: docs, hasMore: true);
+      expect(snapshot.hasMore, true);
+      expect(snapshot.lastDocument!.id, 'c');
+      expect(snapshot.size, 3);
+    });
+  });
+
+  // ── Query builder: startAfter and select ──
+
+  group('Query builder extensions', () {
+    test('startAfter sets cursor document', () {
+      final client = OrignaBase.initialize(url: 'http://localhost:8080');
+      final query = client.collection('products')
+          .orderBy('created_at')
+          .startAfterId('last_doc_id')
+          .limit(20);
+      // Query builder just stores state — no exception means success
+      expect(query, isNotNull);
+      client.dispose();
+    });
+
+    test('select stores field list', () {
+      final client = OrignaBase.initialize(url: 'http://localhost:8080');
+      final query = client.collection('users')
+          .select(['name', 'email', 'avatar_url']);
+      expect(query, isNotNull);
+      client.dispose();
+    });
+
+    test('startAfter with Document object', () {
+      final client = OrignaBase.initialize(url: 'http://localhost:8080');
+      final doc = Document(id: 'cursor_doc', collection: 'items', data: {});
+      final query = client.collection('items')
+          .orderBy('price')
+          .startAfter(doc)
+          .limit(10);
+      expect(query, isNotNull);
+      client.dispose();
+    });
+  });
+
+  // === WRITEBATCH COMPREHENSIVE TESTS ===
+
+  group('WriteBatch comprehensive', () {
+    test('create adds to operations', () {
+      final client = OrignaBase.initialize(url: 'http://localhost:8080');
+      final batch = client.batch();
+      batch.create('products', {'title': 'A', 'price': 10});
+      batch.create('products', {'title': 'B', 'price': 20});
+      expect(batch.length, 2);
+      expect(batch.isEmpty, false);
+      client.dispose();
+    });
+
+    test('update adds to operations with id', () {
+      final client = OrignaBase.initialize(url: 'http://localhost:8080');
+      final batch = client.batch();
+      batch.update('products', 'id1', {'title': 'Updated'});
+      expect(batch.length, 1);
+      client.dispose();
+    });
+
+    test('delete adds to operations', () {
+      final client = OrignaBase.initialize(url: 'http://localhost:8080');
+      final batch = client.batch();
+      batch.delete('products', 'id1');
+      batch.delete('products', 'id2');
+      expect(batch.length, 2);
+      client.dispose();
+    });
+
+    test('mixed operations maintain order', () {
+      final client = OrignaBase.initialize(url: 'http://localhost:8080');
+      final batch = client.batch();
+      batch.create('products', {'title': 'New'});
+      batch.update('orders', 'o1', {'status': 'shipped'});
+      batch.delete('carts', 'c1');
+      expect(batch.length, 3);
+      client.dispose();
+    });
+
+    test('commit on empty batch returns empty list', () async {
+      final client = OrignaBase.initialize(url: 'http://localhost:8080');
+      final batch = client.batch();
+      final results = await batch.commit();
+      expect(results, isEmpty);
+      client.dispose();
+    });
+
+    test('create with FieldValue processes sentinels', () {
+      final client = OrignaBase.initialize(url: 'http://localhost:8080');
+      final batch = client.batch();
+      batch.create('products', {
+        'title': 'Widget',
+        'created_at': FieldValue.serverTimestamp(),
+      });
+      // Should not throw — FieldValue is processed
+      expect(batch.length, 1);
+      client.dispose();
+    });
+
+    test('update with FieldValue increment', () {
+      final client = OrignaBase.initialize(url: 'http://localhost:8080');
+      final batch = client.batch();
+      batch.update('products', 'p1', {
+        'views': FieldValue.increment(1),
+        'tags': FieldValue.arrayUnion(['featured']),
+      });
+      expect(batch.length, 1);
+      client.dispose();
+    });
+  });
+
+  // === FIELDVALUE EDGE CASES ===
+
+  group('FieldValue edge cases', () {
+    test('increment with double', () {
+      final fv = FieldValue.increment(0.5);
+      final map = fv.toApiMap('rating');
+      expect(map, {'rating': {'_increment': 0.5}});
+    });
+
+    test('increment with zero', () {
+      final fv = FieldValue.increment(0);
+      final map = fv.toApiMap('count');
+      expect(map, {'count': {'_increment': 0}});
+    });
+
+    test('arrayUnion with empty list', () {
+      final fv = FieldValue.arrayUnion([]);
+      final map = fv.toApiMap('tags');
+      expect(map, {'tags': {'_arrayUnion': []}});
+    });
+
+    test('arrayRemove with mixed types', () {
+      final fv = FieldValue.arrayRemove([1, 'two', true]);
+      final map = fv.toApiMap('items');
+      expect(map, {'items': {'_arrayRemove': [1, 'two', true]}});
+    });
+
+    test('multiple FieldValues in same map', () {
+      final data = {
+        'updated_at': FieldValue.serverTimestamp(),
+        'views': FieldValue.increment(1),
+        'tags': FieldValue.arrayUnion(['hot']),
+        'old_field': FieldValue.delete(),
+        'title': 'Normal value',
+      };
+      // Process like WriteBatch does
+      final processed = <String, dynamic>{};
+      for (final entry in data.entries) {
+        if (entry.value is FieldValue) {
+          processed.addAll((entry.value as FieldValue).toApiMap(entry.key));
+        } else {
+          processed[entry.key] = entry.value;
+        }
+      }
+      expect(processed.containsKey('updated_at'), true);
+      expect(processed.containsKey('views'), true);
+      expect(processed.containsKey('tags'), true);
+      expect(processed.containsKey('old_field'), true);
+      expect(processed['title'], 'Normal value');
+    });
+  });
+
+  // === REALTIME STREAM LIFECYCLE ===
+
+  group('Realtime stream lifecycle', () {
+    test('DocumentRef.snapshots returns a stream', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final stream = ob.collection('users').doc('u1').snapshots();
+      expect(stream, isA<Stream<DocumentChange>>());
+      ob.dispose();
+    });
+
+    test('RealtimeClient disconnect clears subscriptions', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final rt = RealtimeClient(ob);
+      // disconnect without connect — should not throw
+      rt.disconnect();
+      ob.dispose();
+    });
+
+    test('DocumentChange equality by type', () {
+      final doc = Document(id: '1', collection: 'test', data: {'a': 1});
+      final c1 = DocumentChange(type: ChangeType.create, document: doc);
+      final c2 = DocumentChange(type: ChangeType.update, document: doc);
+      expect(c1.type, isNot(equals(c2.type)));
+    });
+
+    test('DocumentChange preserves document data', () {
+      final doc = Document(id: 'x', collection: 'items', data: {
+        'name': 'Widget',
+        'price': 29.99,
+        'tags': ['sale', 'new'],
+      });
+      final change = DocumentChange(type: ChangeType.update, document: doc);
+      expect(change.document['name'], 'Widget');
+      expect(change.document['price'], 29.99);
+      expect(change.document['tags'], ['sale', 'new']);
+      expect(change.document.id, 'x');
+      expect(change.document.collection, 'items');
+    });
+  });
+
+  // === AUTH COMPREHENSIVE ===
+
+  group('Auth comprehensive', () {
+    test('AuthState MFA flow state', () {
+      const state = AuthState(
+        status: AuthStatus.unauthenticated,
+        mfaRequired: true,
+        challengeToken: 'tok_123',
+      );
+      expect(state.isAuthenticated, false);
+      expect(state.mfaRequired, true);
+      expect(state.challengeToken, 'tok_123');
+    });
+
+    test('AuthState authenticated with full data', () {
+      const state = AuthState(
+        status: AuthStatus.authenticated,
+        userId: 'user_abc',
+        email: 'test@example.com',
+        roles: ['admin', 'editor'],
+      );
+      expect(state.isAuthenticated, true);
+      expect(state.userId, 'user_abc');
+      expect(state.email, 'test@example.com');
+      expect(state.roles, hasLength(2));
+      expect(state.roles, contains('admin'));
+      expect(state.mfaRequired, false);
+      expect(state.challengeToken, isNull);
+    });
+
+    test('MfaSetupResult without apple URL', () {
+      final result = MfaSetupResult(
+        qrCodeBase64: 'data',
+        manualKey: 'KEY',
+      );
+      expect(result.appleOtpauthUrl, isNull);
+    });
+
+    test('authStateChanges is a broadcast stream', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final s1 = ob.auth.authStateChanges;
+      final s2 = ob.auth.authStateChanges;
+      expect(s1, isA<Stream<AuthState>>());
+      expect(s2, isA<Stream<AuthState>>());
+      ob.dispose();
+    });
+
+    test('signOut emits unauthenticated via stream', () async {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final states = <AuthState>[];
+      ob.auth.authStateChanges.listen(states.add);
+      ob.auth.signOut();
+      await Future.delayed(Duration(milliseconds: 50));
+      expect(states.any((s) => !s.isAuthenticated), true);
+      ob.dispose();
+    });
+  });
+
+  // === DOCUMENT EDGE CASES ===
+
+  group('Document edge cases', () {
+    test('fromMap with nested objects', () {
+      final doc = Document.fromMap('users', {
+        'id': 'u1',
+        'profile': {
+          'name': 'Yunior',
+          'address': {'city': 'Toronto', 'country': 'CA'},
+        },
+      });
+      expect(doc['profile']['name'], 'Yunior');
+      expect(doc['profile']['address']['city'], 'Toronto');
+    });
+
+    test('fromMap with arrays', () {
+      final doc = Document.fromMap('products', {
+        'id': 'p1',
+        'tags': ['electronics', 'sale'],
+        'variants': [
+          {'size': 'S', 'price': 10},
+          {'size': 'M', 'price': 15},
+        ],
+      });
+      expect(doc['tags'], hasLength(2));
+      expect(doc['variants'][0]['size'], 'S');
+    });
+
+    test('fromMap with numeric id', () {
+      final doc = Document.fromMap('items', {'id': 42, 'name': 'test'});
+      expect(doc.id, '42');
+    });
+
+    test('QuerySnapshot with single document', () {
+      final snap = QuerySnapshot(docs: [
+        Document(id: '1', collection: 'test', data: {}),
+      ], hasMore: false);
+      expect(snap.size, 1);
+      expect(snap.hasMore, false);
+      expect(snap.lastDocument!.id, '1');
+    });
+
+    test('QuerySnapshot iteration', () {
+      final docs = List.generate(5, (i) =>
+        Document(id: 'doc_$i', collection: 'items', data: {'index': i}),
+      );
+      final snap = QuerySnapshot(docs: docs, hasMore: true);
+      expect(snap.docs.map((d) => d.id).toList(),
+        ['doc_0', 'doc_1', 'doc_2', 'doc_3', 'doc_4']);
+      expect(snap.lastDocument!.id, 'doc_4');
+    });
+  });
+
+  // === QUERY BUILDER COMPREHENSIVE ===
+
+  group('Query builder comprehensive', () {
+    test('startAfter + limit + orderBy chain', () {
+      final client = OrignaBase.initialize(url: 'http://localhost:8080');
+      final query = client.collection('products')
+          .where('status', isEqualTo: 'active')
+          .orderBy('price', descending: true)
+          .startAfterId('last_id')
+          .limit(20);
+      expect(query, isA<Query>());
+      client.dispose();
+    });
+
+    test('select with orderBy', () {
+      final client = OrignaBase.initialize(url: 'http://localhost:8080');
+      final query = client.collection('users')
+          .select(['name', 'email'])
+          .orderBy('name')
+          .limit(50);
+      expect(query, isA<Query>());
+      client.dispose();
+    });
+
+    test('all operators in single query', () {
+      final client = OrignaBase.initialize(url: 'http://localhost:8080');
+      final query = client.collection('products')
+          .where('status', isEqualTo: 'active')
+          .where('price', isGreaterThanOrEqualTo: 10)
+          .where('price', isLessThan: 100)
+          .where('category', whereIn: ['electronics', 'books'])
+          .where('tags', contains: 'sale')
+          .where('sku', startsWith: 'PROD-')
+          .where('deleted', isNotEqualTo: true)
+          .orderBy('price')
+          .select(['title', 'price', 'category'])
+          .limit(25)
+          .offset(0);
+      expect(query, isA<Query>());
+      client.dispose();
+    });
+
+    test('AggregateQuery count with no filters', () {
+      final agg = AggregateQuery('users', []);
+      final q = agg.toCountQuery();
+      expect(q['query'], contains('count()'));
+      expect(q['query'], isNot(contains('WHERE')));
+    });
+
+    test('AggregateQuery sum with filter', () {
+      final agg = AggregateQuery('orders', [
+        QueryFilter('status', 'eq', 'completed'),
+      ]);
+      final q = agg.toSumQuery('total');
+      expect(q['query'], contains('math::sum'));
+      expect(q['query'], contains('WHERE'));
+    });
+  });
+
+  // === CLIENT COMPREHENSIVE ===
+
+  group('Client comprehensive', () {
+    test('initialize with custom http client', () {
+      final httpClient = http.Client();
+      final ob = OrignaBase.initialize(
+        url: 'http://localhost:8080',
+        httpClient: httpClient,
+      );
+      expect(ob.url, 'http://localhost:8080');
+      ob.dispose();
+    });
+
+    test('collection returns different refs for different names', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final products = ob.collection('products');
+      final orders = ob.collection('orders');
+      expect(products.collectionName, 'products');
+      expect(orders.collectionName, 'orders');
+      ob.dispose();
+    });
+
+    test('batch returns new WriteBatch each time', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final b1 = ob.batch();
+      final b2 = ob.batch();
+      b1.create('test', {'a': 1});
+      expect(b1.length, 1);
+      expect(b2.length, 0);
+      ob.dispose();
+    });
+
+    test('storage is accessible', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      expect(ob.storage, isA<OrignaBaseStorage>());
+      ob.dispose();
+    });
+
+    test('offline cache is accessible', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      expect(ob.offline, isA<OfflineCache>());
+      ob.dispose();
+    });
+
+    test('config is accessible', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      expect(ob.config, isA<OrignaBaseConfig>());
+      ob.dispose();
+    });
+
+    test('presence is accessible', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      expect(ob.presence, isA<OrignaBasePresence>());
+      ob.dispose();
+    });
+
+    test('links is accessible', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      expect(ob.links, isA<OrignaBaseLinks>());
+      ob.dispose();
+    });
+
+    test('push is accessible', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      expect(ob.push, isA<OrignaBasePush>());
+      ob.dispose();
+    });
+
+    test('metrics is accessible', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      expect(ob.metrics, isA<OrignaBaseMetrics>());
+      ob.dispose();
+    });
+  });
+
+  // ── Remote Config tests ──────────────────────────────────────────────
+  group('OrignaBaseConfig', () {
+    test('getAll method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final f = ob.config.getAll();
+      expect(f, isA<Future>());
+      f.catchError((_) => <String, dynamic>{});
+      ob.dispose();
+    });
+
+    test('get method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final f = ob.config.get('feature_flag');
+      expect(f, isA<Future>());
+      f.catchError((_) => null);
+      ob.dispose();
+    });
+
+    test('getString method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final f = ob.config.getString('key');
+      expect(f, isA<Future>());
+      f.catchError((_) => '');
+      ob.dispose();
+    });
+
+    test('getBool method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final f = ob.config.getBool('key');
+      expect(f, isA<Future>());
+      f.catchError((_) => false);
+      ob.dispose();
+    });
+
+    test('getInt method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final f = ob.config.getInt('key');
+      expect(f, isA<Future>());
+      f.catchError((_) => 0);
+      ob.dispose();
+    });
+
+    test('getDouble method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final f = ob.config.getDouble('key');
+      expect(f, isA<Future>());
+      f.catchError((_) => 0.0);
+      ob.dispose();
+    });
+
+    test('set method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final f = ob.config.set('key', 'value');
+      expect(f, isA<Future>());
+      f.catchError((_) {});
+      ob.dispose();
+    });
+
+    test('delete method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final f = ob.config.delete('key');
+      expect(f, isA<Future>());
+      f.catchError((_) {});
+      ob.dispose();
+    });
+  });
+
+  // ── Presence tests ───────────────────────────────────────────────────
+  group('OrignaBasePresence', () {
+    test('getOnlineUsers method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final f = ob.presence.getOnlineUsers();
+      expect(f, isA<Future>());
+      f.catchError((_) => <PresenceInfo>[]);
+      ob.dispose();
+    });
+
+    test('isOnline method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final f = ob.presence.isOnline('user123');
+      expect(f, isA<Future>());
+      f.catchError((_) => false);
+      ob.dispose();
+    });
+
+    test('getUser method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final f = ob.presence.getUser('user123');
+      expect(f, isA<Future>());
+      f.catchError((_) => null);
+      ob.dispose();
+    });
+
+    test('PresenceInfo.fromMap parses correctly', () {
+      final info = PresenceInfo.fromMap({
+        'user_id': 'u1',
+        'connection_id': 'conn1',
+        'status': 'online',
+        'last_seen': '2026-03-08T00:00:00Z',
+        'metadata': {'device': 'mobile'},
+      });
+      expect(info.userId, 'u1');
+      expect(info.connectionId, 'conn1');
+      expect(info.status, 'online');
+      expect(info.lastSeen, '2026-03-08T00:00:00Z');
+      expect(info.metadata['device'], 'mobile');
+    });
+
+    test('PresenceInfo.fromMap handles missing fields', () {
+      final info = PresenceInfo.fromMap({});
+      expect(info.userId, '');
+      expect(info.connectionId, '');
+      expect(info.status, 'unknown');
+      expect(info.lastSeen, '');
+      expect(info.metadata, isEmpty);
+    });
+
+    test('PresenceInfo.fromMap handles null metadata', () {
+      final info = PresenceInfo.fromMap({
+        'user_id': 'u2',
+        'metadata': null,
+      });
+      expect(info.userId, 'u2');
+      expect(info.metadata, isEmpty);
+    });
+  });
+
+  // ── Dynamic Links tests ──────────────────────────────────────────────
+  group('OrignaBaseLinks', () {
+    test('create method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final f = ob.links.create(url: 'https://example.com');
+      expect(f, isA<Future>());
+      f.catchError((_) => DynamicLink.fromMap({}));
+      ob.dispose();
+    });
+
+    test('list method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final f = ob.links.list();
+      expect(f, isA<Future>());
+      f.catchError((_) => <DynamicLink>[]);
+      ob.dispose();
+    });
+
+    test('DynamicLink.fromMap parses correctly', () {
+      final link = DynamicLink.fromMap({
+        'slug': 'abc123',
+        'short_url': '/l/abc123',
+        'target_url': 'https://example.com/promo',
+        'title': 'Promo Link',
+        'description': 'A promotional link',
+        'clicks': 42,
+      });
+      expect(link.slug, 'abc123');
+      expect(link.shortUrl, '/l/abc123');
+      expect(link.targetUrl, 'https://example.com/promo');
+      expect(link.title, 'Promo Link');
+      expect(link.description, 'A promotional link');
+      expect(link.clicks, 42);
+    });
+
+    test('DynamicLink.fromMap handles missing fields', () {
+      final link = DynamicLink.fromMap({});
+      expect(link.slug, '');
+      expect(link.targetUrl, '');
+      expect(link.title, isNull);
+      expect(link.description, isNull);
+      expect(link.clicks, 0);
+    });
+
+    test('DynamicLink.fromMap generates shortUrl from slug', () {
+      final link = DynamicLink.fromMap({'slug': 'myslug'});
+      expect(link.shortUrl, '/l/myslug');
+    });
+
+    test('DynamicLink.fromMap uses explicit shortUrl over generated', () {
+      final link = DynamicLink.fromMap({
+        'slug': 'myslug',
+        'short_url': '/custom/path',
+      });
+      expect(link.shortUrl, '/custom/path');
+    });
+  });
+
+  // ── Push Notifications tests ─────────────────────────────────────────
+  group('OrignaBasePush', () {
+    test('registerToken method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final f = ob.push.registerToken(
+        userId: 'u1',
+        token: 'fcm_abc',
+        platform: 'android',
+      );
+      expect(f, isA<Future>());
+      f.catchError((_) {});
+      ob.dispose();
+    });
+
+    test('unregisterToken method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final f = ob.push.unregisterToken('fcm_abc');
+      expect(f, isA<Future>());
+      f.catchError((_) {});
+      ob.dispose();
+    });
+
+    test('sendToUser method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final f = ob.push.sendToUser('u1', title: 'Hi', body: 'Hello');
+      expect(f, isA<Future>());
+      f.catchError((_) => PushResult.fromMap({}));
+      ob.dispose();
+    });
+
+    test('sendToToken method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final f = ob.push.sendToToken('fcm_abc', title: 'Hi', body: 'Hello');
+      expect(f, isA<Future>());
+      f.catchError((_) => PushResult.fromMap({}));
+      ob.dispose();
+    });
+
+    test('sendToTopic method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final f = ob.push.sendToTopic('news', title: 'Hi', body: 'Hello');
+      expect(f, isA<Future>());
+      f.catchError((_) => PushResult.fromMap({}));
+      ob.dispose();
+    });
+
+    test('subscribeToTopic method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final f = ob.push.subscribeToTopic('fcm_abc', 'news');
+      expect(f, isA<Future>());
+      f.catchError((_) {});
+      ob.dispose();
+    });
+
+    test('unsubscribeFromTopic method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final f = ob.push.unsubscribeFromTopic('fcm_abc', 'news');
+      expect(f, isA<Future>());
+      f.catchError((_) {});
+      ob.dispose();
+    });
+
+    test('PushResult.fromMap parses correctly', () {
+      final result = PushResult.fromMap({
+        'sent': 5,
+        'failed': 1,
+        'total_devices': 6,
+      });
+      expect(result.sent, 5);
+      expect(result.failed, 1);
+      expect(result.totalDevices, 6);
+    });
+
+    test('PushResult.fromMap handles missing fields', () {
+      final result = PushResult.fromMap({});
+      expect(result.sent, 0);
+      expect(result.failed, 0);
+      expect(result.totalDevices, 0);
+    });
+
+    test('PushResult.fromMap handles num types', () {
+      final result = PushResult.fromMap({
+        'sent': 3.0,
+        'failed': 0.0,
+        'total_devices': 3.0,
+      });
+      expect(result.sent, 3);
+      expect(result.failed, 0);
+      expect(result.totalDevices, 3);
+    });
+  });
+
+  // ── Metrics tests ────────────────────────────────────────────────────
+  group('OrignaBaseMetrics', () {
+    test('record method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final f = ob.metrics.record('page_load', 1250);
+      expect(f, isA<Future>());
+      f.catchError((_) {});
+      ob.dispose();
+    });
+
+    test('record with tags method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final f = ob.metrics.record('page_load', 1250, tags: {'page': '/home'});
+      expect(f, isA<Future>());
+      f.catchError((_) {});
+      ob.dispose();
+    });
+
+    test('query method exists and is callable', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      final f = ob.metrics.query();
+      expect(f, isA<Future>());
+      f.catchError((_) => <MetricSummary>[]);
+      ob.dispose();
+    });
+
+    test('MetricSummary.fromMap parses correctly', () {
+      final summary = MetricSummary.fromMap({
+        'name': 'page_load',
+        'avg': 1250.5,
+        'min': 800.0,
+        'max': 2100.0,
+        'count': 150,
+      });
+      expect(summary.name, 'page_load');
+      expect(summary.avg, 1250.5);
+      expect(summary.min, 800.0);
+      expect(summary.max, 2100.0);
+      expect(summary.count, 150);
+    });
+
+    test('MetricSummary.fromMap handles missing fields', () {
+      final summary = MetricSummary.fromMap({});
+      expect(summary.name, '');
+      expect(summary.avg, 0.0);
+      expect(summary.min, 0.0);
+      expect(summary.max, 0.0);
+      expect(summary.count, 0);
+    });
+
+    test('MetricSummary.fromMap handles int values', () {
+      final summary = MetricSummary.fromMap({
+        'name': 'api_latency',
+        'avg': 100,
+        'min': 50,
+        'max': 200,
+        'count': 10,
+      });
+      expect(summary.avg, 100.0);
+      expect(summary.min, 50.0);
+      expect(summary.max, 200.0);
+      expect(summary.count, 10);
+    });
+  });
+
+  group('VectorSearch', () {
+    test('client has vectorSearch property', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      expect(ob.vectorSearch, isA<VectorSearch>());
+      ob.dispose();
+    });
+
+    test('VectorSearchResult toString includes score and id', () {
+      final doc = Document(id: 'prod1', collection: 'products', data: {'title': 'Widget'});
+      final result = VectorSearchResult(document: doc, score: 0.95);
+      expect(result.toString(), contains('0.95'));
+      expect(result.toString(), contains('prod1'));
+    });
+
+    test('VectorSearchResult stores score and document', () {
+      final doc = Document(id: 'abc', collection: 'items', data: {'name': 'test'});
+      final result = VectorSearchResult(document: doc, score: 0.82);
+      expect(result.score, 0.82);
+      expect(result.document.id, 'abc');
+      expect(result.document.collection, 'items');
+      expect(result.document.data['name'], 'test');
+    });
+
+    test('search method exists and throws on network error', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      expect(
+        () => ob.vectorSearch.search(
+          collection: 'products',
+          vectorField: 'embedding',
+          embedding: [0.1, 0.2, 0.3],
+          topK: 5,
+        ),
+        throwsA(anything),
+      );
+      ob.dispose();
+    });
+
+    test('search method accepts optional threshold', () {
+      final ob = OrignaBase.initialize(url: 'http://localhost:8080');
+      expect(
+        () => ob.vectorSearch.search(
+          collection: 'products',
+          vectorField: 'embedding',
+          embedding: [0.1, 0.2, 0.3],
+          topK: 10,
+          threshold: 0.7,
+        ),
+        throwsA(anything),
+      );
+      ob.dispose();
     });
   });
 }

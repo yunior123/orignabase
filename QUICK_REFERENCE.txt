@@ -1,0 +1,130 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║                  ORIGNABASE INTEGRATION TESTS — QUICK REF                  ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+FILES CREATED (4 new test files)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📍 crates/orignabase/tests/
+
+1. search_integration_test.rs (425 lines, 13 tests)
+   ├─ test_400-403: Basic search (browse, query, pagination, validation)
+   ├─ test_404-407: Filtering (category, price, seller, combined)
+   ├─ test_408-410: Sorting (price asc/desc, date)
+   └─ test_411-412: Autocomplete
+
+2. push_notifications_integration_test.rs (468 lines, 13 tests)
+   ├─ test_500-503: Token registration (success, validation, multi-device)
+   ├─ test_504-506: Token unregistration (idempotent, missing, validation)
+   ├─ test_507-510: Notification management (list, mark read, delete)
+   └─ test_511-512: Rate limiting & pagination
+
+3. extended_handlers_test.rs (506 lines, 14 tests)
+   ├─ test_600-604: Shipping (perishable, cross-province, threshold, multi-item, coords)
+   ├─ test_605-608: Email (resend, format, case, duplicates)
+   ├─ test_609-611: Auth (public, protected, invalid token)
+   └─ test_612-613: Sequential operations (profile, cart)
+
+4. miscellaneous_handlers_test.rs (484 lines, 13 tests)
+   ├─ test_700-702: PDF invoices (EN, FR, missing order)
+   ├─ test_703-705: File ops (upload, download, validation)
+   ├─ test_706-709: State transitions (invalid jumps, lifecycle, double-pay, terminal)
+   └─ test_710-712: Idempotency (cart, refund, connection)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STATS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Total Lines:        1,883
+Total Tests:        53
+Total Size:         51K
+
+Test Distribution:
+  • Search:         13 (tests 400-412)
+  • Push/Notif:     13 (tests 500-512)
+  • Extended:       14 (tests 600-613)
+  • Miscellaneous:  13 (tests 700-712)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+QUICK START
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Prerequisites:
+  surreal start --user root --pass root memory &
+  cargo run -- serve &
+
+Run ALL new tests:
+  cargo test --test search_integration_test -- --ignored
+  cargo test --test push_notifications_integration_test -- --ignored
+  cargo test --test extended_handlers_test -- --ignored
+  cargo test --test miscellaneous_handlers_test -- --ignored
+
+Run SINGLE test:
+  cargo test --test search_integration_test test_400 -- --ignored --nocapture
+
+Run with OUTPUT:
+  cargo test --test search_integration_test -- --ignored --nocapture --test-threads=1
+
+Set custom URL (optional):
+  export OB_TEST_URL=http://localhost:9999
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+COVERAGE GAPS FILLED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PREVIOUSLY UNTESTED (0 tests):
+  ✅ Meilisearch search endpoints (/api/search/*)
+  ✅ Push notification FCM (/api/push/*)
+  ✅ Notification management (/api/notifications/*)
+  ✅ PDF invoice generation (/api/orders/generate-invoice)
+
+PREVIOUSLY SPARSE (1-2 tests):
+  ✅ Advanced shipping (perishable, cross-province, thresholds)
+  ✅ Email validation (format, case, duplicates)
+  ✅ State transition enforcement
+  ✅ Idempotency patterns (cart, payments, refunds)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FILE LOCATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Test Files:
+  /Users/yuniorrodriguezosorio/Documents/GitHub/orignabase/crates/orignabase/tests/
+    ├─ search_integration_test.rs
+    ├─ push_notifications_integration_test.rs
+    ├─ extended_handlers_test.rs
+    └─ miscellaneous_handlers_test.rs
+
+Documentation:
+  /Users/yuniorrodriguezosorio/Documents/GitHub/orignabase/
+    ├─ NEW_TESTS_SUMMARY.md (detailed breakdown)
+    ├─ INTEGRATION_TESTS_COMPLETION.md (full report)
+    └─ QUICK_REFERENCE.txt (this file)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PATTERN COMPLIANCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All 53 tests follow handlers_integration_test.rs conventions:
+
+✓ #[tokio::test] + async fn
+✓ #[ignore = "requires running orignabase instance"]
+✓ reqwest::Client for HTTP
+✓ serde_json::json! macros for bodies
+✓ register_test_user() helper
+✓ make_request() abstraction (POST/GET/PUT/DELETE)
+✓ Status code assertions (200, 201, 400, 404, 409, 422, 503)
+✓ Descriptive error messages
+✓ Unique IDs (no test data collisions)
+✓ No hardcoded URLs (env-based)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STATUS: ✅ READY FOR USE
+
+Last Updated: 2026-03-16

@@ -17,3 +17,12 @@ anyhow = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
+criterion = { workspace = true }
+proptest = { workspace = true }
+insta = { workspace = true }
+rstest = { workspace = true }
+
+[[bench]]
+name = "security_bench"
+harness = false
+path = "../../benchmarks/criterion/security_bench.rs"

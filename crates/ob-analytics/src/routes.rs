@@ -36,18 +36,11 @@ pub async fn ingest_event(
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.split(',').next())
-        .or_else(|| {
-            headers
-                .get("x-real-ip")
-                .and_then(|v| v.to_str().ok())
-        })
+        .or_else(|| headers.get("x-real-ip").and_then(|v| v.to_str().ok()))
         .unwrap_or("unknown");
 
     let visitor_hash = hash_ip(ip, &state.ip_salt);
-    let referrer_domain = request
-        .referrer
-        .as_deref()
-        .and_then(extract_domain);
+    let referrer_domain = request.referrer.as_deref().and_then(extract_domain);
 
     let event = AnalyticsEvent {
         id: uuid::Uuid::new_v4().to_string(),
@@ -63,8 +56,8 @@ pub async fn ingest_event(
     };
 
     // Persist to SurrealDB
-    let event_json = serde_json::to_value(&event)
-        .map_err(|e| ob_core::Error::Internal(e.to_string()))?;
+    let event_json =
+        serde_json::to_value(&event).map_err(|e| ob_core::Error::Internal(e.to_string()))?;
     state
         .db
         .create_document("_analytics_events", event_json)

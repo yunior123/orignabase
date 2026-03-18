@@ -1,0 +1,5 @@
+---
+source: crates/ob-handlers/tests/snapshot_tests.rs
+expression: output
+---
+&lt;script&gt;alert('safe')&lt;/script&gt;

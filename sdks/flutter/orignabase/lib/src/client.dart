@@ -130,8 +130,65 @@ class OrignaBase {
     return response;
   }
 
+  /// Maximum number of retries on 429 (rate limit) responses.
+  static const _maxRetries = 3;
+
+  /// Initial backoff duration for 429 retries. Doubles each attempt, capped at 60s.
+  static const _initialBackoff = Duration(seconds: 1);
+  static const _maxBackoff = Duration(seconds: 60);
+
   /// Execute a raw HTTP request against the OrignaBase server.
+  ///
+  /// Automatically retries with exponential backoff on 429 (rate limit) responses.
+  /// Starts at 1s, doubles each attempt (1s -> 2s -> 4s), max 3 retries, capped at 60s.
+  /// Respects `Retry-After` header from the server when present.
   Future<Map<String, dynamic>> request(
+    String method,
+    String path, {
+    Map<String, dynamic>? body,
+    Map<String, String>? headers,
+  }) async {
+    for (int attempt = 0; attempt <= _maxRetries; attempt++) {
+      final response = await _executeHttp(method, path, body: body, headers: headers);
+
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        if (response.body.isEmpty) return {};
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+
+      // On 429, retry with exponential backoff (unless we've exhausted retries).
+      if (response.statusCode == 429 && attempt < _maxRetries) {
+        final retryAfter = response.headers['retry-after'];
+        Duration backoff;
+        if (retryAfter != null) {
+          final seconds = int.tryParse(retryAfter);
+          backoff = seconds != null
+              ? Duration(seconds: seconds)
+              : _calculateBackoff(attempt);
+        } else {
+          backoff = _calculateBackoff(attempt);
+        }
+        await Future<void>.delayed(backoff);
+        continue;
+      }
+
+      // Non-retryable error or retries exhausted — throw.
+      _throwForStatus(response);
+    }
+
+    // Should never reach here, but satisfy the type system.
+    throw OrignaBaseException('Request failed after $_maxRetries retries');
+  }
+
+  /// Calculate exponential backoff duration for the given attempt.
+  Duration _calculateBackoff(int attempt) {
+    final seconds = (_initialBackoff.inSeconds * (1 << attempt))
+        .clamp(1, _maxBackoff.inSeconds);
+    return Duration(seconds: seconds);
+  }
+
+  /// Execute a single HTTP request (no retry logic).
+  Future<http.Response> _executeHttp(
     String method,
     String path, {
     Map<String, dynamic>? body,
@@ -148,20 +205,19 @@ class OrignaBase {
       requestHeaders['Authorization'] = 'Bearer ${auth.accessToken}';
     }
 
-    final http.Response response;
     try {
       switch (method.toUpperCase()) {
         case 'GET':
-          response = await _httpClient.get(uri, headers: requestHeaders)
+          return await _httpClient.get(uri, headers: requestHeaders)
               .timeout(const Duration(seconds: 30));
         case 'POST':
-          response = await _httpClient.post(
+          return await _httpClient.post(
             uri,
             headers: requestHeaders,
             body: body != null ? jsonEncode(body) : null,
           ).timeout(const Duration(seconds: 30));
         case 'PUT':
-          response = await _httpClient.put(
+          return await _httpClient.put(
             uri,
             headers: requestHeaders,
             body: body != null ? jsonEncode(body) : null,
@@ -173,7 +229,7 @@ class OrignaBase {
           if (body != null) deleteRequest.body = jsonEncode(body);
           final streamedResponse = await _httpClient.send(deleteRequest)
               .timeout(const Duration(seconds: 30));
-          response = await http.Response.fromStream(streamedResponse);
+          return await http.Response.fromStream(streamedResponse);
         default:
           throw OrignaBaseException('Unsupported HTTP method: $method');
       }
@@ -187,13 +243,10 @@ class OrignaBase {
       // Catches SocketException (dart:io) and any other transport errors
       throw NetworkException('Network error: $e');
     }
+  }
 
-    if (response.statusCode >= 200 && response.statusCode < 300) {
-      if (response.body.isEmpty) return {};
-      return jsonDecode(response.body) as Map<String, dynamic>;
-    }
-
-    // Handle errors
+  /// Parse error body and throw the appropriate typed exception.
+  Never _throwForStatus(http.Response response) {
     Map<String, dynamic> errorBody;
     if (response.body.isEmpty) {
       errorBody = <String, dynamic>{'message': 'Unknown error'};
@@ -246,10 +299,17 @@ class OrignaBase {
     return response['data']?['search'] as Map<String, dynamic>? ?? {};
   }
 
-  /// Dispose all resources: realtime connection, auth stream, offline cache, and HTTP client.
-  void dispose() {
+  /// Close the realtime WebSocket connection if it was opened.
+  /// Called on sign-out to prevent stale subscriptions from lingering.
+  /// A new connection will be lazily created on next use via [realtime].
+  void closeRealtime() {
     _realtime?.disconnect();
     _realtime = null;
+  }
+
+  /// Dispose all resources: realtime connection, auth stream, offline cache, and HTTP client.
+  void dispose() {
+    closeRealtime();
     auth.dispose();
     offline.dispose();
     _httpClient.close();

@@ -1,0 +1,30 @@
+---
+source: crates/ob-handlers/tests/snapshot_tests.rs
+expression: result
+---
+{
+    "products": RuleSet {
+        collection: "products",
+        rules: [
+            SecurityRule {
+                operations: [
+                    "read",
+                ],
+                condition: Bool(
+                    true,
+                ),
+                validation: None,
+            },
+            SecurityRule {
+                operations: [
+                    "create",
+                ],
+                condition: FunctionCall {
+                    name: "isAuthenticated",
+                    args: [],
+                },
+                validation: None,
+            },
+        ],
+    },
+}

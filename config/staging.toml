@@ -1,0 +1,33 @@
+# OrignaBase Staging Configuration
+# Deployed on Hetzner VPS: 204.168.137.16
+
+host = "0.0.0.0"
+port = 8080
+
+[database]
+endpoint = "ws://surrealdb:8000"
+namespace = "orignabase"
+name = "staging"
+username = "root"
+password = "${OB_DB_PASSWORD}"
+
+[auth]
+jwt_secret = "${OB_JWT_SECRET}"
+access_token_ttl_secs = 900        # 15 minutes
+refresh_token_ttl_secs = 604800    # 7 days
+
+[security]
+rules_path = "/etc/orignabase/rules.ob"
+
+[search]
+url = "http://meilisearch:7700"
+api_key = "${OB_MEILI_KEY}"
+
+[search.indexes.products]
+searchable = ["title", "description", "category"]
+filterable = ["category", "priceCents", "isActive", "sellerId", "isPerishable"]
+sortable = ["priceCents", "createdAt"]
+
+[storage]
+backend = "local"
+root = "/app/data/storage"

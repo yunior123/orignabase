@@ -31,8 +31,7 @@ impl WasmRuntime {
         let mut config = Config::default();
         config.consume_fuel(true);
 
-        let engine =
-            Engine::new(&config);
+        let engine = Engine::new(&config);
 
         Ok(Self { engine, limits })
     }
@@ -58,12 +57,25 @@ impl WasmRuntime {
         let input = input.to_string();
         let limits = self.limits.clone();
 
-        // Run in blocking task since wasmi is sync
-        tokio::task::spawn_blocking(move || {
-            execute_sync(&engine, &module, &function_name, &input, &limits)
-        })
-        .await
-        .map_err(|e| Error::Internal(format!("WASM task join error: {e}")))?
+        // Run in blocking task since wasmi is sync, with wall-clock timeout
+        let timeout_duration = std::time::Duration::from_secs(limits.max_time_secs);
+        let result = tokio::time::timeout(
+            timeout_duration,
+            tokio::task::spawn_blocking(move || {
+                execute_sync(&engine, &module, &function_name, &input, &limits)
+            }),
+        )
+        .await;
+
+        match result {
+            Ok(join_result) => {
+                join_result.map_err(|e| Error::Internal(format!("WASM task join error: {e}")))?
+            }
+            Err(_elapsed) => Err(Error::Internal(format!(
+                "WASM function exceeded wall-clock time limit ({}s)",
+                timeout_duration.as_secs()
+            ))),
+        }
     }
 
     pub fn engine(&self) -> &Engine {
@@ -86,7 +98,9 @@ fn execute_sync(
     let mut store = Store::new(engine, ());
 
     // Set fuel limit
-    store.set_fuel(limits.max_fuel).map_err(|e| Error::Internal(format!("Set fuel: {e}")))?;
+    store
+        .set_fuel(limits.max_fuel)
+        .map_err(|e| Error::Internal(format!("Set fuel: {e}")))?;
 
     let linker = Linker::new(engine);
     let instance = linker
@@ -122,16 +136,14 @@ fn execute_sync(
         .get_typed_func::<(i32, i32), i64>(&store, function_name)
         .map_err(|e| Error::Internal(format!("Function '{function_name}' not found: {e}")))?;
 
-    let result_packed = func
-        .call(&mut store, (input_ptr, input_len))
-        .map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("fuel") {
-                Error::Internal("WASM function exceeded CPU fuel limit".into())
-            } else {
-                Error::Internal(format!("WASM call error: {msg}"))
-            }
-        })?;
+    let result_packed = func.call(&mut store, (input_ptr, input_len)).map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("fuel") {
+            Error::Internal("WASM function exceeded CPU fuel limit".into())
+        } else {
+            Error::Internal(format!("WASM call error: {msg}"))
+        }
+    })?;
 
     // Unpack ptr+len from i64 (high 32 = ptr, low 32 = len)
     let result_ptr = (result_packed >> 32) as usize;
@@ -258,6 +270,9 @@ mod tests {
         let result = runtime.execute(&module, "nonexistent", "hello").await;
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
-        assert!(err_msg.contains("nonexistent"), "Error should mention the missing function name: {err_msg}");
+        assert!(
+            err_msg.contains("nonexistent"),
+            "Error should mention the missing function name: {err_msg}"
+        );
     }
 }

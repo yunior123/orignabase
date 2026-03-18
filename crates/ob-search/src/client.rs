@@ -28,7 +28,6 @@ impl SearchClient {
             http: http_client,
         }
     }
-    }
 
     pub fn is_enabled(&self) -> bool {
         self.config.enabled

@@ -1,0 +1,28 @@
+name: Nightly
+on:
+  schedule:
+    - cron: '0 4 * * *'  # 4 AM UTC daily
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    name: Fuzz Testing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz
+      - run: |
+          for target in fuzz_json_body fuzz_security_rules fuzz_jwt fuzz_graphql_filter fuzz_url_routing; do
+            cargo fuzz run $target -- -max_total_time=300 || true
+          done
+
+  load-test:
+    name: Load Test (Smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: grafana/setup-k6-action@v1
+      - run: k6 run --vus 1 --duration 30s load-tests/k6/mixed-workload.js
+        env:
+          K6_BASE_URL: https://api.orignagta.ca

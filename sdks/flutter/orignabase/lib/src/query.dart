@@ -1,6 +1,6 @@
-import 'dart:convert';
 import 'client.dart';
 import 'document.dart';
+import 'graphql_utils.dart';
 
 /// A filter condition for queries.
 class QueryFilter {
@@ -123,16 +123,16 @@ class Query {
 
   /// Execute the query and return results.
   Future<QuerySnapshot> get() async {
-    final filters = _buildFiltersJson();
+    final filters = _buildFiltersMap();
     final args = <String>['collection: "$collectionName"'];
-    if (filters.isNotEmpty) args.add('filters: ${jsonEncode(filters)}');
+    if (filters.isNotEmpty) args.add('filters: ${toGraphQLValue(filters)}');
     if (_orderByField != null) args.add('orderBy: "$_orderByField"');
     if (_descending) args.add('descending: true');
     if (_limitCount != null) args.add('limit: $_limitCount');
     if (_offsetCount != null) args.add('offset: $_offsetCount');
     if (_startAfter != null) args.add('startAfter: "$_startAfter"');
     if (_selectFields != null && _selectFields!.isNotEmpty) {
-      args.add('select: ${jsonEncode(_selectFields)}');
+      args.add('select: ${toGraphQLValue(_selectFields)}');
     }
 
     final query = 'query { list(${args.join(', ')}) }';
@@ -164,11 +164,21 @@ class Query {
     return QuerySnapshot(docs: docs, hasMore: hasMore);
   }
 
-  String _buildFiltersJson() {
-    if (_filters.isEmpty) return '';
-    // Use a list of filter objects to preserve multiple filters on the same field
-    // (e.g., price > 10 AND price < 100). A map keyed by field name would collide.
-    final filterList = _filters.map((f) => f.toGraphQL()).toList();
-    return jsonEncode(filterList);
+  /// Build filters as a merged Map (server expects an object, not a list).
+  /// Multiple filters on the same field are merged into one object.
+  Map<String, dynamic> _buildFiltersMap() {
+    if (_filters.isEmpty) return {};
+    final merged = <String, dynamic>{};
+    for (final f in _filters) {
+      final m = f.toGraphQL();
+      for (final entry in m.entries) {
+        if (merged.containsKey(entry.key) && merged[entry.key] is Map && entry.value is Map) {
+          (merged[entry.key] as Map).addAll(entry.value as Map);
+        } else {
+          merged[entry.key] = entry.value;
+        }
+      }
+    }
+    return merged;
   }
 }

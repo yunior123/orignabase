@@ -1,0 +1,9 @@
+---
+source: crates/ob-handlers/tests/snapshot_tests.rs
+expression: db_snapshot
+---
+{
+  "endpoint": "localhost:8000",
+  "namespace": "orignabase",
+  "name": "main"
+}

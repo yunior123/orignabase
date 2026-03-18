@@ -19,3 +19,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
+tokio = { workspace = true }
+proptest = { workspace = true }
+insta = { workspace = true }
+rstest = { workspace = true }

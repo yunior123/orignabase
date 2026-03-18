@@ -1,3 +1,4 @@
+use ob_core::{escape_surreal_string, validate_identifier};
 use serde_json::Value;
 
 /// Translates GraphQL-style filter operators into SurrealQL WHERE clauses.
@@ -38,6 +39,11 @@ impl QueryTranslator {
     }
 
     fn translate_op(field: &str, op: &str, value: &Value) -> Option<String> {
+        // Validate field name to prevent SurrealQL injection
+        if validate_identifier(field).is_err() {
+            tracing::warn!("Rejected invalid field name in filter: {field}");
+            return None;
+        }
         let val_str = Self::value_to_surreal(value);
         match op {
             "_eq" => Some(format!("{field} = {val_str}")),
@@ -55,9 +61,12 @@ impl QueryTranslator {
                 }
             }
             "_contains" => Some(format!("{field} CONTAINS {val_str}")),
-            "_starts_with" => value
-                .as_str()
-                .map(|s| format!("string::startsWith({field}, '{s}')")),
+            "_starts_with" => value.as_str().map(|s| {
+                format!(
+                    "string::startsWith({field}, '{}')",
+                    escape_surreal_string(s)
+                )
+            }),
             _ => {
                 tracing::warn!("Unknown filter operator: {op}");
                 None
@@ -67,7 +76,7 @@ impl QueryTranslator {
 
     fn value_to_surreal(value: &Value) -> String {
         match value {
-            Value::String(s) => format!("'{s}'"),
+            Value::String(s) => format!("'{}'", escape_surreal_string(s)),
             Value::Number(n) => n.to_string(),
             Value::Bool(b) => b.to_string(),
             Value::Null => "NONE".to_string(),
@@ -84,19 +93,90 @@ impl QueryTranslator {
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> String {
-        let mut query = format!("SELECT * FROM {collection}");
+        Self::build_select_ext(
+            collection, filters, order_by, descending, limit, offset, None, None,
+        )
+    }
+
+    /// Extended SELECT builder with cursor pagination and field projection.
+    ///
+    /// - `fields`: optional list of field names to select (instead of `*`)
+    /// - `start_after`: cursor-based pagination — document ID to start after
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_select_ext(
+        collection: &str,
+        filters: Option<&Value>,
+        order_by: Option<&str>,
+        descending: bool,
+        limit: Option<usize>,
+        offset: Option<usize>,
+        fields: Option<&[&str]>,
+        start_after: Option<&str>,
+    ) -> String {
+        // Field projection
+        let select_fields = match fields {
+            Some(f) if !f.is_empty() => {
+                // Validate field names to prevent injection
+                for field in f {
+                    if !field.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                        return format!("SELECT * FROM {collection}");
+                    }
+                }
+                let mut field_list = f.join(", ");
+                // Always include id
+                if !f.contains(&"id") {
+                    field_list = format!("id, {field_list}");
+                }
+                field_list
+            }
+            _ => "*".to_string(),
+        };
+
+        let mut query = format!("SELECT {select_fields} FROM {collection}");
+
+        // Combine filter WHERE clauses with cursor WHERE clause
+        let mut where_parts = Vec::new();
 
         if let Some(f) = filters {
             let where_clause = Self::filters_to_where(f);
             if !where_clause.is_empty() {
-                query.push(' ');
-                query.push_str(&where_clause);
+                // Strip "WHERE " prefix since we'll add it ourselves
+                where_parts.push(
+                    where_clause
+                        .strip_prefix("WHERE ")
+                        .unwrap_or(&where_clause)
+                        .to_string(),
+                );
             }
         }
 
+        // Cursor-based pagination: startAfter
+        if let Some(cursor_id) = start_after {
+            let safe_cursor = escape_surreal_string(cursor_id);
+            let order_field = order_by.unwrap_or("id");
+            // Validate the order field used in cursor comparison
+            if validate_identifier(order_field).is_ok() {
+                let op = if descending { "<" } else { ">" };
+                where_parts.push(format!(
+                    "{order_field} {op} type::thing('{collection}', '{safe_cursor}').{order_field}"
+                ));
+            } else {
+                tracing::warn!("Rejected invalid cursor order field: {order_field}");
+            }
+        }
+
+        if !where_parts.is_empty() {
+            query.push_str(&format!(" WHERE {}", where_parts.join(" AND ")));
+        }
+
         if let Some(field) = order_by {
-            let dir = if descending { "DESC" } else { "ASC" };
-            query.push_str(&format!(" ORDER BY {field} {dir}"));
+            // Validate order_by field to prevent SurrealQL injection
+            if validate_identifier(field).is_ok() {
+                let dir = if descending { "DESC" } else { "ASC" };
+                query.push_str(&format!(" ORDER BY {field} {dir}"));
+            } else {
+                tracing::warn!("Rejected invalid order_by field: {field}");
+            }
         }
 
         if let Some(n) = limit {
@@ -274,14 +354,8 @@ mod tests {
 
     #[test]
     fn test_build_select_ascending_order() {
-        let query = QueryTranslator::build_select(
-            "events",
-            None,
-            Some("timestamp"),
-            false,
-            None,
-            None,
-        );
+        let query =
+            QueryTranslator::build_select("events", None, Some("timestamp"), false, None, None);
         assert_eq!(query, "SELECT * FROM events ORDER BY timestamp ASC");
     }
 
@@ -289,14 +363,7 @@ mod tests {
     fn test_build_select_with_empty_where_clause() {
         // Filters that produce no conditions (e.g. unknown operator) should not add WHERE
         let filters = json!({ "field": { "_bogus": 1 } });
-        let query = QueryTranslator::build_select(
-            "items",
-            Some(&filters),
-            None,
-            false,
-            None,
-            None,
-        );
+        let query = QueryTranslator::build_select("items", Some(&filters), None, false, None, None);
         assert_eq!(query, "SELECT * FROM items");
     }
 
@@ -320,5 +387,95 @@ mod tests {
     fn test_build_select_no_options() {
         let query = QueryTranslator::build_select("logs", None, None, false, None, None);
         assert_eq!(query, "SELECT * FROM logs");
+    }
+
+    // ── Extended SELECT (cursor + projection) ───────────────────────
+
+    #[test]
+    fn test_build_select_ext_field_projection() {
+        let query = QueryTranslator::build_select_ext(
+            "users",
+            None,
+            None,
+            false,
+            Some(10),
+            None,
+            Some(&["name", "email"]),
+            None,
+        );
+        assert_eq!(query, "SELECT id, name, email FROM users LIMIT 10");
+    }
+
+    #[test]
+    fn test_build_select_ext_field_projection_with_id() {
+        let query = QueryTranslator::build_select_ext(
+            "users",
+            None,
+            None,
+            false,
+            None,
+            None,
+            Some(&["id", "name"]),
+            None,
+        );
+        assert_eq!(query, "SELECT id, name FROM users");
+    }
+
+    #[test]
+    fn test_build_select_ext_cursor_pagination() {
+        let query = QueryTranslator::build_select_ext(
+            "products",
+            None,
+            Some("created_at"),
+            true,
+            Some(20),
+            None,
+            None,
+            Some("abc123"),
+        );
+        assert!(query.contains("WHERE"));
+        assert!(query.contains("created_at <"));
+        assert!(query.contains("ORDER BY created_at DESC"));
+        assert!(query.contains("LIMIT 20"));
+    }
+
+    #[test]
+    fn test_build_select_ext_cursor_with_filters() {
+        let filters = json!({ "status": { "_eq": "active" } });
+        let query = QueryTranslator::build_select_ext(
+            "orders",
+            Some(&filters),
+            Some("id"),
+            false,
+            Some(10),
+            None,
+            None,
+            Some("order_99"),
+        );
+        assert!(query.contains("status = 'active'"));
+        assert!(query.contains("AND"));
+        assert!(query.contains("id >"));
+    }
+
+    #[test]
+    fn test_build_select_ext_empty_fields_uses_star() {
+        let query = QueryTranslator::build_select_ext(
+            "items",
+            None,
+            None,
+            false,
+            None,
+            None,
+            Some(&[]),
+            None,
+        );
+        assert_eq!(query, "SELECT * FROM items");
+    }
+
+    #[test]
+    fn test_build_select_ext_none_fields_uses_star() {
+        let query =
+            QueryTranslator::build_select_ext("items", None, None, false, None, None, None, None);
+        assert_eq!(query, "SELECT * FROM items");
     }
 }

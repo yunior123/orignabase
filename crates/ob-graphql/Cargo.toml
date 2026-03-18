@@ -11,6 +11,7 @@ ob-database = { workspace = true }
 ob-auth = { workspace = true }
 ob-security = { workspace = true }
 ob-realtime = { workspace = true }
+ob-search = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 async-graphql = { workspace = true }

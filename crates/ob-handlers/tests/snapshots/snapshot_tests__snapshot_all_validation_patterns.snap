@@ -1,0 +1,15 @@
+---
+source: crates/ob-handlers/tests/snapshot_tests.rs
+expression: patterns
+---
+{
+  "valid_string": true,
+  "invalid_empty_string": true,
+  "invalid_too_long": true,
+  "valid_email": true,
+  "invalid_email": true,
+  "valid_amount": true,
+  "invalid_negative_amount": true,
+  "valid_uid": true,
+  "invalid_empty_uid": true
+}

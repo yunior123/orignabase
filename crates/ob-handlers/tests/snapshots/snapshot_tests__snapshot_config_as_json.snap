@@ -1,0 +1,39 @@
+---
+source: crates/ob-handlers/tests/snapshot_tests.rs
+expression: txt
+---
+Config {
+    host: "0.0.0.0",
+    port: 8080,
+    database: DatabaseConfig {
+        endpoint: "localhost:8000",
+        namespace: "orignabase",
+        name: "main",
+        username: None,
+        password: None,
+    },
+    auth: AuthConfig {
+        jwt_secret: "CHANGE_ME_IN_PRODUCTION",
+        access_token_ttl_secs: 900,
+        refresh_token_ttl_secs: 604800,
+        google: None,
+        apple: None,
+        oidc: None,
+    },
+    security: SecurityConfig {
+        rules_path: "rules.ob",
+    },
+    cluster: ClusterConfig {
+        enabled: false,
+        nats_url: "nats://localhost:4222",
+        node_id: None,
+    },
+    tenant: TenantConfig {
+        multi_tenant: false,
+        header_name: "X-Tenant-ID",
+    },
+    search: None,
+    secrets: SecretsConfig {
+        values: {},
+    },
+}

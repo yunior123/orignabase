@@ -7,8 +7,10 @@
 		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 		X-Frame-Options "DENY"
 		X-Content-Type-Options "nosniff"
+		X-XSS-Protection "1; mode=block"
 		Referrer-Policy "strict-origin-when-cross-origin"
 		Permissions-Policy "accelerometer=(), camera=(), geolocation=(), gyroscope=(), microphone=(), payment=(), usb=()"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https:; font-src 'self' data:; connect-src 'self' https://api.stripe.com; frame-ancestors 'none'"
 		-Server
 	}
 }
@@ -18,8 +20,10 @@
 		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 		X-Frame-Options "SAMEORIGIN"
 		X-Content-Type-Options "nosniff"
+		X-XSS-Protection "1; mode=block"
 		Referrer-Policy "strict-origin-when-cross-origin"
 		Permissions-Policy "accelerometer=(), camera=(), geolocation=(), gyroscope=(), microphone=(), payment=(), usb=()"
+		Content-Security-Policy "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https:; frame-src 'self' https://js.stripe.com https://challenges.cloudflare.com; frame-ancestors 'self'"
 		-Server
 	}
 }
@@ -47,7 +51,6 @@
 # Production API — api.orignagta.ca (TLS auto via Let's Encrypt)
 api.orignagta.ca {
 	import api_security_headers
-	import cors "https://www.orignagta.ca"
 	encode zstd gzip
 	reverse_proxy orignabase:8080
 }
@@ -55,7 +58,6 @@ api.orignagta.ca {
 # Staging API — api-staging.orignagta.ca
 api-staging.orignagta.ca {
 	import api_security_headers
-	import cors "https://staging.orignagta.ca"
 	encode zstd gzip
 	reverse_proxy orignabase:8080
 }

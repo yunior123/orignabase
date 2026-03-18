@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
-import 'package:http/http.dart' as http;
 
 import 'client.dart';
 import 'errors.dart';
@@ -26,44 +25,128 @@ class OrignaBaseStorage {
 
   OrignaBaseStorage(this._client);
 
-  /// Upload a file using a signed URL.
+  /// Upload a file using a presigned URL.
   ///
-  /// The server generates a signed URL, then the client uploads directly.
+  /// 1. POST to `/storage/presign/upload` to get a signed upload URL.
+  /// 2. PUT the file data to the signed URL.
   Future<Map<String, dynamic>> upload(
     String path,
     Uint8List data, {
     String contentType = 'application/octet-stream',
   }) async {
-    final uri = Uri.parse('${_client.url}/storage/upload/$path');
-    final headers = <String, String>{
-      'Content-Type': contentType,
+    // Step 1: Get presigned upload URL
+    final presignUri = Uri.parse('${_client.url}/storage/presign/upload');
+    final presignHeaders = <String, String>{
+      'Content-Type': 'application/json',
     };
     if (_client.auth.accessToken != null) {
-      headers['Authorization'] = 'Bearer ${_client.auth.accessToken}';
+      presignHeaders['Authorization'] = 'Bearer ${_client.auth.accessToken}';
     }
 
-    final response =
-        await _client.httpClient.put(uri, headers: headers, body: data);
+    final presignResponse = await _client.httpClient.post(
+      presignUri,
+      headers: presignHeaders,
+      body: jsonEncode({
+        'paths': [path],
+        'ttl_secs': 3600,
+      }),
+    );
 
-    if (response.statusCode == 200) {
+    if (presignResponse.statusCode != 200) {
+      throw OrignaBaseException(
+        'Failed to get presigned URL: ${presignResponse.body}',
+        statusCode: presignResponse.statusCode,
+      );
+    }
+
+    final presignBody =
+        jsonDecode(presignResponse.body) as Map<String, dynamic>;
+    final urls = presignBody['urls'] as List<dynamic>;
+    if (urls.isEmpty) {
+      throw OrignaBaseException('No presigned URL returned');
+    }
+    var uploadUrl = (urls.first as Map<String, dynamic>)['upload_url'] as String;
+
+    // Rewrite the upload URL to use the client's base URL if the server returned
+    // a local address (e.g., http://0.0.0.0:8080) that isn't reachable from the client.
+    final parsedUpload = Uri.parse(uploadUrl);
+    final parsedClient = Uri.parse(_client.url);
+    if (parsedUpload.host != parsedClient.host) {
+      uploadUrl = parsedClient.replace(
+        path: parsedUpload.path,
+        query: parsedUpload.query,
+      ).toString();
+    }
+
+    // Step 2: PUT file data to the signed URL
+    final uploadHeaders = <String, String>{
+      'Content-Type': contentType,
+    };
+
+    final uploadResponse = await _client.httpClient.put(
+      Uri.parse(uploadUrl),
+      headers: uploadHeaders,
+      body: data,
+    );
+
+    if (uploadResponse.statusCode >= 200 && uploadResponse.statusCode < 300) {
       return {'path': path, 'size': data.length, 'content_type': contentType};
     }
 
     throw OrignaBaseException(
-      'Upload failed: ${response.body}',
-      statusCode: response.statusCode,
+      'Upload failed: ${uploadResponse.body}',
+      statusCode: uploadResponse.statusCode,
     );
   }
 
-  /// Download a file.
+  /// Download a file using a presigned URL.
   Future<Uint8List> download(String path) async {
-    final uri = Uri.parse('${_client.url}/storage/download/$path');
-    final headers = <String, String>{};
+    // Step 1: Get presigned download URL
+    final presignUri = Uri.parse('${_client.url}/storage/presign/download');
+    final presignHeaders = <String, String>{
+      'Content-Type': 'application/json',
+    };
     if (_client.auth.accessToken != null) {
-      headers['Authorization'] = 'Bearer ${_client.auth.accessToken}';
+      presignHeaders['Authorization'] = 'Bearer ${_client.auth.accessToken}';
     }
 
-    final response = await _client.httpClient.get(uri, headers: headers);
+    final presignResponse = await _client.httpClient.post(
+      presignUri,
+      headers: presignHeaders,
+      body: jsonEncode({
+        'paths': [path],
+        'ttl_secs': 3600,
+      }),
+    );
+
+    if (presignResponse.statusCode != 200) {
+      throw NotFoundException(
+        'File not found: $path',
+        statusCode: presignResponse.statusCode,
+      );
+    }
+
+    final presignBody =
+        jsonDecode(presignResponse.body) as Map<String, dynamic>;
+    final urls = presignBody['urls'] as List<dynamic>;
+    if (urls.isEmpty) {
+      throw NotFoundException('No presigned download URL returned');
+    }
+    var downloadUrl =
+        (urls.first as Map<String, dynamic>)['download_url'] as String;
+
+    // Rewrite URL host if server returned a local address
+    final parsedDownload = Uri.parse(downloadUrl);
+    final parsedClient = Uri.parse(_client.url);
+    if (parsedDownload.host != parsedClient.host) {
+      downloadUrl = parsedClient.replace(
+        path: parsedDownload.path,
+        query: parsedDownload.query,
+      ).toString();
+    }
+
+    // Step 2: GET file data from signed URL
+    final response = await _client.httpClient.get(Uri.parse(downloadUrl));
 
     if (response.statusCode == 200) {
       return response.bodyBytes;
@@ -77,7 +160,9 @@ class OrignaBaseStorage {
 
   /// Delete a file.
   Future<void> delete(String path) async {
-    await _client.request('DELETE', '/storage/delete/$path');
+    await _client.request('POST', '/storage/batch-delete', body: {
+      'paths': [path],
+    });
   }
 
   /// Start a resumable upload for large files.

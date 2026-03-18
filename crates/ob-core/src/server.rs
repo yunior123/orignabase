@@ -39,7 +39,7 @@ fn build_cors_layer(is_test_mode: bool) -> CorsLayer {
     }
 
     let mut cors = CorsLayer::new()
-        .allow_credentials();
+        .allow_credentials(true);
 
     for origin in allowed_origins {
         cors = cors.allow_origin(origin);
@@ -57,7 +57,8 @@ async fn health_check() -> &'static str {
 /// Start the HTTP server.
 pub async fn serve(config: Config) -> Result<()> {
     let addr = format!("{}:{}", config.host, config.port);
-    let state = AppState::new(config);
+    let http_client = reqwest::Client::new();
+    let state = AppState::new(config, http_client);
     let app = build_router(state);
 
     tracing::info!("OrignaBase listening on {}", addr);

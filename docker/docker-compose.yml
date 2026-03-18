@@ -13,6 +13,17 @@ services:
     volumes:
       - surrealdb_data:/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       resources:
         limits:
@@ -23,10 +34,22 @@ services:
     ports:
       - "127.0.0.1:7700:7700"
     environment:
+      MEILI_ENV: ${MEILI_ENV:-production}
       MEILI_MASTER_KEY: ${MEILI_MASTER_KEY}
     volumes:
       - meili_data:/meili_data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7700/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       resources:
         limits:
@@ -41,6 +64,7 @@ services:
     environment:
       OB_HOST: ${OB_HOST}
       OB_PORT: ${OB_PORT}
+      OB_BASE_URL: ${OB_BASE_URL}
       OB_DATABASE__ENDPOINT: ${OB_DATABASE__ENDPOINT}
       OB_DATABASE__USERNAME: ${OB_DATABASE__USERNAME}
       OB_DATABASE__PASSWORD: ${OB_DATABASE__PASSWORD}
@@ -49,11 +73,33 @@ services:
       OB_AUTH__JWT_SECRET: ${OB_AUTH__JWT_SECRET}
       OB_AUTH__ACCESS_TOKEN_TTL_SECS: ${OB_AUTH__ACCESS_TOKEN_TTL_SECS}
       OB_AUTH__REFRESH_TOKEN_TTL_SECS: ${OB_AUTH__REFRESH_TOKEN_TTL_SECS}
+      OB_AUTH__GOOGLE_CLIENT_ID: ${OB_AUTH__GOOGLE_CLIENT_ID}
+      OB_AUTH__GOOGLE_CLIENT_SECRET: ${OB_AUTH__GOOGLE_CLIENT_SECRET}
       OB_SECURITY__RULES_PATH: ${OB_SECURITY__RULES_PATH}
+      OB_SEARCH__URL: ${OB_SEARCH__URL}
+      OB_SEARCH__API_KEY: ${OB_SEARCH__API_KEY}
+      OB_SECRETS__STRIPE_SECRET_KEY: ${OB_SECRETS__STRIPE_SECRET_KEY}
+      OB_SECRETS__STRIPE_WEBHOOK_SECRET: ${OB_SECRETS__STRIPE_WEBHOOK_SECRET}
+      OB_SECRETS__MAILJET_API_KEY: ${OB_SECRETS__MAILJET_API_KEY}
+      OB_SECRETS__MAILJET_SECRET_KEY: ${OB_SECRETS__MAILJET_SECRET_KEY}
+      OB_SECRETS__GEOAPIFY_API_KEY: ${OB_SECRETS__GEOAPIFY_API_KEY}
     depends_on:
-      - surrealdb
-      - meilisearch
+      surrealdb:
+        condition: service_healthy
+      meilisearch:
+        condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       resources:
         limits:
@@ -72,7 +118,19 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
-      - orignabase
+      orignabase:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       resources:
         limits:

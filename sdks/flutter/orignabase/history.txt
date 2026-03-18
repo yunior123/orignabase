@@ -1,0 +1,8 @@
+#V2
+RETURN 1;
+DEFINE NAMESPACE orignabase;
+USE NS orignabase;
+DEFINE DATABASE main;
+USE DB main;
+CREATE _init CONTENT {ok: true};
+DELETE _init;

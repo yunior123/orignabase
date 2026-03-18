@@ -34,8 +34,11 @@ op_list   = { operation ~ ("," ~ operation)* }
 rule_entry    = { op_list ~ ":" ~ expr ~ ";" }
 validate_entry = { op_list ~ ":" ~ "{" ~ "validate" ~ ":" ~ expr ~ ";" ~ "}" }
 
+// Collection name: either an identifier or "*" for wildcard (default rules)
+collection_name = @{ "*" | ident }
+
 // Rule block
-rule_block = { "rules" ~ ident ~ "{" ~ (validate_entry | rule_entry)* ~ "}" }
+rule_block = { "rules" ~ collection_name ~ "{" ~ (validate_entry | rule_entry)* ~ "}" }
 
 // Top-level file
 file = { SOI ~ rule_block* ~ EOI }

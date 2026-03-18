@@ -1,0 +1,32 @@
+# OrignaBase Index Definitions
+# Apply with: orignabase schema indexes
+#
+# Indexes improve query performance on frequently filtered/sorted fields.
+# SurrealDB creates indexes lazily — they're built on first query after definition.
+#
+# Better than Firebase:
+# - Declarative TOML file (version-controlled, human-readable)
+# - No composite index limits (Firebase caps at 200)
+# - Unique constraints supported
+# - Applied idempotently (safe to re-run)
+
+[[indexes]]
+collection = "products"
+fields = ["status", "price"]
+
+[[indexes]]
+collection = "products"
+fields = ["category", "created_at"]
+
+[[indexes]]
+collection = "users"
+fields = ["email"]
+unique = true
+
+[[indexes]]
+collection = "orders"
+fields = ["user_id", "created_at"]
+
+[[indexes]]
+collection = "orders"
+fields = ["status"]

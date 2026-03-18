@@ -1,0 +1,41 @@
+---
+source: crates/ob-handlers/tests/snapshot_tests.rs
+expression: result
+---
+{
+    "products": RuleSet {
+        collection: "products",
+        rules: [
+            SecurityRule {
+                operations: [
+                    "update",
+                ],
+                condition: And(
+                    [
+                        FunctionCall {
+                            name: "isAuthenticated",
+                            args: [],
+                        },
+                        FunctionCall {
+                            name: "hasRole",
+                            args: [
+                                StringLit(
+                                    "seller",
+                                ),
+                            ],
+                        },
+                        FunctionCall {
+                            name: "isOwner",
+                            args: [
+                                Path(
+                                    "resource.seller_id",
+                                ),
+                            ],
+                        },
+                    ],
+                ),
+                validation: None,
+            },
+        ],
+    },
+}

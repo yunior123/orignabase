@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -14,6 +15,31 @@ pub struct Config {
     pub security: SecurityConfig,
     #[serde(default)]
     pub cluster: ClusterConfig,
+    #[serde(default)]
+    pub tenant: TenantConfig,
+    #[serde(default)]
+    pub search: Option<SearchConfig>,
+    #[serde(default)]
+    pub secrets: SecretsConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SecretsConfig {
+    #[serde(flatten)]
+    pub values: HashMap<String, String>,
+}
+
+impl SecretsConfig {
+    /// Get a secret by key name.
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.values.get(key).map(|s| s.as_str())
+    }
+
+    /// Get a secret or return an error.
+    pub fn require(&self, key: &str) -> crate::Result<&str> {
+        self.get(key)
+            .ok_or_else(|| crate::Error::Config(format!("Missing required secret: {key}")))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -47,7 +73,8 @@ pub struct AuthConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct GoogleOAuthConfig {
     pub client_id: String,
-    pub client_secret: String,
+    #[serde(default)]
+    pub client_secret: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -82,6 +109,36 @@ pub struct ClusterConfig {
     pub nats_url: String,
     /// Unique node ID (auto-generated if not set)
     pub node_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TenantConfig {
+    /// Enable multi-tenant namespace resolution
+    #[serde(default)]
+    pub multi_tenant: bool,
+    /// HTTP header used to identify the tenant
+    #[serde(default = "default_tenant_header")]
+    pub header_name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SearchConfig {
+    pub url: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+fn default_tenant_header() -> String {
+    "X-Tenant-ID".to_string()
+}
+
+impl Default for TenantConfig {
+    fn default() -> Self {
+        Self {
+            multi_tenant: false,
+            header_name: default_tenant_header(),
+        }
+    }
 }
 
 impl Default for ClusterConfig {
@@ -213,6 +270,20 @@ impl Config {
         if let Ok(v) = std::env::var("OB_DATABASE__NAME") {
             config.database.name = v;
         }
+        if let Ok(v) = std::env::var("OB_SEARCH__URL") {
+            let search = config.search.get_or_insert(SearchConfig {
+                url: v.clone(),
+                api_key: None,
+            });
+            search.url = v;
+        }
+        if let Ok(v) = std::env::var("OB_SEARCH__API_KEY") {
+            let search = config.search.get_or_insert(SearchConfig {
+                url: "http://localhost:7700".to_string(),
+                api_key: Some(v.clone()),
+            });
+            search.api_key = Some(v);
+        }
         if let Ok(v) = std::env::var("OB_DATABASE__USERNAME") {
             config.database.username = Some(v);
         }
@@ -236,14 +307,12 @@ impl Config {
             config.security.rules_path = v;
         }
 
-        // Google OAuth from env
-        if let (Ok(id), Ok(secret)) = (
-            std::env::var("OB_AUTH__GOOGLE_CLIENT_ID"),
-            std::env::var("OB_AUTH__GOOGLE_CLIENT_SECRET"),
-        ) {
+        // Google OAuth from env. Client ID is sufficient for the current
+        // Google ID token verification flow used by mobile/native SDK login.
+        if let Ok(id) = std::env::var("OB_AUTH__GOOGLE_CLIENT_ID") {
             config.auth.google = Some(GoogleOAuthConfig {
                 client_id: id,
-                client_secret: secret,
+                client_secret: std::env::var("OB_AUTH__GOOGLE_CLIENT_SECRET").ok(),
             });
         }
 
@@ -283,7 +352,24 @@ impl Config {
             config.cluster.node_id = Some(v);
         }
 
+        // Secrets from environment variables (OB_SECRETS__KEY_NAME → secrets["key_name"])
+        for (key, val) in std::env::vars() {
+            if let Some(secret_key) = key.strip_prefix("OB_SECRETS__") {
+                config.secrets.values.insert(secret_key.to_lowercase(), val);
+            }
+        }
+
         Ok(config)
+    }
+
+    /// Convenience: get a secret by key.
+    pub fn secret(&self, key: &str) -> Option<&str> {
+        self.secrets.get(key)
+    }
+
+    /// Convenience: get a required secret or error.
+    pub fn require_secret(&self, key: &str) -> crate::Result<&str> {
+        self.secrets.require(key)
     }
 }
 
@@ -312,6 +398,8 @@ mod tests {
             "OB_CLUSTER__ENABLED",
             "OB_CLUSTER__NATS_URL",
             "OB_CLUSTER__NODE_ID",
+            "OB_SEARCH__URL",
+            "OB_SEARCH__API_KEY",
         ] {
             unsafe { std::env::remove_var(key) };
         }
@@ -369,6 +457,24 @@ mod tests {
         assert!(!cluster.enabled);
         assert_eq!(cluster.nats_url, "nats://localhost:4222");
         assert!(cluster.node_id.is_none());
+    }
+
+    #[test]
+    fn test_parse_search_section() {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            endpoint = "localhost:8000"
+            [search]
+            url = "http://meili:7700"
+            api_key = "masterKey"
+            "#,
+        )
+        .unwrap();
+
+        let search = config.search.expect("search config should parse");
+        assert_eq!(search.url, "http://meili:7700");
+        assert_eq!(search.api_key.as_deref(), Some("masterKey"));
     }
 
     #[test]
@@ -440,6 +546,29 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap();
         clear_all_ob_env_vars();
 
+        // -- OB_AUTH__GOOGLE_CLIENT_ID without secret --
+        unsafe { std::env::set_var("OB_AUTH__GOOGLE_CLIENT_ID", "google-web-client-id") };
+        let config = Config::load(None).unwrap();
+        let google = config
+            .auth
+            .google
+            .expect("google config should be created from client id");
+        assert_eq!(google.client_id, "google-web-client-id");
+        assert!(google.client_secret.is_none());
+        clear_all_ob_env_vars();
+
+        // -- OB_AUTH__GOOGLE_CLIENT_SECRET with client id --
+        unsafe { std::env::set_var("OB_AUTH__GOOGLE_CLIENT_ID", "google-web-client-id") };
+        unsafe { std::env::set_var("OB_AUTH__GOOGLE_CLIENT_SECRET", "google-secret") };
+        let config = Config::load(None).unwrap();
+        let google = config
+            .auth
+            .google
+            .expect("google config should include optional secret");
+        assert_eq!(google.client_id, "google-web-client-id");
+        assert_eq!(google.client_secret.as_deref(), Some("google-secret"));
+        clear_all_ob_env_vars();
+
         // -- OB_HOST --
         unsafe { std::env::set_var("OB_HOST", "10.0.0.1") };
         let config = Config::load(None).unwrap();
@@ -456,7 +585,12 @@ mod tests {
         unsafe { std::env::set_var("OB_PORT", "not_a_number") };
         let result = Config::load(None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("OB_PORT must be a number"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("OB_PORT must be a number")
+        );
         clear_all_ob_env_vars();
 
         // -- OB_DATABASE__ENDPOINT --
@@ -505,7 +639,12 @@ mod tests {
         unsafe { std::env::set_var("OB_AUTH__ACCESS_TOKEN_TTL_SECS", "abc") };
         let result = Config::load(None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid access token TTL"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid access token TTL")
+        );
         clear_all_ob_env_vars();
 
         // -- OB_AUTH__REFRESH_TOKEN_TTL_SECS (valid) --
@@ -518,7 +657,12 @@ mod tests {
         unsafe { std::env::set_var("OB_AUTH__REFRESH_TOKEN_TTL_SECS", "xyz") };
         let result = Config::load(None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid refresh token TTL"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid refresh token TTL")
+        );
         clear_all_ob_env_vars();
 
         // -- OB_SECURITY__RULES_PATH --
@@ -555,6 +699,24 @@ mod tests {
         unsafe { std::env::set_var("OB_CLUSTER__NODE_ID", "node-42") };
         let config = Config::load(None).unwrap();
         assert_eq!(config.cluster.node_id.as_deref(), Some("node-42"));
+        clear_all_ob_env_vars();
+
+        // -- OB_SEARCH__URL --
+        unsafe { std::env::set_var("OB_SEARCH__URL", "http://meili:7700") };
+        let config = Config::load(None).unwrap();
+        let search = config.search.expect("search config should be created");
+        assert_eq!(search.url, "http://meili:7700");
+        assert!(search.api_key.is_none());
+        clear_all_ob_env_vars();
+
+        // -- OB_SEARCH__API_KEY --
+        unsafe { std::env::set_var("OB_SEARCH__API_KEY", "masterKey") };
+        let config = Config::load(None).unwrap();
+        let search = config
+            .search
+            .expect("search config should be created from api key");
+        assert_eq!(search.url, "http://localhost:7700");
+        assert_eq!(search.api_key.as_deref(), Some("masterKey"));
         clear_all_ob_env_vars();
     }
 }
