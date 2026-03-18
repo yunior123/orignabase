@@ -7,6 +7,7 @@ pub mod addresses;
 pub mod admin;
 pub mod chat;
 pub mod coupons;
+pub mod geocoding;
 pub mod cron;
 pub mod digital;
 pub mod email;
@@ -39,6 +40,7 @@ pub struct HandlersState {
     pub http_client: reqwest::Client,
     pub stripe_client: Option<Arc<stripe::Client>>,
     pub stripe_base_url: String,
+    pub turnstile_secret_key: Option<String>,
 }
 
 impl HandlersState {
@@ -53,12 +55,15 @@ impl HandlersState {
             .map(|key| Arc::new(stripe::Client::new(key)));
         let stripe_base_url = "https://api.stripe.com/v1".to_string();
 
+        let turnstile_secret_key = config.secret("turnstile_secret_key");
+
         Self {
             config,
             db,
             http_client,
             stripe_client,
             stripe_base_url,
+            turnstile_secret_key,
         }
     }
 }
@@ -137,6 +142,7 @@ pub fn handlers_router(state: HandlersState) -> Router {
         .merge(chat::router(state.clone()))
         .merge(digital::router(state.clone()))
         .merge(coupons::router(state.clone()))
+        .merge(geocoding::router(state.clone()))
         .merge(admin::router(state.clone()))
         .merge(users::router(state.clone()))
         .merge(warehouses::router(state.clone()))
