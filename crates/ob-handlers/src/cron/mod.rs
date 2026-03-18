@@ -114,6 +114,62 @@ async fn stripe_provider_enabled(state: &HandlersState) -> bool {
         .unwrap_or(true)
 }
 
+/// Create a Stripe Transfer for seller payout.
+/// Returns the transfer ID if successful.
+async fn stripe_create_transfer(
+    state: &HandlersState,
+    seller_id: &str,
+    amount_cents: i64,
+    order_id: &str,
+) -> Result<String, String> {
+    let stripe_key = state
+        .config
+        .require_secret("stripe_secret_key")
+        .map_err(|e| e.to_string())?;
+
+    // Get seller's Stripe Connect account ID
+    let seller = state
+        .db
+        .get_document(collections::USERS, seller_id)
+        .await
+        .map_err(|e| format!("Seller not found: {}", e))?;
+
+    let stripe_account_id = seller
+        .get("stripeConnectAccountId")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Seller has no Stripe Connect account".to_string())?;
+
+    let form: Vec<(&str, String)> = vec![
+        ("amount", amount_cents.to_string()),
+        ("currency", "cad".to_string()),
+        ("destination", stripe_account_id.to_string()),
+        ("metadata[order_id]", order_id.to_string()),
+        ("metadata[seller_id]", seller_id.to_string()),
+    ];
+
+    let resp = state
+        .http_client
+        .post(format!("{}/transfers", state.stripe_base_url))
+        .basic_auth(&stripe_key, None::<&str>)
+        .header("Idempotency-Key", format!("{}-{}", order_id, seller_id))
+        .form(&form)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Stripe error: {}", body));
+    }
+
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    body.get("id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "No transfer ID in response".to_string())
+}
+
+
 // ---------------------------------------------------------------------------
 // Cron job: auto_capture_confirmed_receipts
 // ---------------------------------------------------------------------------
@@ -272,21 +328,48 @@ async fn run_auto_capture(state: &HandlersState) -> std::result::Result<(), Stri
                 )
                 .await;
 
-            // NOTE: Actual Stripe Transfer would happen here via stripe_client.
-            // For now, mark as completed (Stripe integration in payments module).
-            let _ = state
-                .db
-                .update_document(
-                    collections::PAYOUTS,
-                    &payout_id,
-                    json!({
-                        fields::STATUS: "completed",
-                        "payoutDate": Utc::now().to_rfc3339(),
-                    }),
-                )
-                .await;
+            // CRITICAL FIX: Actually create Stripe Transfer
+            let transfer_result = stripe_create_transfer(
+                state,
+                seller_id,
+                net_cents,
+                order_id,
+            )
+            .await;
 
-            success_count += 1;
+            match transfer_result {
+                Ok(transfer_id) => {
+                    let _ = state
+                        .db
+                        .update_document(
+                            collections::PAYOUTS,
+                            &payout_id,
+                            json!({
+                                fields::STATUS: "completed",
+                                "stripeTransferId": transfer_id,
+                                "payoutDate": Utc::now().to_rfc3339(),
+                            }),
+                        )
+                        .await;
+                    success_count += 1;
+                }
+                Err(e) => {
+                    warn!("Stripe transfer failed for seller {}: {}", seller_id, e);
+                    let _ = state
+                        .db
+                        .update_document(
+                            collections::PAYOUTS,
+                            &payout_id,
+                            json!({
+                                fields::STATUS: "failed",
+                                "failureReason": e,
+                                fields::UPDATED_AT: Utc::now().to_rfc3339(),
+                            }),
+                        )
+                        .await;
+                    failed_count += 1;
+                }
+            }
         }
 
         // Update order payout status

@@ -10,6 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::shared::schema::collections;
 use ob_database::DatabaseClient;
 
+const TRUSTED_PROXY_IP: &str = "127.0.0.1";
+
 /// A simple rate limiter for a specific endpoint.
 pub struct EndpointRateLimiter {
     limiter: Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
@@ -28,6 +30,35 @@ impl EndpointRateLimiter {
     pub fn check(&self) -> bool {
         self.limiter.check().is_ok()
     }
+}
+
+/// Extract client IP from request, respecting X-Forwarded-For only from trusted proxy.
+/// Only trusts X-Forwarded-For from Caddy reverse proxy at 127.0.0.1.
+/// For other sources, uses the peer/connection IP.
+pub fn extract_client_ip(
+    headers: &axum::http::HeaderMap,
+    socket_addr: std::net::SocketAddr,
+) -> String {
+    let peer_ip = socket_addr.ip();
+
+    // Only trust X-Forwarded-For from Caddy reverse proxy (127.0.0.1)
+    if peer_ip.to_string() == TRUSTED_PROXY_IP {
+        if let Some(xff) = headers.get("x-forwarded-for") {
+            if let Ok(xff_str) = xff.to_str() {
+                // Take first IP if multiple (CSV format)
+                if let Some(first_ip) = xff_str.split(',').next() {
+                    let ip = first_ip.trim();
+                    // Validate it's a valid IP address
+                    if ip.parse::<std::net::IpAddr>().is_ok() {
+                        return ip.to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    // Not from trusted proxy or invalid header → use peer IP
+    peer_ip.to_string()
 }
 
 /// Checks a database-backed rate limit by User ID and Action.
@@ -111,6 +142,57 @@ mod tests {
         let limiter = EndpointRateLimiter::new(0); // Should fallback to NonZeroU32::MIN (1)
         assert!(limiter.check());
         assert!(!limiter.check());
+    }
+
+    #[test]
+    fn test_extract_client_ip_from_trusted_proxy() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            axum::http::HeaderValue::from_static("203.0.113.42, 198.51.100.5"),
+        );
+        let socket_addr = "127.0.0.1:8080".parse().unwrap();
+
+        let ip = extract_client_ip(&headers, socket_addr);
+        assert_eq!(ip, "203.0.113.42");
+    }
+
+    #[test]
+    fn test_extract_client_ip_rejects_spoofed_header() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            axum::http::HeaderValue::from_static("203.0.113.42"),
+        );
+        // Request from non-trusted IP (not 127.0.0.1)
+        let socket_addr = "203.0.113.99:54321".parse().unwrap();
+
+        let ip = extract_client_ip(&headers, socket_addr);
+        // Should use peer IP, not the spoofed header
+        assert_eq!(ip, "203.0.113.99");
+    }
+
+    #[test]
+    fn test_extract_client_ip_invalid_header() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            axum::http::HeaderValue::from_static("not-an-ip"),
+        );
+        let socket_addr = "127.0.0.1:8080".parse().unwrap();
+
+        let ip = extract_client_ip(&headers, socket_addr);
+        // Should fall back to peer IP when header is invalid
+        assert_eq!(ip, "127.0.0.1");
+    }
+
+    #[test]
+    fn test_extract_client_ip_missing_header() {
+        let headers = axum::http::HeaderMap::new();
+        let socket_addr = "127.0.0.1:8080".parse().unwrap();
+
+        let ip = extract_client_ip(&headers, socket_addr);
+        assert_eq!(ip, "127.0.0.1");
     }
 
     #[tokio::test]

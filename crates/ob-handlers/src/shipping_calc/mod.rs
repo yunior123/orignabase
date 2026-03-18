@@ -58,6 +58,17 @@ const PERISHABLE_CROSS_PROVINCE: f64 = 5.0;
 const PERISHABLE_DISTANCE_THRESHOLD_KM: f64 = 200.0;
 const PERISHABLE_LONG_DISTANCE: f64 = 10.0;
 
+// Helper: Convert dollars to cents
+const fn dollars_to_cents(dollars: f64) -> i64 {
+    (dollars * 100.0) as i64
+}
+
+// Helper: Convert cents to dollars
+fn cents_to_dollars(cents: i64) -> f64 {
+    cents as f64 / 100.0
+}
+
+
 // ===========================================================================
 // Province adjacency & regions
 // ===========================================================================
@@ -173,8 +184,8 @@ fn default_speed() -> String {
 #[serde(rename_all = "camelCase")]
 pub struct CalculateShippingResponse {
     pub success: bool,
-    pub total_cost: f64,
-    pub breakdown: HashMap<String, f64>,
+    pub total_cost_cents: i64,
+    pub breakdown: HashMap<String, i64>,
 }
 
 // ===========================================================================
@@ -248,37 +259,37 @@ fn calculate_tiered_itemized(
     distance_km: f64,
     items: &[&ShippingItem],
     speed: &str,
-) -> (f64, HashMap<String, f64>) {
-    let base_cost = base_cost_for_distance(distance_km);
+) -> (i64, HashMap<String, i64>) {
+    let base_cost_cents = dollars_to_cents(base_cost_for_distance(distance_km));
     let multiplier = get_speed_multiplier(speed, distance_km);
     let mut breakdown = HashMap::new();
-    let mut total = 0.0;
+    let mut total_cents: i64 = 0;
     let mut first_handled = false;
 
     for item in items {
         let qty = item.quantity.max(1);
         let id = item_identifier(item);
 
-        let item_base = if !first_handled {
+        let item_base_cents = if !first_handled {
             first_handled = true;
-            base_cost + ((qty - 1).max(0) as f64 * base_cost * ADDITIONAL_ITEM_RATE)
+            (base_cost_cents as f64 + ((qty - 1).max(0) as f64 * base_cost_cents as f64 * ADDITIONAL_ITEM_RATE)).round() as i64
         } else {
-            qty as f64 * base_cost * ADDITIONAL_ITEM_RATE
+            (qty as f64 * base_cost_cents as f64 * ADDITIONAL_ITEM_RATE).round() as i64
         };
 
         let ew = effective_weight(item);
-        let weight_surcharge = if ew > WEIGHT_SURCHARGE_THRESHOLD_KG {
-            (ew - WEIGHT_SURCHARGE_THRESHOLD_KG) * WEIGHT_SURCHARGE_PER_KG * qty as f64
+        let weight_surcharge_cents = if ew > WEIGHT_SURCHARGE_THRESHOLD_KG {
+            ((ew - WEIGHT_SURCHARGE_THRESHOLD_KG) * WEIGHT_SURCHARGE_PER_KG * qty as f64 * 100.0).round() as i64
         } else {
-            0.0
+            0
         };
 
-        let item_total = (item_base + weight_surcharge) * multiplier;
-        breakdown.insert(id, item_total);
-        total += item_total;
+        let item_total_cents = ((item_base_cents as f64 + weight_surcharge_cents as f64) * multiplier).round() as i64;
+        breakdown.insert(id, item_total_cents);
+        total_cents += item_total_cents;
     }
 
-    (total, breakdown)
+    (total_cents, breakdown)
 }
 
 /// Fallback province-based calculation.
@@ -287,8 +298,8 @@ fn calculate_fallback_itemized(
     seller_province: &str,
     buyer_province: &str,
     speed: &str,
-) -> (f64, HashMap<String, f64>) {
-    let base_cost = if seller_province == buyer_province {
+) -> (i64, HashMap<String, i64>) {
+    let base_cost_cents = dollars_to_cents(if seller_province == buyer_province {
         FALLBACK_SAME_PROVINCE
     } else if are_adjacent(seller_province, buyer_province) {
         FALLBACK_ADJACENT
@@ -296,7 +307,7 @@ fn calculate_fallback_itemized(
         FALLBACK_SAME_REGION
     } else {
         NATIONAL_CEILING
-    };
+    });
 
     let multiplier = if speed == "express" {
         EXPRESS_REGIONAL
@@ -305,26 +316,26 @@ fn calculate_fallback_itemized(
     };
 
     let mut breakdown = HashMap::new();
-    let mut total = 0.0;
+    let mut total_cents: i64 = 0;
     let mut first_handled = false;
 
     for item in items {
         let qty = item.quantity.max(1);
         let id = item_identifier(item);
 
-        let item_cost = if !first_handled {
+        let item_cost_cents = if !first_handled {
             first_handled = true;
-            base_cost + ((qty - 1).max(0) as f64 * base_cost * ADDITIONAL_ITEM_RATE)
+            (base_cost_cents as f64 + ((qty - 1).max(0) as f64 * base_cost_cents as f64 * ADDITIONAL_ITEM_RATE)).round() as i64
         } else {
-            qty as f64 * base_cost * ADDITIONAL_ITEM_RATE
+            (qty as f64 * base_cost_cents as f64 * ADDITIONAL_ITEM_RATE).round() as i64
         };
 
-        let item_total = item_cost * multiplier;
-        breakdown.insert(id, item_total);
-        total += item_total;
+        let item_total_cents = ((item_cost_cents as f64) * multiplier).round() as i64;
+        breakdown.insert(id, item_total_cents);
+        total_cents += item_total_cents;
     }
 
-    (total, breakdown)
+    (total_cents, breakdown)
 }
 
 /// Call Geoapify route matrix API to get driving distance between two points.
@@ -393,8 +404,8 @@ async fn calculate_shipping(
         by_seller.entry(sid).or_default().push(item);
     }
 
-    let mut total_shipping = 0.0;
-    let mut overall_breakdown: HashMap<String, f64> = HashMap::new();
+    let mut total_shipping: i64 = 0;
+    let mut overall_breakdown: HashMap<String, i64> = HashMap::new();
 
     // Check for free shipping threshold
     // (calculated after all sellers, applied at the end)
@@ -437,7 +448,7 @@ async fn calculate_shipping(
         let has_perishable = chargeable
             .iter()
             .any(|it| it.is_perishable.unwrap_or(false));
-        let mut perishable_surcharge = 0.0;
+        let mut perishable_surcharge: i64 = 0;
         // CRITICAL FIX: Block perishables from cross-province shipping entirely
         if has_perishable && seller_province != buyer_province {
             return Err(ob_core::Error::Validation(
@@ -488,7 +499,7 @@ async fn calculate_shipping(
                         calculate_tiered_itemized(distance_km, &chargeable, speed);
 
                     // Add perishable surcharge to first perishable item
-                    if perishable_surcharge > 0.0 {
+                    if perishable_surcharge > 0 {
                         for item in &chargeable {
                             if item.is_perishable.unwrap_or(false) {
                                 let id = item_identifier(item);
@@ -519,7 +530,7 @@ async fn calculate_shipping(
         let (mut seller_cost, mut seller_breakdown) =
             calculate_fallback_itemized(&chargeable, seller_province, buyer_province, speed);
 
-        if perishable_surcharge > 0.0 {
+        if perishable_surcharge > 0 {
             for item in &chargeable {
                 if item.is_perishable.unwrap_or(false) {
                     let id = item_identifier(item);
@@ -539,17 +550,14 @@ async fn calculate_shipping(
     if let Some(subtotal) = req.subtotal_cents {
         const FREE_SHIPPING_THRESHOLD_CENTS: i64 = 7500; // $75 CAD
         if subtotal >= FREE_SHIPPING_THRESHOLD_CENTS {
-            final_shipping = 0.0; // Free shipping on orders >= $75
+            final_shipping = 0; // Free shipping on orders >= $75
         }
     }
 
     Ok(Json(CalculateShippingResponse {
         success: true,
-        total_cost: (final_shipping * 100.0).round() / 100.0,
-        breakdown: overall_breakdown
-            .into_iter()
-            .map(|(k, v)| (k, (v * 100.0).round() / 100.0))
-            .collect(),
+        total_cost_cents: final_shipping,
+        breakdown: overall_breakdown,
     }))
 }
 
