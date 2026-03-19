@@ -1,11 +1,9 @@
+use crate::{fingerprint_public_key, KeyRotationManager};
 use chrono::Utc;
-use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use ob_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-
-pub mod key_rotation;
-pub use key_rotation::{KeyRotationManager, fingerprint_public_key};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
@@ -397,11 +395,9 @@ fn cleanup_old_backups(keys_dir: &Path, keep_count: usize) -> Result<()> {
             entry.ok().and_then(|e| {
                 let path = e.path();
                 if path.extension().map_or(false, |ext| ext == "bak") {
-                    e.metadata().ok().and_then(|meta| {
-                        meta.modified()
-                            .ok()
-                            .map(|modified| (path, modified))
-                    })
+                    e.metadata()
+                        .ok()
+                        .and_then(|meta| meta.modified().ok().map(|modified| (path, modified)))
                 } else {
                     None
                 }
@@ -495,240 +491,218 @@ mod tests {
     }
 }
 
-    #[test]
-    fn test_custom_claims_serialization() {
-        let keys = test_keys();
-        
-        // Create claims with custom claims
-        let custom = serde_json::json!({
-            "role": "seller",
-            "store_id": "store_123",
-            "plan": "pro"
-        });
-        
-        let token = issue_access_token_with_claims(
-            "user123",
-            &[],
-            &keys,
-            3600,
-            true,
-            false,
-            custom.clone(),
-        )
-        .unwrap();
-        
+#[test]
+fn test_custom_claims_serialization() {
+    let keys = test_keys();
+
+    // Create claims with custom claims
+    let custom = serde_json::json!({
+        "role": "seller",
+        "store_id": "store_123",
+        "plan": "pro"
+    });
+
+    let token =
+        issue_access_token_with_claims("user123", &[], &keys, 3600, true, false, custom.clone())
+            .unwrap();
+
+    let claims = verify_token(&token, &keys).unwrap();
+    assert_eq!(claims.custom_claims, custom);
+}
+
+#[test]
+fn test_custom_claims_null() {
+    let keys = test_keys();
+    let token = issue_access_token("user123", &[], &keys, 3600, false).unwrap();
+    let claims = verify_token(&token, &keys).unwrap();
+    assert_eq!(claims.custom_claims, serde_json::Value::Null);
+}
+
+#[test]
+fn test_mfa_required_flag() {
+    let keys = test_keys();
+    let now = chrono::Utc::now().timestamp();
+    let claims = Claims {
+        sub: "user123".to_string(),
+        iat: now,
+        exp: now + 3600,
+        roles: vec![],
+        typ: "access".to_string(),
+        email_verified: false,
+        mfa_required: true,
+        custom_claims: serde_json::Value::Null,
+    };
+
+    let token = jsonwebtoken::encode(&keys.header(), &claims, &keys.encoding_key()).unwrap();
+
+    let decoded = verify_token(&token, &keys).unwrap();
+    assert!(decoded.mfa_required);
+    assert!(!decoded.email_verified);
+}
+
+#[test]
+fn test_email_verified_flag() {
+    let keys = test_keys();
+    let token = issue_access_token("user123", &[], &keys, 3600, true).unwrap();
+    let claims = verify_token(&token, &keys).unwrap();
+    assert!(claims.email_verified);
+}
+
+#[test]
+fn test_multiple_roles() {
+    let keys = test_keys();
+    let roles = vec![
+        "user".to_string(),
+        "seller".to_string(),
+        "admin".to_string(),
+    ];
+
+    let token = issue_access_token("user123", &roles, &keys, 3600, false).unwrap();
+    let claims = verify_token(&token, &keys).unwrap();
+
+    assert_eq!(claims.roles.len(), 3);
+    assert!(claims.roles.contains(&"seller".to_string()));
+    assert!(claims.roles.contains(&"admin".to_string()));
+}
+
+#[test]
+fn test_access_token_type() {
+    let keys = test_keys();
+    let token = issue_access_token("user123", &[], &keys, 3600, false).unwrap();
+    let claims = verify_token(&token, &keys).unwrap();
+    assert_eq!(claims.typ, "access");
+}
+
+#[test]
+fn test_refresh_token_type() {
+    let keys = test_keys();
+    let token = issue_refresh_token("user123", &keys, 604800).unwrap();
+    let claims = verify_token(&token, &keys).unwrap();
+    assert_eq!(claims.typ, "refresh");
+}
+
+#[test]
+fn test_token_with_very_long_ttl() {
+    let keys = test_keys();
+    let ttl_secs = 30 * 24 * 60 * 60; // 30 days
+    let token = issue_access_token("user123", &[], &keys, ttl_secs, false).unwrap();
+    let claims = verify_token(&token, &keys).unwrap();
+
+    // Verify exp is roughly 30 days in future
+    let now = chrono::Utc::now().timestamp();
+    let diff = claims.exp - now;
+    assert!(diff > ttl_secs as i64 - 10); // Allow 10 sec variance
+    assert!(diff <= ttl_secs as i64 + 10);
+}
+
+#[test]
+fn test_token_iat_is_recent() {
+    let keys = test_keys();
+    let token = issue_access_token("user123", &[], &keys, 3600, false).unwrap();
+    let claims = verify_token(&token, &keys).unwrap();
+
+    let now = chrono::Utc::now().timestamp();
+    let age = now - claims.iat;
+    assert!(age >= 0 && age <= 5); // Issued within last 5 seconds
+}
+
+#[test]
+fn test_hs256_algorithm_hs256_keys() {
+    let keys = JwtKeys::from_secret("test_secret_hmac");
+    let token = issue_access_token("user123", &[], &keys, 3600, false).unwrap();
+    let claims = verify_token(&token, &keys).unwrap();
+    assert_eq!(claims.sub, "user123");
+}
+
+#[test]
+fn test_malformed_token_missing_signature() {
+    let keys = test_keys();
+    let malformed = "REDACTED_SECRET.eyJzdWIiOiJ1c2VyMTIzIiwiaWF0IjoxNjk4NTAwMDAwLCJleHAiOjE2OTg1MDM2MDB9";
+    let result = verify_token(malformed, &keys);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_malformed_token_invalid_base64() {
+    let keys = test_keys();
+    let malformed = "not.valid.base64!!!";
+    let result = verify_token(malformed, &keys);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_token_empty_roles() {
+    let keys = test_keys();
+    let token = issue_access_token("user123", &[], &keys, 3600, false).unwrap();
+    let claims = verify_token(&token, &keys).unwrap();
+    assert!(claims.roles.is_empty());
+}
+
+#[test]
+fn test_user_id_preserved() {
+    let keys = test_keys();
+    let user_ids = vec!["user:abc123", "users:xyz789", "admin:super"];
+
+    for uid in user_ids {
+        let token = issue_access_token(uid, &[], &keys, 3600, false).unwrap();
         let claims = verify_token(&token, &keys).unwrap();
-        assert_eq!(claims.custom_claims, custom);
+        assert_eq!(claims.sub, uid);
     }
+}
 
-    #[test]
-    fn test_custom_claims_null() {
-        let keys = test_keys();
-        let token = issue_access_token("user123", &[], &keys, 3600, false).unwrap();
-        let claims = verify_token(&token, &keys).unwrap();
-        assert_eq!(claims.custom_claims, serde_json::Value::Null);
-    }
+#[test]
+fn test_expiry_edge_case_just_expired() {
+    let keys = test_keys();
+    let now = chrono::Utc::now().timestamp();
 
-    #[test]
-    fn test_mfa_required_flag() {
-        let keys = test_keys();
-        let now = chrono::Utc::now().timestamp();
-        let claims = Claims {
-            sub: "user123".to_string(),
-            iat: now,
-            exp: now + 3600,
-            roles: vec![],
-            typ: "access".to_string(),
-            email_verified: false,
-            mfa_required: true,
-            custom_claims: serde_json::Value::Null,
-        };
-        
-        let token = jsonwebtoken::encode(
-            &keys.header(),
-            &claims,
-            &keys.encoding_key(),
-        )
-        .unwrap();
-        
-        let decoded = verify_token(&token, &keys).unwrap();
-        assert!(decoded.mfa_required);
-        assert!(!decoded.email_verified);
-    }
+    // Token that expired 1 second ago
+    let claims = Claims {
+        sub: "user123".to_string(),
+        iat: now - 3600,
+        exp: now - 1,
+        roles: vec![],
+        typ: "access".to_string(),
+        email_verified: false,
+        mfa_required: false,
+        custom_claims: serde_json::Value::Null,
+    };
 
-    #[test]
-    fn test_email_verified_flag() {
-        let keys = test_keys();
-        let token = issue_access_token("user123", &[], &keys, 3600, true).unwrap();
-        let claims = verify_token(&token, &keys).unwrap();
-        assert!(claims.email_verified);
-    }
+    let token = jsonwebtoken::encode(&keys.header(), &claims, &keys.encoding_key()).unwrap();
 
-    #[test]
-    fn test_multiple_roles() {
-        let keys = test_keys();
-        let roles = vec![
-            "user".to_string(),
-            "seller".to_string(),
-            "admin".to_string(),
-        ];
-        
-        let token = issue_access_token("user123", &roles, &keys, 3600, false).unwrap();
-        let claims = verify_token(&token, &keys).unwrap();
-        
-        assert_eq!(claims.roles.len(), 3);
-        assert!(claims.roles.contains(&"seller".to_string()));
-        assert!(claims.roles.contains(&"admin".to_string()));
-    }
+    let result = verify_token(&token, &keys);
+    assert!(result.is_err()); // Should be rejected
+}
 
-    #[test]
-    fn test_access_token_type() {
-        let keys = test_keys();
-        let token = issue_access_token("user123", &[], &keys, 3600, false).unwrap();
-        let claims = verify_token(&token, &keys).unwrap();
-        assert_eq!(claims.typ, "access");
-    }
+#[test]
+fn test_expiry_edge_case_just_valid() {
+    let keys = test_keys();
+    let now = chrono::Utc::now().timestamp();
 
-    #[test]
-    fn test_refresh_token_type() {
-        let keys = test_keys();
-        let token = issue_refresh_token("user123", &keys, 604800).unwrap();
-        let claims = verify_token(&token, &keys).unwrap();
-        assert_eq!(claims.typ, "refresh");
-    }
+    // Token expiring in 2 seconds (should still be valid now)
+    let claims = Claims {
+        sub: "user123".to_string(),
+        iat: now,
+        exp: now + 2,
+        roles: vec![],
+        typ: "access".to_string(),
+        email_verified: false,
+        mfa_required: false,
+        custom_claims: serde_json::Value::Null,
+    };
 
-    #[test]
-    fn test_token_with_very_long_ttl() {
-        let keys = test_keys();
-        let ttl_secs = 30 * 24 * 60 * 60; // 30 days
-        let token = issue_access_token("user123", &[], &keys, ttl_secs, false).unwrap();
-        let claims = verify_token(&token, &keys).unwrap();
-        
-        // Verify exp is roughly 30 days in future
-        let now = chrono::Utc::now().timestamp();
-        let diff = claims.exp - now;
-        assert!(diff > ttl_secs as i64 - 10); // Allow 10 sec variance
-        assert!(diff <= ttl_secs as i64 + 10);
-    }
+    let token = jsonwebtoken::encode(&keys.header(), &claims, &keys.encoding_key()).unwrap();
 
-    #[test]
-    fn test_token_iat_is_recent() {
-        let keys = test_keys();
-        let token = issue_access_token("user123", &[], &keys, 3600, false).unwrap();
-        let claims = verify_token(&token, &keys).unwrap();
-        
-        let now = chrono::Utc::now().timestamp();
-        let age = now - claims.iat;
-        assert!(age >= 0 && age <= 5); // Issued within last 5 seconds
-    }
+    let result = verify_token(&token, &keys);
+    assert!(result.is_ok()); // Should be valid
+}
 
-    #[test]
-    fn test_hs256_algorithm_hs256_keys() {
-        let keys = JwtKeys::from_secret("test_secret_hmac");
-        let token = issue_access_token("user123", &[], &keys, 3600, false).unwrap();
-        let claims = verify_token(&token, &keys).unwrap();
-        assert_eq!(claims.sub, "user123");
-    }
+#[test]
+fn test_refresh_token_has_no_roles() {
+    let keys = test_keys();
+    let token = issue_refresh_token("user123", &keys, 604800).unwrap();
+    let claims = verify_token(&token, &keys).unwrap();
 
-    #[test]
-    fn test_malformed_token_missing_signature() {
-        let keys = test_keys();
-        let malformed = "REDACTED_SECRET.eyJzdWIiOiJ1c2VyMTIzIiwiaWF0IjoxNjk4NTAwMDAwLCJleHAiOjE2OTg1MDM2MDB9";
-        let result = verify_token(malformed, &keys);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_malformed_token_invalid_base64() {
-        let keys = test_keys();
-        let malformed = "not.valid.base64!!!";
-        let result = verify_token(malformed, &keys);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_token_empty_roles() {
-        let keys = test_keys();
-        let token = issue_access_token("user123", &[], &keys, 3600, false).unwrap();
-        let claims = verify_token(&token, &keys).unwrap();
-        assert!(claims.roles.is_empty());
-    }
-
-    #[test]
-    fn test_user_id_preserved() {
-        let keys = test_keys();
-        let user_ids = vec!["user:abc123", "users:xyz789", "admin:super"];
-        
-        for uid in user_ids {
-            let token = issue_access_token(uid, &[], &keys, 3600, false).unwrap();
-            let claims = verify_token(&token, &keys).unwrap();
-            assert_eq!(claims.sub, uid);
-        }
-    }
-
-    #[test]
-    fn test_expiry_edge_case_just_expired() {
-        let keys = test_keys();
-        let now = chrono::Utc::now().timestamp();
-        
-        // Token that expired 1 second ago
-        let claims = Claims {
-            sub: "user123".to_string(),
-            iat: now - 3600,
-            exp: now - 1,
-            roles: vec![],
-            typ: "access".to_string(),
-            email_verified: false,
-            mfa_required: false,
-            custom_claims: serde_json::Value::Null,
-        };
-        
-        let token = jsonwebtoken::encode(
-            &keys.header(),
-            &claims,
-            &keys.encoding_key(),
-        )
-        .unwrap();
-        
-        let result = verify_token(&token, &keys);
-        assert!(result.is_err()); // Should be rejected
-    }
-
-    #[test]
-    fn test_expiry_edge_case_just_valid() {
-        let keys = test_keys();
-        let now = chrono::Utc::now().timestamp();
-        
-        // Token expiring in 2 seconds (should still be valid now)
-        let claims = Claims {
-            sub: "user123".to_string(),
-            iat: now,
-            exp: now + 2,
-            roles: vec![],
-            typ: "access".to_string(),
-            email_verified: false,
-            mfa_required: false,
-            custom_claims: serde_json::Value::Null,
-        };
-        
-        let token = jsonwebtoken::encode(
-            &keys.header(),
-            &claims,
-            &keys.encoding_key(),
-        )
-        .unwrap();
-        
-        let result = verify_token(&token, &keys);
-        assert!(result.is_ok()); // Should be valid
-    }
-
-    #[test]
-    fn test_refresh_token_has_no_roles() {
-        let keys = test_keys();
-        let token = issue_refresh_token("user123", &keys, 604800).unwrap();
-        let claims = verify_token(&token, &keys).unwrap();
-        
-        assert!(claims.roles.is_empty());
-        assert!(!claims.email_verified);
-        assert!(!claims.mfa_required);
-    }
+    assert!(claims.roles.is_empty());
+    assert!(!claims.email_verified);
+    assert!(!claims.mfa_required);
+}

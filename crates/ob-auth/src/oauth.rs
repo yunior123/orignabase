@@ -1,6 +1,6 @@
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use ob_core::{Error, Result};
 use serde::{Deserialize, Serialize};
-use jsonwebtoken::{decode_header, Algorithm, DecodingKey, Validation, decode};
 
 /// User info extracted from an OAuth provider after token verification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,10 +171,11 @@ async fn fetch_jwks(url: &str, http_client: &reqwest::Client) -> Result<serde_js
 
 /// CRITICAL FIX: Extract kid (key ID) from JWT header
 fn get_kid_from_token(token: &str) -> Result<String> {
-    let header = decode_header(token)
-        .map_err(|_| Error::Auth("Failed to decode JWT header".into()))?;
-    
-    header.kid
+    let header =
+        decode_header(token).map_err(|_| Error::Auth("Failed to decode JWT header".into()))?;
+
+    header
+        .kid
         .ok_or_else(|| Error::Auth("JWT missing 'kid' header".into()))
 }
 
@@ -192,10 +193,12 @@ fn find_public_key_in_jwks(jwks: &serde_json::Value, kid: &str) -> Result<String
                 .and_then(|certs| certs.first())
                 .and_then(|cert| cert.as_str())
                 .ok_or_else(|| Error::Auth("Certificate not found in JWKS".into()))
-                .map(|cert| format!(
-                    "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----",
-                    cert
-                ))
+                .map(|cert| {
+                    format!(
+                        "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----",
+                        cert
+                    )
+                });
         }
     }
 
@@ -208,14 +211,11 @@ async fn verify_apple_id_token_with_signature(
     http_client: &reqwest::Client,
 ) -> Result<AppleTokenInfo> {
     // Fetch Apple's JWKS
-    let jwks = fetch_jwks(
-        "https://appleid.apple.com/auth/keys",
-        http_client,
-    ).await?;
+    let jwks = fetch_jwks("https://appleid.apple.com/auth/keys", http_client).await?;
 
     // Extract kid from JWT header
     let kid = get_kid_from_token(id_token)?;
-    
+
     // Find matching public key in JWKS
     let cert_pem = find_public_key_in_jwks(&jwks, &kid)?;
 
@@ -225,12 +225,9 @@ async fn verify_apple_id_token_with_signature(
 
     // Verify JWT signature with ES256 algorithm
     let validation = Validation::new(Algorithm::ES256);
-    
-    let token_data = decode::<AppleTokenInfo>(
-        id_token,
-        &decoding_key,
-        &validation,
-    ).map_err(|e| Error::Auth(format!("JWT verification failed: {e}")))?;
+
+    let token_data = decode::<AppleTokenInfo>(id_token, &decoding_key, &validation)
+        .map_err(|e| Error::Auth(format!("JWT verification failed: {e}")))?;
 
     let claims = token_data.claims;
 
@@ -316,7 +313,7 @@ async fn verify_oidc_id_token_with_signature(
 
     // Extract kid from JWT header
     let kid = get_kid_from_token(id_token)?;
-    
+
     // Find matching public key in JWKS
     let cert_pem = find_public_key_in_jwks(&jwks, &kid)?;
 
@@ -327,16 +324,13 @@ async fn verify_oidc_id_token_with_signature(
 
     // Verify JWT signature (try RS256 first, then ES256)
     let validation = Validation::new(Algorithm::RS256);
-    
-    let token_data = decode::<OidcTokenInfo>(
-        id_token,
-        &decoding_key,
-        &validation,
-    ).or_else(|_| {
-        let validation_ec = Validation::new(Algorithm::ES256);
-        decode::<OidcTokenInfo>(id_token, &decoding_key, &validation_ec)
-    })
-    .map_err(|e| Error::Auth(format!("JWT verification failed: {e}")))?;
+
+    let token_data = decode::<OidcTokenInfo>(id_token, &decoding_key, &validation)
+        .or_else(|_| {
+            let validation_ec = Validation::new(Algorithm::ES256);
+            decode::<OidcTokenInfo>(id_token, &decoding_key, &validation_ec)
+        })
+        .map_err(|e| Error::Auth(format!("JWT verification failed: {e}")))?;
 
     let claims = token_data.claims;
 
@@ -407,7 +401,7 @@ pub async fn exchange_oidc_authorization_code(
 // ── Utilities ──
 
 /// Base64 URL decode with padding
-fn base64_decode(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
+fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, base64::DecodeError> {
     use base64::prelude::*;
     let mut input = input.to_string();
     // Add padding
@@ -455,4 +449,87 @@ mod tests {
         let claims: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
         assert_eq!(claims["sub"], "1234567890");
     }
+}
+
+/// Takes team_id, key_id, service_id (client_id), and private_key (p8 format).
+pub fn generate_apple_client_secret(
+    team_id: &str,
+    key_id: &str,
+    service_id: &str,
+    private_key: &str,
+) -> Result<String> {
+    use chrono::Utc;
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct AppleClientSecretClaims {
+        iss: String, // team_id
+        iat: i64,    // issued at
+        exp: i64,    // expiration (6 months)
+        aud: String, // "https://appleid.apple.com"
+        sub: String, // service_id (client_id)
+    }
+
+    let now = Utc::now().timestamp();
+    let claims = AppleClientSecretClaims {
+        iss: team_id.to_string(),
+        iat: now,
+        exp: now + (180 * 24 * 60 * 60), // 6 months
+        aud: "https://appleid.apple.com".to_string(),
+        sub: service_id.to_string(),
+    };
+
+    let encoding_key = EncodingKey::from_ec_pem(private_key.as_bytes())
+        .map_err(|e| Error::Auth(format!("Invalid Apple private key: {e}")))?;
+
+    let header = Header::new(Algorithm::ES256);
+    encode(&header, &claims, &encoding_key)
+        .map_err(|e| Error::Auth(format!("Failed to generate client secret: {e}")))
+}
+
+/// Verify Apple authorization code and extract user info.
+/// Note: redirect_uri is hardcoded to https://orignagta.ca/auth/apple/callback for now.
+pub async fn verify_apple_auth_code(
+    authorization_code: &str,
+    service_id: &str,
+    client_secret: &str,
+) -> Result<OAuthUserInfo> {
+    let http_client = reqwest::Client::new();
+    let redirect_uri = "https://orignagta.ca/auth/apple/callback";
+
+    // Exchange the auth_code for an ID token
+    exchange_apple_authorization_code(
+        &http_client,
+        authorization_code,
+        service_id,
+        client_secret,
+        redirect_uri,
+    )
+    .await
+}
+
+/// Verify OIDC access token and extract user info.
+pub async fn verify_oidc_token(access_token: &str, issuer_url: &str) -> Result<OAuthUserInfo> {
+    let http_client = reqwest::Client::new();
+
+    // Construct the token endpoint from issuer URL
+    let token_endpoint = format!("{}/token", issuer_url);
+
+    // For generic OIDC, we treat the access_token as an authorization code for token exchange
+    // This is a simplification - in reality you'd need client_id, client_secret, and redirect_uri
+    // For now, exchange using dummy values (this should be improved)
+    let client_id = "origna-gta";
+    let client_secret = "";
+    let redirect_uri = "https://orignagta.ca/auth/oidc/callback";
+
+    exchange_oidc_authorization_code(
+        &http_client,
+        &token_endpoint,
+        access_token,
+        client_id,
+        client_secret,
+        redirect_uri,
+    )
+    .await
 }

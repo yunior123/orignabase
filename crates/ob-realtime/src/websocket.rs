@@ -1,5 +1,4 @@
 use crate::registry::{RealtimeMessage, Subscription, SubscriptionRegistry};
-use std::sync::Arc;
 use axum::{
     extract::{
         Query, State, WebSocketUpgrade,
@@ -182,11 +181,17 @@ async fn handle_socket(socket: WebSocket, state: RealtimeState, user_id: String)
                         document_id,
                     }) => {
                         // HIGH FIX: Enforce subscription limit per connection
-                        let sub_count = state.registry.connection_subscription_count(&connection_id);
+                        let sub_count =
+                            state.registry.connection_subscription_count(&connection_id);
                         if sub_count >= MAX_SUBS_PER_CONNECTION {
-                            let _ = srv_tx.send(ServerMessage::Error {
-                                message: format!("Max subscriptions ({}) reached", MAX_SUBS_PER_CONNECTION),
-                            }).await;
+                            let _ = srv_tx
+                                .send(ServerMessage::Error {
+                                    message: format!(
+                                        "Max subscriptions ({}) reached",
+                                        MAX_SUBS_PER_CONNECTION
+                                    ),
+                                })
+                                .await;
                             continue;
                         }
 
@@ -207,7 +212,9 @@ async fn handle_socket(socket: WebSocket, state: RealtimeState, user_id: String)
                     }
                     Ok(ClientMessage::Presence { metadata }) => {
                         // MEDIUM FIX: Use authenticated user_id from JWT, NOT from client message
-                        state.registry.set_presence(&user_id, &connection_id, metadata);
+                        state
+                            .registry
+                            .set_presence(&user_id, &connection_id, metadata);
                         // Send current online users to the client
                         let online = state.registry.get_online_users();
                         let _ = srv_tx.send(ServerMessage::PresenceUpdate { online }).await;

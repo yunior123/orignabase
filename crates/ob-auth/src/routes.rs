@@ -1058,7 +1058,9 @@ pub async fn reset_password(
     // Check if token was already used (prevent reuse)
     let token_used = user["reset_token_used"].as_bool().unwrap_or(false);
     if token_used {
-        return Err(Error::Auth("This reset token has already been used. Request a new password reset.".into()));
+        return Err(Error::Auth(
+            "This reset token has already been used. Request a new password reset.".into(),
+        ));
     }
 
     // Hash new password and update
@@ -1364,24 +1366,28 @@ pub async fn mfa_challenge(
     // CRITICAL FIX: Rate limit TOTP verification attempts to prevent brute force
     // Max 5 attempts per 15 minutes per user
     let user_id = &claims.sub;
-    let rate_limit_result = crate::rate_limiter::check_rate_limit(
+    let rate_limit_result = crate::rate_limit::check_rate_limit(
         &state.db,
         user_id,
         "mfa_attempt",
         5,
         900, // 15 minutes in seconds
-    ).await;
-    
+    )
+    .await;
+
     if let Err(e) = rate_limit_result {
         // Lock MFA after exceeded attempts
-        let _ = state.db.update_document(
-            "users",
-            user_id,
-            json!({
-                "mfa_locked": true,
-                "mfa_locked_at": chrono::Utc::now().to_rfc3339(),
-            }),
-        ).await;
+        let _ = state
+            .db
+            .update_document(
+                "users",
+                user_id,
+                json!({
+                    "mfa_locked": true,
+                    "mfa_locked_at": chrono::Utc::now().to_rfc3339(),
+                }),
+            )
+            .await;
         return Err(e);
     }
 
@@ -1829,7 +1835,6 @@ pub async fn admin_delete_user(
     State(state): State<AuthState>,
     Extension(auth): Extension<AuthContext>,
     axum::extract::Path(path): axum::extract::Path<AdminGetUserPath>,
-    audit_log_enabled: Option<bool>,
 ) -> Result<Json<serde_json::Value>> {
     require_admin(&auth)?;
 
@@ -1846,21 +1851,36 @@ pub async fn admin_delete_user(
         // Addresses
         ("DELETE FROM addresses WHERE user_id = $uid", "user_id"),
         // Buyer addresses
-        ("DELETE FROM buyer_addresses WHERE user_id = $uid", "user_id"),
+        (
+            "DELETE FROM buyer_addresses WHERE user_id = $uid",
+            "user_id",
+        ),
         // Seller profiles
-        ("DELETE FROM seller_profiles WHERE user_id = $uid", "user_id"),
+        (
+            "DELETE FROM seller_profiles WHERE user_id = $uid",
+            "user_id",
+        ),
         // Cart items
         ("DELETE FROM cart WHERE user_id = $uid", "user_id"),
         // Products (if seller)
         ("DELETE FROM products WHERE seller_id = $uid", "seller_id"),
         // Return requests (as buyer)
-        ("DELETE FROM return_requests WHERE buyer_id = $uid", "buyer_id"),
+        (
+            "DELETE FROM return_requests WHERE buyer_id = $uid",
+            "buyer_id",
+        ),
         // Return requests (as seller)
-        ("DELETE FROM return_requests WHERE seller_id = $uid", "seller_id"),
+        (
+            "DELETE FROM return_requests WHERE seller_id = $uid",
+            "seller_id",
+        ),
         // Payouts
         ("DELETE FROM payouts WHERE seller_id = $uid", "seller_id"),
         // FCM tokens
-        ("DELETE FROM user_fcm_tokens WHERE user_id = $uid", "user_id"),
+        (
+            "DELETE FROM user_fcm_tokens WHERE user_id = $uid",
+            "user_id",
+        ),
         // Chat rooms (owner)
         ("DELETE FROM chat_rooms WHERE owner_id = $uid", "owner_id"),
         // Chat messages
@@ -1868,11 +1888,20 @@ pub async fn admin_delete_user(
         // Coupons created by seller
         ("DELETE FROM coupons WHERE seller_id = $uid", "seller_id"),
         // Product questions
-        ("DELETE FROM product_questions WHERE user_id = $uid", "user_id"),
+        (
+            "DELETE FROM product_questions WHERE user_id = $uid",
+            "user_id",
+        ),
         // Notification preferences
-        ("DELETE FROM notification_prefs WHERE user_id = $uid", "user_id"),
+        (
+            "DELETE FROM notification_prefs WHERE user_id = $uid",
+            "user_id",
+        ),
         // User reviews
-        ("DELETE FROM reviews WHERE user_id = $uid OR seller_id = $uid", "user_id or seller_id"),
+        (
+            "DELETE FROM reviews WHERE user_id = $uid OR seller_id = $uid",
+            "user_id or seller_id",
+        ),
         // Wishlist
         ("DELETE FROM wishlist WHERE user_id = $uid", "user_id"),
     ];
@@ -1884,7 +1913,10 @@ pub async fn admin_delete_user(
             .query_bind(query, json!({ "uid": user_id }))
             .await
             .map_err(|e| {
-                eprintln!("Warning: Failed to delete related data for {}: {}", user_id, e);
+                eprintln!(
+                    "Warning: Failed to delete related data for {}: {}",
+                    user_id, e
+                );
                 // Don't fail entire deletion if a related delete fails, but log it
             });
     }
@@ -1926,6 +1958,7 @@ pub async fn admin_delete_user(
         ]
     })))
 }
+#[derive(Serialize, Deserialize)]
 pub struct AdminCreateUserRequest {
     pub email: String,
     pub password: String,

@@ -149,7 +149,7 @@ impl SubscriptionRegistry {
     pub fn find_all_for_collection(&self, collection: &str) -> Vec<Subscription> {
         self.subscriptions
             .iter()
-            .filter(|entry| entry.value().collection == collection)
+            .filter(|entry| entry.value().collection == Arc::from(collection))
             .map(|entry| entry.value().clone())
             .collect()
     }
@@ -164,7 +164,8 @@ impl SubscriptionRegistry {
             .iter()
             .filter(|entry| {
                 let sub = entry.value();
-                sub.collection == collection && sub.document_id.as_deref() == Some(document_id)
+                sub.collection == Arc::from(collection)
+                    && sub.document_id.as_deref() == Some(document_id)
             })
             .map(|entry| entry.value().clone())
             .collect()
@@ -253,6 +254,14 @@ impl SubscriptionRegistry {
     pub fn connection_count(&self) -> usize {
         self.connections.len()
     }
+
+    /// Get total subscription count for a specific connection.
+    pub fn connection_subscription_count(&self, connection_id: &str) -> usize {
+        self.connections
+            .get(connection_id)
+            .map(|subs| subs.len())
+            .unwrap_or(0)
+    }
 }
 
 impl Default for SubscriptionRegistry {
@@ -266,7 +275,6 @@ impl Default for SubscriptionRegistry {
     }
 }
 
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -287,12 +295,6 @@ mod tests {
         (sub, rx)
     }
     /// Get total subscription count for a specific connection.
-    pub fn connection_subscription_count(&self, connection_id: &str) -> usize {
-        self.connections
-            .get(connection_id)
-            .map(|subs| subs.len())
-            .unwrap_or(0)
-    }
 
     #[test]
     fn test_subscribe_and_find() {

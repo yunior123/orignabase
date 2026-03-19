@@ -1,5 +1,6 @@
 use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response};
 use dashmap::DashMap;
+use ob_core::Error;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -216,41 +217,46 @@ pub async fn check_rate_limit(
     action: &str,
     max_attempts: i64,
     window_seconds: i64,
-) -> Result<(), crate::Error> {
+) -> std::result::Result<(), Error> {
     use chrono::Utc;
-    
+
     let now = Utc::now().timestamp();
     let window_start = now - window_seconds;
-    
+
     // Count recent attempts
     let query = format!(
         "SELECT count() FROM mfa_attempts WHERE user_id = '{}' AND action = '{}' AND timestamp >= {} GROUP ALL",
         user_id, action, window_start
     );
-    
-    let results = db.query_raw(&query).await
-        .map_err(|e| crate::Error::Internal(format!("Rate limit check failed: {}", e)))?;
-    
-    let count = results.first()
-        .and_then(|r| r.get("count").and_then(|v| v.as_i64()))
-        .unwrap_or(0);
-    
+
+    let results = db
+        .query_raw(&query)
+        .await
+        .map_err(|e| Error::Internal(format!("Rate limit check failed: {}", e)))?;
+
+    let count = if let Some(row) = results.first() {
+        row.get("count").and_then(|v| v.as_i64()).unwrap_or(0)
+    } else {
+        0
+    };
+
     if count >= max_attempts {
-        return Err(crate::Error::Auth(
-            "Too many failed attempts. Please try again later.".into()
+        return Err(Error::Auth(
+            "Too many failed attempts. Please try again later.".into(),
         ));
     }
-    
+
     // Log this attempt
-    let _ = db.create_document(
-        "mfa_attempts",
-        &format!("{}_{}_{}_{}", user_id, action, now, rand::random::<u32>()),
-        serde_json::json!({
-            "user_id": user_id,
-            "action": action,
-            "timestamp": now,
-        }),
-    ).await;
-    
+    let _ = db
+        .create_document(
+            "mfa_attempts",
+            serde_json::json!({
+                "user_id": user_id,
+                "action": action,
+                "timestamp": now,
+            }),
+        )
+        .await;
+
     Ok(())
 }
