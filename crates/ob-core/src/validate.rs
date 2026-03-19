@@ -417,3 +417,21 @@ mod phone_tests {
         assert!(!is_valid_e164_phone(""));
     }
 }
+
+/// Validates a Canadian postal code format (A1A 1A1, case-insensitive, no spaces)
+pub fn is_valid_canadian_postal(code: &str) -> bool {
+    if code.len() != 6 {
+        return false;
+    }
+    
+    let code = code.to_uppercase();
+    let chars: Vec<char> = code.chars().collect();
+    
+    // Pattern: letter-digit-letter-digit-letter-digit
+    (chars[0].is_alphabetic() && chars[1].is_numeric() && chars[2].is_alphabetic() &&
+     chars[3].is_numeric() && chars[4].is_alphabetic() && chars[5].is_numeric()) &&
+    // Exclude problematic letters: D, F, I, O, Q, U, W, X, Z
+    !matches!(chars[0], 'D' | 'F' | 'I' | 'O' | 'Q' | 'U' | 'W' | 'X' | 'Z') &&
+    !matches!(chars[2], 'D' | 'F' | 'I' | 'O' | 'Q' | 'U' | 'W' | 'X' | 'Z') &&
+    !matches!(chars[4], 'D' | 'F' | 'I' | 'O' | 'Q' | 'U' | 'W' | 'X' | 'Z')
+}

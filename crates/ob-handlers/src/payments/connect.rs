@@ -406,6 +406,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             stripe_client: None,
             stripe_base_url: "https://api.stripe.com/v1".into(),
+            turnstile_secret_key: None,
         }
     }
 
@@ -498,7 +499,7 @@ mod tests {
         let Json(resp) = create_account(
             State(state),
             Json(CreateAccountRequest {
-                user_id: "seller_1".into(),
+                user_id: Some("seller_1".to_string()),
                 email: None,
                 country: None,
             }),
@@ -521,7 +522,7 @@ mod tests {
         let missing_err = create_account(
             State(state.clone()),
             Json(CreateAccountRequest {
-                user_id: "seller_1".into(),
+                user_id: Some("seller_1".to_string()),
                 email: None,
                 country: None,
             }),
@@ -533,7 +534,7 @@ mod tests {
         let invalid_err = create_account(
             State(state),
             Json(CreateAccountRequest {
-                user_id: "seller_1".into(),
+                user_id: Some("seller_1".to_string()),
                 email: Some("not-an-email".into()),
                 country: Some("CA".into()),
             }),
@@ -569,7 +570,7 @@ mod tests {
         let Json(resp) = create_account(
             State(state.clone()),
             Json(CreateAccountRequest {
-                user_id: "seller_2".into(),
+                user_id: Some("seller_2".to_string()),
                 email: None,
                 country: Some("US".into()),
             }),
@@ -610,7 +611,7 @@ mod tests {
         let missing_err = create_account_link(
             State(state.clone()),
             Json(AccountLinkRequest {
-                user_id: "seller_3".into(),
+                user_id: Some("seller_3".to_string()),
                 account_id: None,
             }),
         )
@@ -631,7 +632,7 @@ mod tests {
         let mismatch_err = create_account_link(
             State(state),
             Json(AccountLinkRequest {
-                user_id: "seller_3".into(),
+                user_id: Some("seller_3".to_string()),
                 account_id: Some("acct_other".into()),
             }),
         )
@@ -667,7 +668,7 @@ mod tests {
         let Json(resp) = create_account_link(
             State(state),
             Json(AccountLinkRequest {
-                user_id: "seller_4".into(),
+                user_id: Some("seller_4".to_string()),
                 account_id: None,
             }),
         )
@@ -689,7 +690,7 @@ mod tests {
         let missing_err = get_account_status(
             State(state.clone()),
             Json(AccountStatusRequest {
-                user_id: "seller_5".into(),
+                user_id: Some("seller_5".to_string()),
                 account_id: None,
             }),
         )
@@ -710,7 +711,7 @@ mod tests {
         let mismatch_err = get_account_status(
             State(state),
             Json(AccountStatusRequest {
-                user_id: "seller_5".into(),
+                user_id: Some("seller_5".to_string()),
                 account_id: Some("acct_other".into()),
             }),
         )
@@ -747,7 +748,7 @@ mod tests {
         let Json(resp) = get_account_status(
             State(state.clone()),
             Json(AccountStatusRequest {
-                user_id: "seller_6".into(),
+                user_id: Some("seller_6".to_string()),
                 account_id: None,
             }),
         )
@@ -805,7 +806,7 @@ mod tests {
         let err = create_account(
             State(state),
             Json(CreateAccountRequest {
-                user_id: "seller_err".into(),
+                user_id: Some("seller_err".to_string()),
                 email: Some("seller@example.com".into()),
                 country: None,
             }),
@@ -842,7 +843,7 @@ mod tests {
         let err = create_account_link(
             State(state),
             Json(AccountLinkRequest {
-                user_id: "seller_link_err".into(),
+                user_id: Some("seller_link_err".to_string()),
                 account_id: None,
             }),
         )
@@ -875,7 +876,7 @@ mod tests {
         let err = get_account_status(
             State(state),
             Json(AccountStatusRequest {
-                user_id: "seller_status_err".into(),
+                user_id: Some("seller_status_err".to_string()),
                 account_id: None,
             }),
         )

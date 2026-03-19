@@ -865,6 +865,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             stripe_client: None,
             stripe_base_url: "https://api.stripe.com/v1".into(),
+            turnstile_secret_key: None,
         }
     }
 
@@ -1227,7 +1228,7 @@ mod tests {
         let Json(resp) = create_profile(
             State(state),
             Json(CreateProfileRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 email: "user@example.com".into(),
                 name: "Test".into(),
                 roles: None,
@@ -1250,7 +1251,7 @@ mod tests {
         let Json(resp) = create_profile(
             State(state.clone()),
             Json(CreateProfileRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 email: "fallback@example.com".into(),
                 name: "  ".into(),
                 roles: None,
@@ -1288,7 +1289,7 @@ mod tests {
         let err = update_profile(
             State(state),
             Json(UpdateProfileRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 name: None,
                 address: None,
                 preferred_language: None,
@@ -1319,7 +1320,7 @@ mod tests {
         let Json(resp) = update_profile(
             State(state.clone()),
             Json(UpdateProfileRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 name: Some(" Updated Name ".into()),
                 address: None,
                 preferred_language: Some("fr".into()),
@@ -1362,7 +1363,7 @@ mod tests {
         let Json(resp) = get_profile(
             State(state),
             Json(GetProfileRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
             }),
         )
         .await
@@ -1384,7 +1385,7 @@ mod tests {
         let Json(resp) = email_consent(
             State(state.clone()),
             Json(EmailConsentRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 consent: false,
             }),
         )
@@ -1416,7 +1417,7 @@ mod tests {
         let err = notification_preferences(
             State(state),
             Json(NotificationPrefsRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 notify_new_products: Some(true),
                 notify_trending: None,
             }),
@@ -1443,7 +1444,7 @@ mod tests {
         let err = notification_preferences(
             State(state),
             Json(NotificationPrefsRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 notify_new_products: None,
                 notify_trending: None,
             }),
@@ -1473,7 +1474,7 @@ mod tests {
         let Json(resp) = notification_preferences(
             State(state.clone()),
             Json(NotificationPrefsRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 notify_new_products: Some(true),
                 notify_trending: Some(false),
             }),
@@ -1498,7 +1499,7 @@ mod tests {
         let Json(resp) = cleanup_fcm_token(
             State(state),
             Json(CleanupFcmTokenRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 token: "tok_1".into(),
             }),
         )
@@ -1524,7 +1525,7 @@ mod tests {
         let Json(resp) = cleanup_fcm_token(
             State(state.clone()),
             Json(CleanupFcmTokenRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 token: "tok_1".into(),
             }),
         )
@@ -1554,7 +1555,7 @@ mod tests {
         let Json(resp) = add_buyer_address(
             State(state.clone()),
             Json(AddBuyerAddressRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 street: "1 Main St".into(),
                 city: "Toronto".into(),
                 province: "ON".into(),
@@ -1594,7 +1595,7 @@ mod tests {
         let err = update_buyer_address(
             State(state),
             Json(UpdateBuyerAddressRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 address_id: "addr_1".into(),
                 street: "1 Main".into(),
                 city: "Toronto".into(),
@@ -1644,7 +1645,7 @@ mod tests {
         let Json(resp) = delete_buyer_address(
             State(state.clone()),
             Json(DeleteBuyerAddressRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 address_id: "addr_1".into(),
             }),
         )
@@ -1678,7 +1679,7 @@ mod tests {
         let Json(resp) = set_default_buyer_address(
             State(state.clone()),
             Json(SetDefaultBuyerAddressRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 address_id: "addr_2".into(),
             }),
         )
@@ -1714,7 +1715,7 @@ mod tests {
         let err = update_profile(
             State(state),
             Json(UpdateProfileRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 name: Some("".into()), // empty after trim → 0 < MIN_NAME_LENGTH
                 address: None,
                 preferred_language: None,
@@ -1740,7 +1741,7 @@ mod tests {
         let err = update_profile(
             State(state),
             Json(UpdateProfileRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 name: Some(long_name),
                 address: None,
                 preferred_language: None,
@@ -1767,7 +1768,7 @@ mod tests {
         let err = update_profile(
             State(state),
             Json(UpdateProfileRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 name: None,
                 address: Some(AddressInput {
                     street: "123 Main".into(),
@@ -1798,7 +1799,7 @@ mod tests {
         let Json(resp) = update_profile(
             State(state.clone()),
             Json(UpdateProfileRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 name: None,
                 address: Some(AddressInput {
                     street: "123 Main St".into(),
@@ -1842,7 +1843,7 @@ mod tests {
         let Json(resp) = update_profile(
             State(state.clone()),
             Json(UpdateProfileRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 name: None,
                 address: None,
                 preferred_language: None,
@@ -1873,7 +1874,7 @@ mod tests {
         let Json(resp) = email_consent(
             State(state.clone()),
             Json(EmailConsentRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 consent: true,
             }),
         )
@@ -1912,7 +1913,7 @@ mod tests {
         let Json(resp) = update_buyer_address(
             State(state.clone()),
             Json(UpdateBuyerAddressRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 address_id: "addr_1".into(),
                 street: "99 Elm Ave".into(),
                 city: "Ottawa".into(),
@@ -1961,7 +1962,7 @@ mod tests {
         let Json(resp) = update_buyer_address(
             State(state.clone()),
             Json(UpdateBuyerAddressRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 address_id: "addr_2".into(),
                 street: "5 Oak St".into(),
                 city: "Toronto".into(),
@@ -2002,7 +2003,7 @@ mod tests {
         let err = delete_buyer_address(
             State(state),
             Json(DeleteBuyerAddressRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 address_id: "addr_1".into(),
             }),
         )
@@ -2030,7 +2031,7 @@ mod tests {
         let err = set_default_buyer_address(
             State(state),
             Json(SetDefaultBuyerAddressRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 address_id: "addr_1".into(),
             }),
         )
@@ -2069,7 +2070,7 @@ mod tests {
         let Json(resp) = add_buyer_address(
             State(state.clone()),
             Json(AddBuyerAddressRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 street: "1 Main St".into(),
                 city: "Toronto".into(),
                 province: "ON".into(),
@@ -2109,7 +2110,7 @@ mod tests {
         let Json(resp) = delete_buyer_address(
             State(state.clone()),
             Json(DeleteBuyerAddressRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 address_id: "addr_1".into(),
             }),
         )

@@ -633,6 +633,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             stripe_client: None,
             stripe_base_url: "https://api.stripe.com/v1".into(),
+            turnstile_secret_key: None,
         }
     }
 
@@ -1232,6 +1233,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             stripe_client: None,
             stripe_base_url: "https://api.stripe.com/v1".into(),
+            turnstile_secret_key: None,
         };
 
         // Express with coords + geo key but geoapify will fail (wrong URL) → fallback
@@ -1284,6 +1286,7 @@ mod tests {
                 .unwrap(),
             stripe_client: None,
             stripe_base_url: "https://api.stripe.com/v1".into(),
+            turnstile_secret_key: None,
         };
 
         let err = calculate_shipping(

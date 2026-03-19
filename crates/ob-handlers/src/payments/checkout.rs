@@ -78,7 +78,7 @@ fn normalize_postal_code(postal_code: &str) -> String {
 }
 
 /// Validates Canadian postal code format: letter-digit-letter-digit-letter-digit (e.g. M5V2H1).
-fn is_valid_canadian_postal(code: &str) -> bool {
+pub fn is_valid_canadian_postal(code: &str) -> bool {
     let c: Vec<char> = code.to_uppercase().chars().collect();
     c.len() == 6
         && c[0].is_ascii_alphabetic()
@@ -621,6 +621,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             stripe_client: None,
             stripe_base_url: "https://api.stripe.com/v1".into(),
+            turnstile_secret_key: None,
         }
     }
 
@@ -973,7 +974,7 @@ mod tests {
             Json(CreateCheckoutRequest {
                 items: vec![],
                 shipping_address: shipping.clone(),
-                user_id: "buyer_1".into(),
+                user_id: Some("buyer_1".to_string()),
                 subtotal_cents: 1000,
                 coupon_code: None,
                 eula_accepted: false,
@@ -996,7 +997,7 @@ mod tests {
                     country: "US".into(),
                     ..shipping.clone()
                 },
-                user_id: "buyer_1".into(),
+                user_id: Some("buyer_1".to_string()),
                 subtotal_cents: 1000,
                 coupon_code: None,
                 eula_accepted: false,
@@ -1023,7 +1024,7 @@ mod tests {
                     postal_code: "12345".into(),
                     ..shipping
                 },
-                user_id: "buyer_1".into(),
+                user_id: Some("buyer_1".to_string()),
                 subtotal_cents: 1000,
                 coupon_code: None,
                 eula_accepted: false,
@@ -1090,7 +1091,7 @@ mod tests {
                     quantity: 2,
                 }],
                 shipping_address: shipping.clone(),
-                user_id: "buyer_1".into(),
+                user_id: Some("buyer_1".to_string()),
                 subtotal_cents: 2000,
                 coupon_code: None,
                 eula_accepted: false,
@@ -1110,7 +1111,7 @@ mod tests {
                     quantity: 1,
                 }],
                 shipping_address: shipping.clone(),
-                user_id: "seller_1".into(),
+                user_id: Some("seller_1".to_string()),
                 subtotal_cents: 1000,
                 coupon_code: None,
                 eula_accepted: false,
@@ -1166,7 +1167,7 @@ mod tests {
                     quantity: 1,
                 }],
                 shipping_address: shipping.clone(),
-                user_id: "buyer_1".into(),
+                user_id: Some("buyer_1".to_string()),
                 subtotal_cents: 2500,
                 coupon_code: None,
                 eula_accepted: true,
@@ -1186,7 +1187,7 @@ mod tests {
                     quantity: 1,
                 }],
                 shipping_address: shipping.clone(),
-                user_id: "buyer_1".into(),
+                user_id: Some("buyer_1".to_string()),
                 subtotal_cents: 2500,
                 coupon_code: None,
                 eula_accepted: false,
@@ -1220,7 +1221,7 @@ mod tests {
                     quantity: 1,
                 }],
                 shipping_address: shipping,
-                user_id: "buyer_dup".into(),
+                user_id: Some("buyer_dup".to_string()),
                 subtotal_cents: 1000,
                 coupon_code: None,
                 eula_accepted: false,
@@ -1248,6 +1249,7 @@ mod tests {
 
         let state = HandlersState {
             stripe_base_url: mock_server.uri(),
+            turnstile_secret_key: None,
             ..state
         };
 
@@ -1296,7 +1298,7 @@ mod tests {
                     postal_code: "M5V2H1".into(),
                     country: "CA".into(),
                 },
-                user_id: "buyer_1".into(),
+                user_id: Some("buyer_1".to_string()),
                 subtotal_cents: 3000,
                 coupon_code: None,
                 eula_accepted: false,
@@ -1376,7 +1378,7 @@ mod tests {
                     postal_code: "M5V2H1".into(),
                     country: "CA".into(),
                 },
-                user_id: "buyer_1".into(),
+                user_id: Some("buyer_1".to_string()),
                 subtotal_cents: 1200,
                 coupon_code: None,
                 eula_accepted: false,
@@ -1408,7 +1410,7 @@ mod tests {
                     postal_code: "M5V2H1".into(),
                     country: "CA".into(),
                 },
-                user_id: "buyer_2".into(),
+                user_id: Some("buyer_2".to_string()),
                 subtotal_cents: 1000,
                 coupon_code: None,
                 eula_accepted: false,
@@ -1480,7 +1482,7 @@ mod tests {
         let Json(mismatch_resp) = verify_cart_prices(
             State(state.clone()),
             Json(VerifyPricesRequest {
-                user_id: "buyer_1".into(),
+                user_id: Some("buyer_1".to_string()),
                 items: vec![
                     VerifyPriceItem {
                         product_id: "prod_ok".into(),
@@ -1537,7 +1539,7 @@ mod tests {
         let Json(valid_resp) = verify_cart_prices(
             State(state),
             Json(VerifyPricesRequest {
-                user_id: "buyer_1".into(),
+                user_id: Some("buyer_1".to_string()),
                 items: vec![VerifyPriceItem {
                     product_id: "prod_ok".into(),
                     expected_price_cents: 1000,
@@ -1574,7 +1576,7 @@ mod tests {
                     postal_code: "M5V2H1".into(),
                     country: "CA".into(),
                 },
-                user_id: "buyer_1".into(),
+                user_id: Some("buyer_1".to_string()),
                 subtotal_cents: 1000,
                 coupon_code: None,
                 eula_accepted: false,
@@ -1604,7 +1606,7 @@ mod tests {
                     postal_code: "M5V2H1".into(),
                     country: "CA".into(),
                 },
-                user_id: "buyer_1".into(),
+                user_id: Some("buyer_1".to_string()),
                 subtotal_cents: 1000,
                 coupon_code: None,
                 eula_accepted: false,
@@ -1634,7 +1636,7 @@ mod tests {
                     postal_code: "M5V2H1".into(),
                     country: "CA".into(),
                 },
-                user_id: "buyer_1".into(),
+                user_id: Some("buyer_1".to_string()),
                 subtotal_cents: 1000,
                 coupon_code: None,
                 eula_accepted: false,
@@ -1660,7 +1662,7 @@ mod tests {
                     postal_code: "M5V2H1".into(),
                     country: "CA".into(),
                 },
-                user_id: "buyer_1".into(),
+                user_id: Some("buyer_1".to_string()),
                 subtotal_cents: 1000,
                 coupon_code: None,
                 eula_accepted: false,
@@ -1690,7 +1692,7 @@ mod tests {
                     postal_code: "M5V2H1".into(),
                     country: "CA".into(),
                 },
-                user_id: "buyer_1".into(),
+                user_id: Some("buyer_1".to_string()),
                 subtotal_cents: -100,
                 coupon_code: None,
                 eula_accepted: false,
@@ -1720,7 +1722,7 @@ mod tests {
                     postal_code: "M5V2H1".into(),
                     country: "CA".into(),
                 },
-                user_id: "buyer_1".into(),
+                user_id: Some("buyer_1".to_string()),
                 subtotal_cents: 10_000_001,
                 coupon_code: None,
                 eula_accepted: false,
@@ -1750,7 +1752,7 @@ mod tests {
                     postal_code: "M5V2H1".into(),
                     country: "CA".into(),
                 },
-                user_id: "buyer_1".into(),
+                user_id: Some("buyer_1".to_string()),
                 subtotal_cents: 1000,
                 coupon_code: None,
                 eula_accepted: false,
@@ -1781,7 +1783,7 @@ mod tests {
                     postal_code: "M5V2H1".into(),
                     country: "CA".into(),
                 },
-                user_id: "buyer_1".into(),
+                user_id: Some("buyer_1".to_string()),
                 subtotal_cents: 1000,
                 coupon_code: None,
                 eula_accepted: false,
@@ -1829,7 +1831,7 @@ mod tests {
                     postal_code: "M5V2H1".into(),
                     country: "CA".into(),
                 },
-                user_id: "buyer_1".into(),
+                user_id: Some("buyer_1".to_string()),
                 subtotal_cents: 1000,
                 coupon_code: None,
                 eula_accepted: false,
@@ -1877,7 +1879,7 @@ mod tests {
                     postal_code: "M5V2H1".into(),
                     country: "CA".into(),
                 },
-                user_id: "buyer_1".into(),
+                user_id: Some("buyer_1".to_string()),
                 subtotal_cents: 0,
                 coupon_code: None,
                 eula_accepted: false,
@@ -1902,6 +1904,7 @@ mod tests {
         let state = setup_state().await;
         let state = HandlersState {
             stripe_base_url: mock_server.uri(),
+            turnstile_secret_key: None,
             ..state
         };
 
@@ -1948,7 +1951,7 @@ mod tests {
                     postal_code: "M5V2H1".into(),
                     country: "CA".into(),
                 },
-                user_id: "buyer_1".into(),
+                user_id: Some("buyer_1".to_string()),
                 subtotal_cents: 1000,
                 coupon_code: None,
                 eula_accepted: false,
@@ -1967,7 +1970,7 @@ mod tests {
         let err = verify_cart_prices(
             State(state),
             Json(VerifyPricesRequest {
-                user_id: "buyer_1".into(),
+                user_id: Some("buyer_1".to_string()),
                 items: vec![],
             }),
         )

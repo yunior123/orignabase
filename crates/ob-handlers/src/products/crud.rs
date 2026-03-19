@@ -1219,13 +1219,14 @@ mod tests {
     use ob_database::DatabaseClient;
     use std::sync::Arc;
 
-    async fn setup_state() -> HandlersState {
-        HandlersState {
+    async fn setup_state() -> HandlersState { HandlersState {
             config: Arc::new(Config::load(None).unwrap()),
             db: DatabaseClient::new_mem().await,
             http_client: reqwest::Client::new(),
             stripe_client: None,
             stripe_base_url: "https://api.stripe.com/v1".into(),
+            turnstile_secret_key: None,
+            http_client: reqwest::Client::new(),
         }
     }
 

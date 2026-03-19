@@ -489,7 +489,7 @@ mod tests {
         let claims = verify_token(&token, &keys).unwrap();
         assert_eq!(claims.sub, "u1");
     }
-}
+
 
 #[test]
 fn test_custom_claims_serialization() {
@@ -503,7 +503,7 @@ fn test_custom_claims_serialization() {
     });
 
     let token =
-        issue_access_token_with_claims("user123", &[], &keys, 3600, true, false, custom.clone())
+        issue_access_token_with_claims("user123", &[], &keys, 3600, true, custom.clone())
             .unwrap();
 
     let claims = verify_token(&token, &keys).unwrap();
@@ -705,4 +705,5 @@ fn test_refresh_token_has_no_roles() {
     assert!(claims.roles.is_empty());
     assert!(!claims.email_verified);
     assert!(!claims.mfa_required);
+}
 }

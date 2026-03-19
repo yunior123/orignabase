@@ -666,6 +666,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             stripe_client: None,
             stripe_base_url: "https://api.stripe.com/v1".into(),
+            turnstile_secret_key: None,
         }
     }
 
@@ -1337,6 +1338,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             stripe_client: None,
             stripe_base_url: "https://api.stripe.com/v1".into(),
+            turnstile_secret_key: None,
         };
         let result = stripe_modify_pi(&state, "pi_123", 5000).await;
         assert!(result.is_err());

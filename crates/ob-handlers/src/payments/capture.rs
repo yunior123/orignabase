@@ -275,6 +275,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             stripe_client: None,
             stripe_base_url: "https://api.stripe.com/v1".into(),
+            turnstile_secret_key: None,
         }
     }
 
@@ -408,7 +409,7 @@ mod tests {
             State(state.clone()),
             Json(CapturePaymentRequest {
                 order_id: "order_1".into(),
-                user_id: "seller_2".into(),
+                user_id: Some("seller_2".to_string()),
             }),
         )
         .await
@@ -423,7 +424,7 @@ mod tests {
             State(state),
             Json(CapturePaymentRequest {
                 order_id: "order_1".into(),
-                user_id: "seller_1".into(),
+                user_id: Some("seller_1".to_string()),
             }),
         )
         .await
@@ -459,7 +460,7 @@ mod tests {
             State(state.clone()),
             Json(CapturePaymentRequest {
                 order_id: "order_1".into(),
-                user_id: "seller_1".into(),
+                user_id: Some("seller_1".to_string()),
             }),
         )
         .await
@@ -488,7 +489,7 @@ mod tests {
             State(state),
             Json(CapturePaymentRequest {
                 order_id: "order_1".into(),
-                user_id: "seller_1".into(),
+                user_id: Some("seller_1".to_string()),
             }),
         )
         .await
@@ -516,6 +517,7 @@ mod tests {
 
         let state = HandlersState {
             stripe_base_url: mock_server.uri(),
+            turnstile_secret_key: None,
             ..state
         };
 
@@ -541,7 +543,7 @@ mod tests {
             State(state.clone()),
             Json(CapturePaymentRequest {
                 order_id: "order_1".into(),
-                user_id: "seller_1".into(),
+                user_id: Some("seller_1".to_string()),
             }),
         )
         .await
@@ -587,6 +589,7 @@ mod tests {
 
         let state = HandlersState {
             stripe_base_url: mock_server.uri(),
+            turnstile_secret_key: None,
             ..state
         };
 
@@ -612,7 +615,7 @@ mod tests {
             State(state.clone()),
             Json(CapturePaymentRequest {
                 order_id: "order_1".into(),
-                user_id: "seller_1".into(),
+                user_id: Some("seller_1".to_string()),
             }),
         )
         .await
@@ -655,6 +658,7 @@ mod tests {
 
         let state = HandlersState {
             stripe_base_url: mock_server.uri(),
+            turnstile_secret_key: None,
             ..state
         };
 
@@ -680,7 +684,7 @@ mod tests {
             State(state.clone()),
             Json(CapturePaymentRequest {
                 order_id: "order_missing_pi".into(),
-                user_id: "seller_1".into(),
+                user_id: Some("seller_1".to_string()),
             }),
         )
         .await
@@ -713,7 +717,7 @@ mod tests {
             State(state),
             Json(CapturePaymentRequest {
                 order_id: "order_bad_capture".into(),
-                user_id: "seller_1".into(),
+                user_id: Some("seller_1".to_string()),
             }),
         )
         .await
@@ -739,6 +743,7 @@ mod tests {
         let state = setup_state().await;
         let state = HandlersState {
             stripe_base_url: mock_server.uri(),
+            turnstile_secret_key: None,
             ..state
         };
 
@@ -762,7 +767,7 @@ mod tests {
             State(state),
             Json(CapturePaymentRequest {
                 order_id: "order_cs_fail".into(),
-                user_id: "seller_1".into(),
+                user_id: Some("seller_1".to_string()),
             }),
         )
         .await
@@ -784,6 +789,7 @@ mod tests {
         let state = setup_state().await;
         let state = HandlersState {
             stripe_base_url: mock_server.uri(),
+            turnstile_secret_key: None,
             ..state
         };
 
@@ -807,7 +813,7 @@ mod tests {
             State(state),
             Json(CapturePaymentRequest {
                 order_id: "order_http_err".into(),
-                user_id: "seller_1".into(),
+                user_id: Some("seller_1".to_string()),
             }),
         )
         .await

@@ -1146,6 +1146,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             stripe_client: None,
             stripe_base_url: "https://api.stripe.com/v1".into(),
+            turnstile_secret_key: None,
         }
     }
 
@@ -1489,7 +1490,7 @@ mod tests {
         let err = create_subscription(
             State(state),
             Json(CreateSubscriptionRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 payment_method_id: None,
             }),
         )
@@ -1507,7 +1508,7 @@ mod tests {
         let err = cancel_subscription(
             State(state),
             Json(CancelSubscriptionRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
             }),
         )
         .await
@@ -1535,7 +1536,7 @@ mod tests {
         let err = reactivate_subscription(
             State(state),
             Json(ReactivateSubscriptionRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
             }),
         )
         .await
@@ -1552,7 +1553,7 @@ mod tests {
         let err = update_notification_preferences(
             State(state),
             Json(SubscriptionNotificationPrefsRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 notify_new_products: None,
                 notify_trending: None,
             }),
@@ -1585,7 +1586,7 @@ mod tests {
         let Json(resp) = subscription_status(
             State(state),
             Json(SubscriptionStatusRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
             }),
         )
         .await
@@ -1803,7 +1804,7 @@ mod tests {
         let Json(resp) = create_subscription(
             State(state.clone()),
             Json(CreateSubscriptionRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 payment_method_id: None,
             }),
         )
@@ -1865,7 +1866,7 @@ mod tests {
         let Json(resp) = cancel_subscription(
             State(state.clone()),
             Json(CancelSubscriptionRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
             }),
         )
         .await
@@ -1935,7 +1936,7 @@ mod tests {
         let Json(resp) = reactivate_subscription(
             State(state.clone()),
             Json(ReactivateSubscriptionRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
             }),
         )
         .await
@@ -2073,7 +2074,7 @@ mod tests {
         let err = create_subscription(
             State(state),
             Json(CreateSubscriptionRequest {
-                user_id: "user_1".into(),
+                user_id: Some("user_1".to_string()),
                 payment_method_id: Some("".into()),
             }),
         )
@@ -2121,7 +2122,7 @@ mod tests {
         let err = create_subscription(
             State(state),
             Json(CreateSubscriptionRequest {
-                user_id: "user_seller".into(),
+                user_id: Some("user_seller".to_string()),
                 payment_method_id: None,
             }),
         )
@@ -2174,7 +2175,7 @@ mod tests {
         let err = create_subscription(
             State(state),
             Json(CreateSubscriptionRequest {
-                user_id: "user_chk".into(),
+                user_id: Some("user_chk".to_string()),
                 payment_method_id: None,
             }),
         )
@@ -2233,7 +2234,7 @@ mod tests {
         let err = create_subscription(
             State(state),
             Json(CreateSubscriptionRequest {
-                user_id: "user_eu".into(),
+                user_id: Some("user_eu".to_string()),
                 payment_method_id: None,
             }),
         )
@@ -2318,7 +2319,7 @@ mod tests {
         let Json(resp) = create_subscription(
             State(state.clone()),
             Json(CreateSubscriptionRequest {
-                user_id: "user_pm".into(),
+                user_id: Some("user_pm".to_string()),
                 payment_method_id: Some("pm_test_abc".into()),
             }),
         )
@@ -2383,7 +2384,7 @@ mod tests {
         let err = create_subscription(
             State(state),
             Json(CreateSubscriptionRequest {
-                user_id: "user_af".into(),
+                user_id: Some("user_af".to_string()),
                 payment_method_id: Some("pm_bad".into()),
             }),
         )
@@ -2462,7 +2463,7 @@ mod tests {
         let Json(resp) = create_subscription(
             State(state),
             Json(CreateSubscriptionRequest {
-                user_id: "user_aa".into(),
+                user_id: Some("user_aa".to_string()),
                 payment_method_id: Some("pm_aa".into()),
             }),
         )
@@ -2527,7 +2528,7 @@ mod tests {
         let err = create_subscription(
             State(state),
             Json(CreateSubscriptionRequest {
-                user_id: "user_sf".into(),
+                user_id: Some("user_sf".to_string()),
                 payment_method_id: Some("pm_sf".into()),
             }),
         )
@@ -2559,7 +2560,7 @@ mod tests {
         let err = cancel_subscription(
             State(state),
             Json(CancelSubscriptionRequest {
-                user_id: "user_noid".into(),
+                user_id: Some("user_noid".to_string()),
             }),
         )
         .await
@@ -2591,7 +2592,7 @@ mod tests {
         let Json(resp) = cancel_subscription(
             State(state),
             Json(CancelSubscriptionRequest {
-                user_id: "user_cc".into(),
+                user_id: Some("user_cc".to_string()),
             }),
         )
         .await
@@ -2637,7 +2638,7 @@ mod tests {
         let err = cancel_subscription(
             State(state),
             Json(CancelSubscriptionRequest {
-                user_id: "user_cf".into(),
+                user_id: Some("user_cf".to_string()),
             }),
         )
         .await
@@ -2655,7 +2656,7 @@ mod tests {
         let Json(resp) = subscription_status(
             State(state),
             Json(SubscriptionStatusRequest {
-                user_id: "user_none".into(),
+                user_id: Some("user_none".to_string()),
             }),
         )
         .await
@@ -2691,7 +2692,7 @@ mod tests {
         let err = reactivate_subscription(
             State(state),
             Json(ReactivateSubscriptionRequest {
-                user_id: "user_noid2".into(),
+                user_id: Some("user_noid2".to_string()),
             }),
         )
         .await
@@ -2723,7 +2724,7 @@ mod tests {
         let Json(resp) = reactivate_subscription(
             State(state),
             Json(ReactivateSubscriptionRequest {
-                user_id: "user_active".into(),
+                user_id: Some("user_active".to_string()),
             }),
         )
         .await
@@ -2769,7 +2770,7 @@ mod tests {
         let err = reactivate_subscription(
             State(state),
             Json(ReactivateSubscriptionRequest {
-                user_id: "user_rf".into(),
+                user_id: Some("user_rf".to_string()),
             }),
         )
         .await
@@ -2802,7 +2803,7 @@ mod tests {
         let Json(resp) = update_notification_preferences(
             State(state.clone()),
             Json(SubscriptionNotificationPrefsRequest {
-                user_id: "user_np".into(),
+                user_id: Some("user_np".to_string()),
                 notify_new_products: Some(true),
                 notify_trending: Some(false),
             }),
@@ -2839,7 +2840,7 @@ mod tests {
         let Json(resp) = update_notification_preferences(
             State(state.clone()),
             Json(SubscriptionNotificationPrefsRequest {
-                user_id: "user_np2".into(),
+                user_id: Some("user_np2".to_string()),
                 notify_new_products: Some(false),
                 notify_trending: None,
             }),
@@ -2867,7 +2868,7 @@ mod tests {
         let Json(resp) = update_notification_preferences(
             State(state.clone()),
             Json(SubscriptionNotificationPrefsRequest {
-                user_id: "user_np3".into(),
+                user_id: Some("user_np3".to_string()),
                 notify_new_products: None,
                 notify_trending: Some(true),
             }),

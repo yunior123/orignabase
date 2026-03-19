@@ -420,6 +420,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             stripe_client: None,
             stripe_base_url: "https://api.stripe.com/v1".into(),
+            turnstile_secret_key: None,
         }
     }
 
@@ -798,6 +799,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             stripe_client: None,
             stripe_base_url: mock_server.uri(),
+            turnstile_secret_key: None,
         };
 
         let Json(resp) = get_provider_status(
@@ -933,6 +935,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             stripe_client: None,
             stripe_base_url: mock_server.uri(),
+            turnstile_secret_key: None,
         };
 
         let Json(resp) = get_provider_status(
@@ -970,6 +973,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             stripe_client: None,
             stripe_base_url: mock_server.uri(),
+            turnstile_secret_key: None,
         };
 
         let Json(resp) = get_provider_status(
@@ -1008,6 +1012,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             stripe_client: None,
             stripe_base_url: "http://127.0.0.1:1".into(), // port 1 = connection refused
+            turnstile_secret_key: None,
         };
 
         let Json(resp) = get_provider_status(

@@ -90,7 +90,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        AppState::new(config)
+        AppState::new(config, reqwest::Client::new())
     }
 
     #[tokio::test]

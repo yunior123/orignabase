@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn test_search_syncer_channel_capacity() {
         let config = crate::SearchConfig::default();
-        let client = SearchClient::new(config);
+        let client = SearchClient::new(config, reqwest::Client::new());
         let (_syncer, tx) = SearchSyncer::new(client);
 
         // Channel should have capacity (1024 as defined)

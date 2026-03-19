@@ -2763,6 +2763,8 @@ mod tests {
             totp_encryption_key: None,
             base_url: "https://example.com".into(),
             oauth_state_nonces: Arc::new(dashmap::DashMap::new()),
+            turnstile_secret_key: None,
+            http_client: reqwest::Client::new(),
         };
 
         let Json(response) = auth_providers(State(state)).await;
@@ -2793,6 +2795,8 @@ mod tests {
             totp_encryption_key: None,
             base_url: "https://api.orignagta.ca".into(),
             oauth_state_nonces: Arc::new(dashmap::DashMap::new()),
+            turnstile_secret_key: None,
+            http_client: reqwest::Client::new(),
         };
 
         let result = google_oauth_start(

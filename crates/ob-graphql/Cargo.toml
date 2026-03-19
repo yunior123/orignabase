@@ -25,4 +25,5 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+reqwest = { workspace = true }
 tokio-test = { workspace = true }

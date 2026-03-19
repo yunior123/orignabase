@@ -62,7 +62,7 @@ mod tests {
         let db = DatabaseClient::connect(&config).await.unwrap();
         let rules = Arc::new(RuleEngine::new(std::collections::HashMap::new()));
         let (change_tx, _change_rx) = tokio::sync::mpsc::channel(16);
-        let search = SearchClient::new(ob_search::SearchConfig::default());
+        let search = SearchClient::new(ob_search::SearchConfig::default(), reqwest::Client::new());
 
         let schema = build_schema(db, rules, change_tx, search);
 

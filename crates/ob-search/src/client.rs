@@ -244,7 +244,7 @@ mod tests {
             api_key: Some("key123".to_string()),
             indexes: Default::default(),
         };
-        let client = SearchClient::new(config.clone());
+        let client = SearchClient::new(config.clone(), reqwest::Client::new());
         assert!(client.config.enabled);
         assert_eq!(client.config.url, "http://meili:7700");
         assert_eq!(client.config.api_key, Some("key123".to_string()));
