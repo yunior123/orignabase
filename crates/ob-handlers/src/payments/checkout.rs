@@ -598,6 +598,16 @@ async fn create_checkout_session(
 
 #[cfg(test)]
 mod tests {
+    fn auth(uid: &str) -> AuthContext {
+        AuthContext {
+            user_id: uid.to_string(),
+            roles: vec![],
+            authenticated: true,
+            email_verified: true,
+            custom_claims: serde_json::Value::Null,
+        }
+    }
+
     use super::*;
     use axum::extract::State;
     use ob_core::Config;
@@ -971,7 +981,9 @@ mod tests {
 
         let empty_items = create_checkout_session(
             State(state.clone()),
+            Extension(auth("test")),
             Json(CreateCheckoutRequest {
+                turnstile_token: None,
                 items: vec![],
                 shipping_address: shipping.clone(),
                 user_id: Some("buyer_1".to_string()),
@@ -988,7 +1000,9 @@ mod tests {
 
         let bad_country = create_checkout_session(
             State(state.clone()),
+            Extension(auth("test")),
             Json(CreateCheckoutRequest {
+                turnstile_token: None,
                 items: vec![CartItem {
                     product_id: "prod_1".into(),
                     quantity: 1,
@@ -1015,7 +1029,9 @@ mod tests {
 
         let bad_postal = create_checkout_session(
             State(state),
+            Extension(auth("test")),
             Json(CreateCheckoutRequest {
+                turnstile_token: None,
                 items: vec![CartItem {
                     product_id: "prod_1".into(),
                     quantity: 1,
@@ -1085,7 +1101,9 @@ mod tests {
 
         let insufficient = create_checkout_session(
             State(state.clone()),
+            Extension(auth("test")),
             Json(CreateCheckoutRequest {
+                turnstile_token: None,
                 items: vec![CartItem {
                     product_id: "prod_stock".into(),
                     quantity: 2,
@@ -1105,7 +1123,9 @@ mod tests {
 
         let self_purchase = create_checkout_session(
             State(state.clone()),
+            Extension(auth("test")),
             Json(CreateCheckoutRequest {
+                turnstile_token: None,
                 items: vec![CartItem {
                     product_id: "prod_stock".into(),
                     quantity: 1,
@@ -1161,7 +1181,9 @@ mod tests {
 
         let age_block = create_checkout_session(
             State(state.clone()),
+            Extension(auth("test")),
             Json(CreateCheckoutRequest {
+                turnstile_token: None,
                 items: vec![CartItem {
                     product_id: "prod_restricted".into(),
                     quantity: 1,
@@ -1181,7 +1203,9 @@ mod tests {
 
         let eula_block = create_checkout_session(
             State(state.clone()),
+            Extension(auth("test")),
             Json(CreateCheckoutRequest {
+                turnstile_token: None,
                 items: vec![CartItem {
                     product_id: "prod_restricted".into(),
                     quantity: 1,
@@ -1215,7 +1239,9 @@ mod tests {
 
         let duplicate = create_checkout_session(
             State(state),
+            Extension(auth("test")),
             Json(CreateCheckoutRequest {
+                turnstile_token: None,
                 items: vec![CartItem {
                     product_id: "prod_stock".into(),
                     quantity: 1,
@@ -1286,7 +1312,9 @@ mod tests {
 
         let Json(resp) = create_checkout_session(
             State(state.clone()),
+            Extension(auth("test")),
             Json(CreateCheckoutRequest {
+                turnstile_token: None,
                 items: vec![CartItem {
                     product_id: "prod_physical".into(),
                     quantity: 2,
@@ -1366,7 +1394,9 @@ mod tests {
 
         let subtotal_mismatch = create_checkout_session(
             State(state.clone()),
+            Extension(auth("test")),
             Json(CreateCheckoutRequest {
+                turnstile_token: None,
                 items: vec![CartItem {
                     product_id: "prod_1".into(),
                     quantity: 1,
@@ -1398,7 +1428,9 @@ mod tests {
 
         let suspended = create_checkout_session(
             State(state),
+            Extension(auth("test")),
             Json(CreateCheckoutRequest {
+                turnstile_token: None,
                 items: vec![CartItem {
                     product_id: "prod_1".into(),
                     quantity: 1,
@@ -1481,6 +1513,7 @@ mod tests {
 
         let Json(mismatch_resp) = verify_cart_prices(
             State(state.clone()),
+            Extension(auth("test")),
             Json(VerifyPricesRequest {
                 user_id: Some("buyer_1".to_string()),
                 items: vec![
@@ -1538,6 +1571,7 @@ mod tests {
 
         let Json(valid_resp) = verify_cart_prices(
             State(state),
+            Extension(auth("test")),
             Json(VerifyPricesRequest {
                 user_id: Some("buyer_1".to_string()),
                 items: vec![VerifyPriceItem {
@@ -1567,7 +1601,9 @@ mod tests {
             .collect();
         let err = create_checkout_session(
             State(state),
+            Extension(auth("test")),
             Json(CreateCheckoutRequest {
+                turnstile_token: None,
                 items,
                 shipping_address: ShippingAddress {
                     street: "1 St".into(),
@@ -1594,7 +1630,9 @@ mod tests {
         let state = setup_state().await;
         let err = create_checkout_session(
             State(state),
+            Extension(auth("test")),
             Json(CreateCheckoutRequest {
+                turnstile_token: None,
                 items: vec![CartItem {
                     product_id: "".into(),
                     quantity: 1,
@@ -1624,7 +1662,9 @@ mod tests {
         let state = setup_state().await;
         let err_zero = create_checkout_session(
             State(state.clone()),
+            Extension(auth("test")),
             Json(CreateCheckoutRequest {
+                turnstile_token: None,
                 items: vec![CartItem {
                     product_id: "p1".into(),
                     quantity: 0,
@@ -1650,7 +1690,9 @@ mod tests {
 
         let err_over = create_checkout_session(
             State(state),
+            Extension(auth("test")),
             Json(CreateCheckoutRequest {
+                turnstile_token: None,
                 items: vec![CartItem {
                     product_id: "p1".into(),
                     quantity: 101,
@@ -1680,7 +1722,9 @@ mod tests {
         let state = setup_state().await;
         let err = create_checkout_session(
             State(state),
+            Extension(auth("test")),
             Json(CreateCheckoutRequest {
+                turnstile_token: None,
                 items: vec![CartItem {
                     product_id: "p1".into(),
                     quantity: 1,
@@ -1710,7 +1754,9 @@ mod tests {
         let state = setup_state().await;
         let err = create_checkout_session(
             State(state),
+            Extension(auth("test")),
             Json(CreateCheckoutRequest {
+                turnstile_token: None,
                 items: vec![CartItem {
                     product_id: "p1".into(),
                     quantity: 1,
@@ -1740,7 +1786,9 @@ mod tests {
         let state = setup_state().await;
         let err = create_checkout_session(
             State(state),
+            Extension(auth("test")),
             Json(CreateCheckoutRequest {
+                turnstile_token: None,
                 items: vec![CartItem {
                     product_id: "p1".into(),
                     quantity: 1,
@@ -1771,7 +1819,9 @@ mod tests {
         // Product doesn't exist in DB, so product_rows.len() != items.len()
         let err = create_checkout_session(
             State(state),
+            Extension(auth("test")),
             Json(CreateCheckoutRequest {
+                turnstile_token: None,
                 items: vec![CartItem {
                     product_id: "nonexistent_prod".into(),
                     quantity: 1,
@@ -1819,7 +1869,9 @@ mod tests {
 
         let err = create_checkout_session(
             State(state),
+            Extension(auth("test")),
             Json(CreateCheckoutRequest {
+                turnstile_token: None,
                 items: vec![CartItem {
                     product_id: "prod_draft".into(),
                     quantity: 1,
@@ -1867,7 +1919,9 @@ mod tests {
 
         let err = create_checkout_session(
             State(state),
+            Extension(auth("test")),
             Json(CreateCheckoutRequest {
+                turnstile_token: None,
                 items: vec![CartItem {
                     product_id: "prod_free".into(),
                     quantity: 1,
@@ -1939,7 +1993,9 @@ mod tests {
 
         let err = create_checkout_session(
             State(state),
+            Extension(auth("test")),
             Json(CreateCheckoutRequest {
+                turnstile_token: None,
                 items: vec![CartItem {
                     product_id: "prod_ok".into(),
                     quantity: 1,
@@ -1969,6 +2025,7 @@ mod tests {
         let state = setup_state().await;
         let err = verify_cart_prices(
             State(state),
+            Extension(auth("test")),
             Json(VerifyPricesRequest {
                 user_id: Some("buyer_1".to_string()),
                 items: vec![],
@@ -2003,6 +2060,7 @@ struct VerifyPriceItem {
 /// Returns any mismatches so the UI can prompt the user to refresh.
 async fn verify_cart_prices(
     State(state): State<HandlersState>,
+    Extension(auth("test")),
     Json(req): Json<VerifyPricesRequest>,
 ) -> Result<Json<Value>, ob_core::Error> {
     validate_uid("userId", &req.user_id)?;

@@ -438,7 +438,6 @@ mod tests {
             stripe_client: None,
             stripe_base_url: "https://api.stripe.com/v1".into(),
             turnstile_secret_key: None,
-            http_client: reqwest::Client::new(),
         }
     }
 

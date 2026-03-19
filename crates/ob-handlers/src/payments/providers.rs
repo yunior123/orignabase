@@ -404,6 +404,16 @@ async fn get_provider_status(
 
 #[cfg(test)]
 mod tests {
+    fn auth(uid: &str) -> AuthContext {
+        AuthContext {
+            user_id: uid.to_string(),
+            roles: vec![],
+            authenticated: true,
+            email_verified: true,
+            custom_claims: serde_json::Value::Null,
+        }
+    }
+
     use super::*;
     use axum::extract::State;
     use ob_core::Config;
@@ -643,6 +653,7 @@ mod tests {
 
         let Json(resp) = get_payment_providers(
             State(state),
+            Extension(auth("test")),
             Json(GetProviderRequest {
                 admin_user_id: String::new(),
             }),
@@ -674,6 +685,7 @@ mod tests {
 
         let err = get_payment_providers(
             State(state),
+            Extension(auth("test")),
             Json(GetProviderRequest {
                 admin_user_id: "user_1".into(),
             }),
@@ -701,6 +713,7 @@ mod tests {
 
         let Json(resp) = update_payment_provider(
             State(state.clone()),
+            Extension(auth("test")),
             Json(UpdateProviderRequest {
                 admin_user_id: "admin_1".into(),
                 provider_name: "stripe".into(),
@@ -750,6 +763,7 @@ mod tests {
 
         let bad_mode = update_payment_provider(
             State(state.clone()),
+            Extension(auth("test")),
             Json(UpdateProviderRequest {
                 admin_user_id: "admin_1".into(),
                 provider_name: "stripe".into(),
@@ -763,6 +777,7 @@ mod tests {
 
         let bad_provider = update_payment_provider(
             State(state),
+            Extension(auth("test")),
             Json(UpdateProviderRequest {
                 admin_user_id: "admin_1".into(),
                 provider_name: "paypal".into(),
@@ -804,6 +819,7 @@ mod tests {
 
         let Json(resp) = get_provider_status(
             State(state),
+            Extension(auth("test")),
             Json(ProviderStatusRequest {
                 admin_user_id: String::new(),
                 provider_name: "stripe".into(),
@@ -824,6 +840,7 @@ mod tests {
 
         let Json(resp) = get_provider_status(
             State(state),
+            Extension(auth("test")),
             Json(ProviderStatusRequest {
                 admin_user_id: String::new(),
                 provider_name: "stripe".into(),
@@ -883,6 +900,7 @@ mod tests {
 
         let Json(resp) = update_payment_provider(
             State(state.clone()),
+            Extension(auth("test")),
             Json(UpdateProviderRequest {
                 admin_user_id: "admin_new".into(),
                 provider_name: "stripe".into(),
@@ -940,6 +958,7 @@ mod tests {
 
         let Json(resp) = get_provider_status(
             State(state),
+            Extension(auth("test")),
             Json(ProviderStatusRequest {
                 admin_user_id: "admin_status".into(),
                 provider_name: "stripe".into(),
@@ -978,6 +997,7 @@ mod tests {
 
         let Json(resp) = get_provider_status(
             State(state),
+            Extension(auth("test")),
             Json(ProviderStatusRequest {
                 admin_user_id: String::new(),
                 provider_name: "stripe".into(),
@@ -1017,6 +1037,7 @@ mod tests {
 
         let Json(resp) = get_provider_status(
             State(state),
+            Extension(auth("test")),
             Json(ProviderStatusRequest {
                 admin_user_id: String::new(),
                 provider_name: "stripe".into(),

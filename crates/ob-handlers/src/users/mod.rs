@@ -852,6 +852,16 @@ pub fn router(state: HandlersState) -> Router {
 
 #[cfg(test)]
 mod tests {
+    fn auth(uid: &str) -> AuthContext {
+        AuthContext {
+            user_id: uid.to_string(),
+            roles: vec![],
+            authenticated: true,
+            email_verified: true,
+            custom_claims: serde_json::Value::Null,
+        }
+    }
+
     use super::*;
     use axum::extract::State;
     use ob_core::Config;
@@ -1227,6 +1237,7 @@ mod tests {
 
         let Json(resp) = create_profile(
             State(state),
+            Extension(auth("test")),
             Json(CreateProfileRequest {
                 user_id: Some("user_1".to_string()),
                 email: "user@example.com".into(),
@@ -1250,6 +1261,7 @@ mod tests {
 
         let Json(resp) = create_profile(
             State(state.clone()),
+            Extension(auth("test")),
             Json(CreateProfileRequest {
                 user_id: Some("user_1".to_string()),
                 email: "fallback@example.com".into(),
@@ -1288,7 +1300,10 @@ mod tests {
 
         let err = update_profile(
             State(state),
+            Extension(auth("test")),
             Json(UpdateProfileRequest {
+                terms_accepted_at: None,
+                terms_version: None,
                 user_id: Some("user_1".to_string()),
                 name: None,
                 address: None,
@@ -1319,7 +1334,10 @@ mod tests {
 
         let Json(resp) = update_profile(
             State(state.clone()),
+            Extension(auth("test")),
             Json(UpdateProfileRequest {
+                terms_accepted_at: None,
+                terms_version: None,
                 user_id: Some("user_1".to_string()),
                 name: Some(" Updated Name ".into()),
                 address: None,
@@ -1362,6 +1380,7 @@ mod tests {
 
         let Json(resp) = get_profile(
             State(state),
+            Extension(auth("test")),
             Json(GetProfileRequest {
                 user_id: Some("user_1".to_string()),
             }),
@@ -1384,6 +1403,7 @@ mod tests {
 
         let Json(resp) = email_consent(
             State(state.clone()),
+            Extension(auth("test")),
             Json(EmailConsentRequest {
                 user_id: Some("user_1".to_string()),
                 consent: false,
@@ -1416,6 +1436,7 @@ mod tests {
 
         let err = notification_preferences(
             State(state),
+            Extension(auth("test")),
             Json(NotificationPrefsRequest {
                 user_id: Some("user_1".to_string()),
                 notify_new_products: Some(true),
@@ -1443,6 +1464,7 @@ mod tests {
 
         let err = notification_preferences(
             State(state),
+            Extension(auth("test")),
             Json(NotificationPrefsRequest {
                 user_id: Some("user_1".to_string()),
                 notify_new_products: None,
@@ -1473,6 +1495,7 @@ mod tests {
 
         let Json(resp) = notification_preferences(
             State(state.clone()),
+            Extension(auth("test")),
             Json(NotificationPrefsRequest {
                 user_id: Some("user_1".to_string()),
                 notify_new_products: Some(true),
@@ -1498,6 +1521,7 @@ mod tests {
 
         let Json(resp) = cleanup_fcm_token(
             State(state),
+            Extension(auth("test")),
             Json(CleanupFcmTokenRequest {
                 user_id: Some("user_1".to_string()),
                 token: "tok_1".into(),
@@ -1524,6 +1548,7 @@ mod tests {
 
         let Json(resp) = cleanup_fcm_token(
             State(state.clone()),
+            Extension(auth("test")),
             Json(CleanupFcmTokenRequest {
                 user_id: Some("user_1".to_string()),
                 token: "tok_1".into(),
@@ -1554,6 +1579,7 @@ mod tests {
 
         let Json(resp) = add_buyer_address(
             State(state.clone()),
+            Extension(auth("test")),
             Json(AddBuyerAddressRequest {
                 user_id: Some("user_1".to_string()),
                 street: "1 Main St".into(),
@@ -1594,6 +1620,7 @@ mod tests {
 
         let err = update_buyer_address(
             State(state),
+            Extension(auth("test")),
             Json(UpdateBuyerAddressRequest {
                 user_id: Some("user_1".to_string()),
                 address_id: "addr_1".into(),
@@ -1644,6 +1671,7 @@ mod tests {
 
         let Json(resp) = delete_buyer_address(
             State(state.clone()),
+            Extension(auth("test")),
             Json(DeleteBuyerAddressRequest {
                 user_id: Some("user_1".to_string()),
                 address_id: "addr_1".into(),
@@ -1678,6 +1706,7 @@ mod tests {
 
         let Json(resp) = set_default_buyer_address(
             State(state.clone()),
+            Extension(auth("test")),
             Json(SetDefaultBuyerAddressRequest {
                 user_id: Some("user_1".to_string()),
                 address_id: "addr_2".into(),
@@ -1714,7 +1743,10 @@ mod tests {
 
         let err = update_profile(
             State(state),
+            Extension(auth("test")),
             Json(UpdateProfileRequest {
+                terms_accepted_at: None,
+                terms_version: None,
                 user_id: Some("user_1".to_string()),
                 name: Some("".into()), // empty after trim → 0 < MIN_NAME_LENGTH
                 address: None,
@@ -1740,7 +1772,10 @@ mod tests {
         let long_name = "A".repeat(MAX_NAME_LENGTH + 1);
         let err = update_profile(
             State(state),
+            Extension(auth("test")),
             Json(UpdateProfileRequest {
+                terms_accepted_at: None,
+                terms_version: None,
                 user_id: Some("user_1".to_string()),
                 name: Some(long_name),
                 address: None,
@@ -1767,7 +1802,10 @@ mod tests {
 
         let err = update_profile(
             State(state),
+            Extension(auth("test")),
             Json(UpdateProfileRequest {
+                terms_accepted_at: None,
+                terms_version: None,
                 user_id: Some("user_1".to_string()),
                 name: None,
                 address: Some(AddressInput {
@@ -1798,7 +1836,10 @@ mod tests {
 
         let Json(resp) = update_profile(
             State(state.clone()),
+            Extension(auth("test")),
             Json(UpdateProfileRequest {
+                terms_accepted_at: None,
+                terms_version: None,
                 user_id: Some("user_1".to_string()),
                 name: None,
                 address: Some(AddressInput {
@@ -1842,7 +1883,10 @@ mod tests {
         // Empty GST number should skip validation and succeed
         let Json(resp) = update_profile(
             State(state.clone()),
+            Extension(auth("test")),
             Json(UpdateProfileRequest {
+                terms_accepted_at: None,
+                terms_version: None,
                 user_id: Some("user_1".to_string()),
                 name: None,
                 address: None,
@@ -1873,6 +1917,7 @@ mod tests {
 
         let Json(resp) = email_consent(
             State(state.clone()),
+            Extension(auth("test")),
             Json(EmailConsentRequest {
                 user_id: Some("user_1".to_string()),
                 consent: true,
@@ -1912,6 +1957,7 @@ mod tests {
 
         let Json(resp) = update_buyer_address(
             State(state.clone()),
+            Extension(auth("test")),
             Json(UpdateBuyerAddressRequest {
                 user_id: Some("user_1".to_string()),
                 address_id: "addr_1".into(),
@@ -1961,6 +2007,7 @@ mod tests {
 
         let Json(resp) = update_buyer_address(
             State(state.clone()),
+            Extension(auth("test")),
             Json(UpdateBuyerAddressRequest {
                 user_id: Some("user_1".to_string()),
                 address_id: "addr_2".into(),
@@ -2002,6 +2049,7 @@ mod tests {
 
         let err = delete_buyer_address(
             State(state),
+            Extension(auth("test")),
             Json(DeleteBuyerAddressRequest {
                 user_id: Some("user_1".to_string()),
                 address_id: "addr_1".into(),
@@ -2030,6 +2078,7 @@ mod tests {
 
         let err = set_default_buyer_address(
             State(state),
+            Extension(auth("test")),
             Json(SetDefaultBuyerAddressRequest {
                 user_id: Some("user_1".to_string()),
                 address_id: "addr_1".into(),
@@ -2069,6 +2118,7 @@ mod tests {
 
         let Json(resp) = add_buyer_address(
             State(state.clone()),
+            Extension(auth("test")),
             Json(AddBuyerAddressRequest {
                 user_id: Some("user_1".to_string()),
                 street: "1 Main St".into(),
@@ -2109,6 +2159,7 @@ mod tests {
 
         let Json(resp) = delete_buyer_address(
             State(state.clone()),
+            Extension(auth("test")),
             Json(DeleteBuyerAddressRequest {
                 user_id: Some("user_1".to_string()),
                 address_id: "addr_1".into(),

@@ -1131,6 +1131,16 @@ async fn handle_invoice_payment_failed(
 
 #[cfg(test)]
 mod tests {
+    fn auth(uid: &str) -> AuthContext {
+        AuthContext {
+            user_id: uid.to_string(),
+            roles: vec![],
+            authenticated: true,
+            email_verified: true,
+            custom_claims: serde_json::Value::Null,
+        }
+    }
+
     use super::*;
     use axum::extract::State;
     use ob_core::Config;
@@ -1489,6 +1499,7 @@ mod tests {
 
         let err = create_subscription(
             State(state),
+            Extension(auth("test")),
             Json(CreateSubscriptionRequest {
                 user_id: Some("user_1".to_string()),
                 payment_method_id: None,
@@ -1507,6 +1518,7 @@ mod tests {
         let state = setup_state().await;
         let err = cancel_subscription(
             State(state),
+            Extension(auth("test")),
             Json(CancelSubscriptionRequest {
                 user_id: Some("user_1".to_string()),
             }),
@@ -1535,6 +1547,7 @@ mod tests {
 
         let err = reactivate_subscription(
             State(state),
+            Extension(auth("test")),
             Json(ReactivateSubscriptionRequest {
                 user_id: Some("user_1".to_string()),
             }),
@@ -1552,6 +1565,7 @@ mod tests {
         let state = setup_state().await;
         let err = update_notification_preferences(
             State(state),
+            Extension(auth("test")),
             Json(SubscriptionNotificationPrefsRequest {
                 user_id: Some("user_1".to_string()),
                 notify_new_products: None,
@@ -1585,6 +1599,7 @@ mod tests {
 
         let Json(resp) = subscription_status(
             State(state),
+            Extension(auth("test")),
             Json(SubscriptionStatusRequest {
                 user_id: Some("user_1".to_string()),
             }),
@@ -1803,6 +1818,7 @@ mod tests {
 
         let Json(resp) = create_subscription(
             State(state.clone()),
+            Extension(auth("test")),
             Json(CreateSubscriptionRequest {
                 user_id: Some("user_1".to_string()),
                 payment_method_id: None,
@@ -1865,6 +1881,7 @@ mod tests {
 
         let Json(resp) = cancel_subscription(
             State(state.clone()),
+            Extension(auth("test")),
             Json(CancelSubscriptionRequest {
                 user_id: Some("user_1".to_string()),
             }),
@@ -1935,6 +1952,7 @@ mod tests {
 
         let Json(resp) = reactivate_subscription(
             State(state.clone()),
+            Extension(auth("test")),
             Json(ReactivateSubscriptionRequest {
                 user_id: Some("user_1".to_string()),
             }),
@@ -2073,6 +2091,7 @@ mod tests {
         let state = setup_state().await;
         let err = create_subscription(
             State(state),
+            Extension(auth("test")),
             Json(CreateSubscriptionRequest {
                 user_id: Some("user_1".to_string()),
                 payment_method_id: Some("".into()),
@@ -2121,6 +2140,7 @@ mod tests {
 
         let err = create_subscription(
             State(state),
+            Extension(auth("test")),
             Json(CreateSubscriptionRequest {
                 user_id: Some("user_seller".to_string()),
                 payment_method_id: None,
@@ -2174,6 +2194,7 @@ mod tests {
 
         let err = create_subscription(
             State(state),
+            Extension(auth("test")),
             Json(CreateSubscriptionRequest {
                 user_id: Some("user_chk".to_string()),
                 payment_method_id: None,
@@ -2233,6 +2254,7 @@ mod tests {
 
         let err = create_subscription(
             State(state),
+            Extension(auth("test")),
             Json(CreateSubscriptionRequest {
                 user_id: Some("user_eu".to_string()),
                 payment_method_id: None,
@@ -2318,6 +2340,7 @@ mod tests {
 
         let Json(resp) = create_subscription(
             State(state.clone()),
+            Extension(auth("test")),
             Json(CreateSubscriptionRequest {
                 user_id: Some("user_pm".to_string()),
                 payment_method_id: Some("pm_test_abc".into()),
@@ -2383,6 +2406,7 @@ mod tests {
 
         let err = create_subscription(
             State(state),
+            Extension(auth("test")),
             Json(CreateSubscriptionRequest {
                 user_id: Some("user_af".to_string()),
                 payment_method_id: Some("pm_bad".into()),
@@ -2462,6 +2486,7 @@ mod tests {
 
         let Json(resp) = create_subscription(
             State(state),
+            Extension(auth("test")),
             Json(CreateSubscriptionRequest {
                 user_id: Some("user_aa".to_string()),
                 payment_method_id: Some("pm_aa".into()),
@@ -2527,6 +2552,7 @@ mod tests {
 
         let err = create_subscription(
             State(state),
+            Extension(auth("test")),
             Json(CreateSubscriptionRequest {
                 user_id: Some("user_sf".to_string()),
                 payment_method_id: Some("pm_sf".into()),
@@ -2559,6 +2585,7 @@ mod tests {
 
         let err = cancel_subscription(
             State(state),
+            Extension(auth("test")),
             Json(CancelSubscriptionRequest {
                 user_id: Some("user_noid".to_string()),
             }),
@@ -2591,6 +2618,7 @@ mod tests {
 
         let Json(resp) = cancel_subscription(
             State(state),
+            Extension(auth("test")),
             Json(CancelSubscriptionRequest {
                 user_id: Some("user_cc".to_string()),
             }),
@@ -2637,6 +2665,7 @@ mod tests {
 
         let err = cancel_subscription(
             State(state),
+            Extension(auth("test")),
             Json(CancelSubscriptionRequest {
                 user_id: Some("user_cf".to_string()),
             }),
@@ -2655,6 +2684,7 @@ mod tests {
         let state = setup_state().await;
         let Json(resp) = subscription_status(
             State(state),
+            Extension(auth("test")),
             Json(SubscriptionStatusRequest {
                 user_id: Some("user_none".to_string()),
             }),
@@ -2691,6 +2721,7 @@ mod tests {
 
         let err = reactivate_subscription(
             State(state),
+            Extension(auth("test")),
             Json(ReactivateSubscriptionRequest {
                 user_id: Some("user_noid2".to_string()),
             }),
@@ -2723,6 +2754,7 @@ mod tests {
 
         let Json(resp) = reactivate_subscription(
             State(state),
+            Extension(auth("test")),
             Json(ReactivateSubscriptionRequest {
                 user_id: Some("user_active".to_string()),
             }),
@@ -2769,6 +2801,7 @@ mod tests {
 
         let err = reactivate_subscription(
             State(state),
+            Extension(auth("test")),
             Json(ReactivateSubscriptionRequest {
                 user_id: Some("user_rf".to_string()),
             }),
@@ -2802,6 +2835,7 @@ mod tests {
 
         let Json(resp) = update_notification_preferences(
             State(state.clone()),
+            Extension(auth("test")),
             Json(SubscriptionNotificationPrefsRequest {
                 user_id: Some("user_np".to_string()),
                 notify_new_products: Some(true),
@@ -2839,6 +2873,7 @@ mod tests {
 
         let Json(resp) = update_notification_preferences(
             State(state.clone()),
+            Extension(auth("test")),
             Json(SubscriptionNotificationPrefsRequest {
                 user_id: Some("user_np2".to_string()),
                 notify_new_products: Some(false),
@@ -2867,6 +2902,7 @@ mod tests {
 
         let Json(resp) = update_notification_preferences(
             State(state.clone()),
+            Extension(auth("test")),
             Json(SubscriptionNotificationPrefsRequest {
                 user_id: Some("user_np3".to_string()),
                 notify_new_products: None,

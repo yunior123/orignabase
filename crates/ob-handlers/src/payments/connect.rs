@@ -383,6 +383,16 @@ async fn get_account_status(
 
 #[cfg(test)]
 mod tests {
+    fn auth(uid: &str) -> AuthContext {
+        AuthContext {
+            user_id: uid.to_string(),
+            roles: vec![],
+            authenticated: true,
+            email_verified: true,
+            custom_claims: serde_json::Value::Null,
+        }
+    }
+
     use super::*;
     use axum::extract::State;
     use ob_core::Config;
@@ -498,6 +508,7 @@ mod tests {
 
         let Json(resp) = create_account(
             State(state),
+            Extension(auth("test")),
             Json(CreateAccountRequest {
                 user_id: Some("seller_1".to_string()),
                 email: None,
@@ -521,6 +532,7 @@ mod tests {
 
         let missing_err = create_account(
             State(state.clone()),
+            Extension(auth("test")),
             Json(CreateAccountRequest {
                 user_id: Some("seller_1".to_string()),
                 email: None,
@@ -533,6 +545,7 @@ mod tests {
 
         let invalid_err = create_account(
             State(state),
+            Extension(auth("test")),
             Json(CreateAccountRequest {
                 user_id: Some("seller_1".to_string()),
                 email: Some("not-an-email".into()),
@@ -569,6 +582,7 @@ mod tests {
 
         let Json(resp) = create_account(
             State(state.clone()),
+            Extension(auth("test")),
             Json(CreateAccountRequest {
                 user_id: Some("seller_2".to_string()),
                 email: None,
@@ -610,6 +624,7 @@ mod tests {
 
         let missing_err = create_account_link(
             State(state.clone()),
+            Extension(auth("test")),
             Json(AccountLinkRequest {
                 user_id: Some("seller_3".to_string()),
                 account_id: None,
@@ -631,6 +646,7 @@ mod tests {
 
         let mismatch_err = create_account_link(
             State(state),
+            Extension(auth("test")),
             Json(AccountLinkRequest {
                 user_id: Some("seller_3".to_string()),
                 account_id: Some("acct_other".into()),
@@ -667,6 +683,7 @@ mod tests {
 
         let Json(resp) = create_account_link(
             State(state),
+            Extension(auth("test")),
             Json(AccountLinkRequest {
                 user_id: Some("seller_4".to_string()),
                 account_id: None,
@@ -689,6 +706,7 @@ mod tests {
 
         let missing_err = get_account_status(
             State(state.clone()),
+            Extension(auth("test")),
             Json(AccountStatusRequest {
                 user_id: Some("seller_5".to_string()),
                 account_id: None,
@@ -710,6 +728,7 @@ mod tests {
 
         let mismatch_err = get_account_status(
             State(state),
+            Extension(auth("test")),
             Json(AccountStatusRequest {
                 user_id: Some("seller_5".to_string()),
                 account_id: Some("acct_other".into()),
@@ -747,6 +766,7 @@ mod tests {
 
         let Json(resp) = get_account_status(
             State(state.clone()),
+            Extension(auth("test")),
             Json(AccountStatusRequest {
                 user_id: Some("seller_6".to_string()),
                 account_id: None,
@@ -805,6 +825,7 @@ mod tests {
 
         let err = create_account(
             State(state),
+            Extension(auth("test")),
             Json(CreateAccountRequest {
                 user_id: Some("seller_err".to_string()),
                 email: Some("seller@example.com".into()),
@@ -842,6 +863,7 @@ mod tests {
 
         let err = create_account_link(
             State(state),
+            Extension(auth("test")),
             Json(AccountLinkRequest {
                 user_id: Some("seller_link_err".to_string()),
                 account_id: None,
@@ -875,6 +897,7 @@ mod tests {
 
         let err = get_account_status(
             State(state),
+            Extension(auth("test")),
             Json(AccountStatusRequest {
                 user_id: Some("seller_status_err".to_string()),
                 account_id: None,

@@ -869,7 +869,7 @@ mod tests {
         breakdown.insert("item1".to_string(), 8.99);
         let resp = CalculateShippingResponse {
             success: true,
-            total_cost: 8.99,
+            total_cost_cents: 8.99,
             breakdown,
         };
         let json = serde_json::to_value(&resp).unwrap();
@@ -1087,7 +1087,9 @@ mod tests {
                     latitude: None,
                     longitude: None,
                     state: Some("ON".into()),
-                },
+                ,
+                subtotal_cents: None,
+            },
                 items: vec![
                     ShippingItem {
                         product_id: "free_1".into(),
@@ -1109,7 +1111,7 @@ mod tests {
         .unwrap();
 
         assert!(resp.success);
-        assert_eq!(resp.total_cost, 0.0);
+        assert_eq!(resp.total_cost_cents, 0.0);
         assert!(resp.breakdown.is_empty());
     }
 
@@ -1124,7 +1126,9 @@ mod tests {
                     latitude: None,
                     longitude: None,
                     state: Some("QC".into()),
-                },
+                ,
+                subtotal_cents: None,
+            },
                 items: vec![ShippingItem {
                     product_id: "local_1".into(),
                     seller_id: Some("seller_1".into()),
@@ -1244,7 +1248,9 @@ mod tests {
                     latitude: Some(43.7),
                     longitude: Some(-79.4),
                     state: Some("ON".into()),
-                },
+                ,
+                subtotal_cents: None,
+            },
                 items: vec![ShippingItem {
                     product_id: "p1".into(),
                     seller_id: Some("seller_1".into()),
@@ -1265,7 +1271,7 @@ mod tests {
 
         assert!(resp.success);
         // Falls through to fallback since geoapify call fails (real URL)
-        assert!(resp.total_cost > 0.0);
+        assert!(resp.total_cost_cents > 0);
     }
 
     #[tokio::test]
@@ -1296,7 +1302,9 @@ mod tests {
                     latitude: Some(43.7),
                     longitude: Some(-79.4),
                     state: Some("ON".into()),
-                },
+                ,
+                subtotal_cents: None,
+            },
                 items: vec![ShippingItem {
                     product_id: "p1".into(),
                     seller_id: Some("seller_1".into()),
@@ -1331,7 +1339,9 @@ mod tests {
                     latitude: None,
                     longitude: None,
                     state: Some("QC".into()),
-                },
+                ,
+                subtotal_cents: None,
+            },
                 items: vec![
                     ShippingItem {
                         product_id: "normal_1".into(),
@@ -1376,7 +1386,9 @@ mod tests {
                     latitude: None,
                     longitude: None,
                     state: Some("QC".into()),
-                },
+                ,
+                subtotal_cents: None,
+            },
                 items: vec![
                     ShippingItem {
                         product_id: "perishable_1".into(),
@@ -1404,6 +1416,6 @@ mod tests {
         assert!(resp.success);
         assert_eq!(resp.breakdown["cart_perishable"], 16.99);
         assert_eq!(resp.breakdown["cart_standard"], 29.69);
-        assert_eq!(resp.total_cost, 46.68);
+        assert_eq!(resp.total_cost_cents, 46.68);
     }
 }

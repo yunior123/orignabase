@@ -1286,6 +1286,7 @@ mod tests {
             stripe_client: None,
             stripe_base_url,
         }
+    turnstile_secret_key: None,
     }
 
     #[tokio::test]

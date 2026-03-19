@@ -538,6 +538,7 @@ mod tests {
             db: state.db.clone(),
             stripe_client: None,
             stripe_base_url: state.stripe_base_url.clone(),
+            turnstile_secret_key: None,
         };
 
         let result = get_suggestions(State(state_short_timeout), Extension(auth), Json(req)).await;

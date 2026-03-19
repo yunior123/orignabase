@@ -252,6 +252,16 @@ async fn capture_payment(
 
 #[cfg(test)]
 mod tests {
+    fn auth(uid: &str) -> AuthContext {
+        AuthContext {
+            user_id: uid.to_string(),
+            roles: vec![],
+            authenticated: true,
+            email_verified: true,
+            custom_claims: serde_json::Value::Null,
+        }
+    }
+
     use super::*;
     use axum::extract::State;
     use ob_core::Config;
@@ -407,6 +417,7 @@ mod tests {
 
         let forbidden = capture_payment(
             State(state.clone()),
+            Extension(auth("test")),
             Json(CapturePaymentRequest {
                 order_id: "order_1".into(),
                 user_id: Some("seller_2".to_string()),
@@ -422,6 +433,7 @@ mod tests {
 
         let invalid_status = capture_payment(
             State(state),
+            Extension(auth("test")),
             Json(CapturePaymentRequest {
                 order_id: "order_1".into(),
                 user_id: Some("seller_1".to_string()),
@@ -458,6 +470,7 @@ mod tests {
 
         let invalid_payment = capture_payment(
             State(state.clone()),
+            Extension(auth("test")),
             Json(CapturePaymentRequest {
                 order_id: "order_1".into(),
                 user_id: Some("seller_1".to_string()),
@@ -487,6 +500,7 @@ mod tests {
 
         let missing_refs = capture_payment(
             State(state),
+            Extension(auth("test")),
             Json(CapturePaymentRequest {
                 order_id: "order_1".into(),
                 user_id: Some("seller_1".to_string()),
@@ -541,6 +555,7 @@ mod tests {
 
         let Json(resp) = capture_payment(
             State(state.clone()),
+            Extension(auth("test")),
             Json(CapturePaymentRequest {
                 order_id: "order_1".into(),
                 user_id: Some("seller_1".to_string()),
@@ -613,6 +628,7 @@ mod tests {
 
         let Json(resp) = capture_payment(
             State(state.clone()),
+            Extension(auth("test")),
             Json(CapturePaymentRequest {
                 order_id: "order_1".into(),
                 user_id: Some("seller_1".to_string()),
@@ -682,6 +698,7 @@ mod tests {
 
         let missing_pi = capture_payment(
             State(state.clone()),
+            Extension(auth("test")),
             Json(CapturePaymentRequest {
                 order_id: "order_missing_pi".into(),
                 user_id: Some("seller_1".to_string()),
@@ -715,6 +732,7 @@ mod tests {
 
         let bad_capture = capture_payment(
             State(state),
+            Extension(auth("test")),
             Json(CapturePaymentRequest {
                 order_id: "order_bad_capture".into(),
                 user_id: Some("seller_1".to_string()),
@@ -765,6 +783,7 @@ mod tests {
 
         let err = capture_payment(
             State(state),
+            Extension(auth("test")),
             Json(CapturePaymentRequest {
                 order_id: "order_cs_fail".into(),
                 user_id: Some("seller_1".to_string()),
@@ -811,6 +830,7 @@ mod tests {
 
         let err = capture_payment(
             State(state),
+            Extension(auth("test")),
             Json(CapturePaymentRequest {
                 order_id: "order_http_err".into(),
                 user_id: Some("seller_1".to_string()),

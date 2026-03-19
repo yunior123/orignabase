@@ -743,6 +743,7 @@ mod tests {
             stripe_client: None,
             stripe_base_url,
         }
+    turnstile_secret_key: None,
     }
 
     async fn seed_user(state: &HandlersState, user_id: &str, roles: &[&str]) {
