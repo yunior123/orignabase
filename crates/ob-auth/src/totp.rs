@@ -283,155 +283,155 @@ mod tests {
     }
 }
 
-    #[test]
-    fn test_verify_totp_replay_prevention() {
-        let secret = generate_secret();
-        let totp = build_totp(&secret, "test", "test").unwrap();
-        let code = totp.generate_current().unwrap();
-        
-        // First verification with step tracking
-        let result1 = verify_totp(&secret, &code, None);
-        assert!(result1.is_ok());
-        
-        let step1 = result1.unwrap();
-        
-        // Immediate replay with same step should fail
-        let result2 = verify_totp(&secret, &code, Some(step1));
-        assert!(result2.is_err());
-    }
+#[test]
+fn test_verify_totp_replay_prevention() {
+    let secret = generate_secret();
+    let totp = build_totp(&secret, "test", "test").unwrap();
+    let code = totp.generate_current().unwrap();
 
-    #[test]
-    fn test_secret_generation_length() {
-        let secret = generate_secret();
-        assert_eq!(secret.len(), SECRET_LENGTH);
-    }
+    // First verification with step tracking
+    let result1 = verify_totp(&secret, &code, None);
+    assert!(result1.is_ok());
 
-    #[test]
-    fn test_secret_generation_randomness() {
-        let s1 = generate_secret();
-        let s2 = generate_secret();
-        assert_ne!(s1, s2); // Should be different
-    }
+    let step1 = result1.unwrap();
 
-    #[test]
-    fn test_recovery_codes_non_empty() {
-        let codes = generate_recovery_codes();
-        for code in &codes {
-            assert!(!code.is_empty());
-            assert!(code.len() > 0);
-        }
-    }
+    // Immediate replay with same step should fail
+    let result2 = verify_totp(&secret, &code, Some(step1));
+    assert!(result2.is_err());
+}
 
-    #[test]
-    fn test_recovery_codes_format() {
-        let codes = generate_recovery_codes();
-        // Codes should be alphanumeric
-        for code in &codes {
-            assert!(code.chars().all(|c| c.is_ascii_alphanumeric()));
-        }
-    }
+#[test]
+fn test_secret_generation_length() {
+    let secret = generate_secret();
+    assert_eq!(secret.len(), SECRET_LENGTH);
+}
 
-    #[test]
-    fn test_recovery_code_hash_format() {
-        let code = "RECOVERY_CODE_123";
-        let hash = hash_recovery_code(code).unwrap();
-        // Should be Argon2
-        assert!(hash.starts_with("$argon2"));
-    }
+#[test]
+fn test_secret_generation_randomness() {
+    let s1 = generate_secret();
+    let s2 = generate_secret();
+    assert_ne!(s1, s2); // Should be different
+}
 
-    #[test]
-    fn test_recovery_code_case_sensitive() {
-        let code = "ABCDEFGH";
-        let hash = hash_recovery_code(code).unwrap();
-        
-        assert!(verify_recovery_code("ABCDEFGH", &hash).unwrap());
-        assert!(!verify_recovery_code("abcdefgh", &hash).unwrap());
-        assert!(!verify_recovery_code("ABCDEFGHI", &hash).unwrap());
+#[test]
+fn test_recovery_codes_non_empty() {
+    let codes = generate_recovery_codes();
+    for code in &codes {
+        assert!(!code.is_empty());
+        assert!(code.len() > 0);
     }
+}
 
-    #[test]
-    fn test_build_totp_from_secret() {
-        let secret = generate_secret();
-        let totp = build_totp(&secret, "test_issuer", "test_account");
-        assert!(totp.is_ok());
+#[test]
+fn test_recovery_codes_format() {
+    let codes = generate_recovery_codes();
+    // Codes should be alphanumeric
+    for code in &codes {
+        assert!(code.chars().all(|c| c.is_ascii_alphanumeric()));
     }
+}
 
-    #[test]
-    fn test_otpauth_url_contains_issuer() {
-        let secret = generate_secret();
-        let url = build_otpauth_url(&secret, "MyApp", "user@example.com").unwrap();
-        assert!(url.contains("MyApp"));
-    }
+#[test]
+fn test_recovery_code_hash_format() {
+    let code = "RECOVERY_CODE_123";
+    let hash = hash_recovery_code(code).unwrap();
+    // Should be Argon2
+    assert!(hash.starts_with("$argon2"));
+}
 
-    #[test]
-    fn test_otpauth_url_contains_account() {
-        let secret = generate_secret();
-        let url = build_otpauth_url(&secret, "test", "myuser").unwrap();
-        assert!(url.contains("myuser"));
-    }
+#[test]
+fn test_recovery_code_case_sensitive() {
+    let code = "ABCDEFGH";
+    let hash = hash_recovery_code(code).unwrap();
 
-    #[test]
-    fn test_qr_base64_format() {
-        let secret = generate_secret();
-        let qr = generate_qr_base64(&secret, "OrignaBase", "test@test.com").unwrap();
-        // Base64 QR should start with data URL or base64 string
-        assert!(!qr.is_empty());
-    }
+    assert!(verify_recovery_code("ABCDEFGH", &hash).unwrap());
+    assert!(!verify_recovery_code("abcdefgh", &hash).unwrap());
+    assert!(!verify_recovery_code("ABCDEFGHI", &hash).unwrap());
+}
 
-    #[test]
-    fn test_totp_code_is_six_digits() {
-        let secret = generate_secret();
-        let totp = build_totp(&secret, "test", "test").unwrap();
-        let code = totp.generate_current().unwrap();
-        
-        assert_eq!(code.len(), 6);
-        assert!(code.chars().all(|c| c.is_ascii_digit()));
-    }
+#[test]
+fn test_build_totp_from_secret() {
+    let secret = generate_secret();
+    let totp = build_totp(&secret, "test_issuer", "test_account");
+    assert!(totp.is_ok());
+}
 
-    #[test]
-    fn test_verify_totp_multiple_valid_codes_over_time() {
-        let secret = generate_secret();
-        
-        // Generate code now
-        let totp = build_totp(&secret, "test", "test").unwrap();
-        let code1 = totp.generate_current().unwrap();
-        
-        // Verify it works
-        let result1 = verify_totp(&secret, &code1, None);
-        assert!(result1.is_ok());
-    }
+#[test]
+fn test_otpauth_url_contains_issuer() {
+    let secret = generate_secret();
+    let url = build_otpauth_url(&secret, "MyApp", "user@example.com").unwrap();
+    assert!(url.contains("MyApp"));
+}
 
-    #[test]
-    fn test_recovery_code_wrong_hash() {
-        let codes = generate_recovery_codes();
-        let code = &codes[0];
-        let hash = hash_recovery_code(code).unwrap();
-        
-        // Wrong code should fail
-        let result = verify_recovery_code(&codes[1], &hash);
-        assert!(!result.unwrap());
-    }
+#[test]
+fn test_otpauth_url_contains_account() {
+    let secret = generate_secret();
+    let url = build_otpauth_url(&secret, "test", "myuser").unwrap();
+    assert!(url.contains("myuser"));
+}
 
-    #[test]
-    fn test_verify_totp_invalid_code_format() {
-        let secret = generate_secret();
-        
-        // Try with non-numeric code
-        let result = verify_totp(&secret, "abcdef", None);
-        // Should error on invalid format
-        assert!(result.is_err());
-    }
+#[test]
+fn test_qr_base64_format() {
+    let secret = generate_secret();
+    let qr = generate_qr_base64(&secret, "OrignaBase", "test@test.com").unwrap();
+    // Base64 QR should start with data URL or base64 string
+    assert!(!qr.is_empty());
+}
 
-    #[test]
-    fn test_verify_totp_too_short_code() {
-        let secret = generate_secret();
-        let result = verify_totp(&secret, "123", None);
-        assert!(result.is_err());
-    }
+#[test]
+fn test_totp_code_is_six_digits() {
+    let secret = generate_secret();
+    let totp = build_totp(&secret, "test", "test").unwrap();
+    let code = totp.generate_current().unwrap();
 
-    #[test]
-    fn test_verify_totp_too_long_code() {
-        let secret = generate_secret();
-        let result = verify_totp(&secret, "1234567", None);
-        assert!(result.is_err());
-    }
+    assert_eq!(code.len(), 6);
+    assert!(code.chars().all(|c| c.is_ascii_digit()));
+}
+
+#[test]
+fn test_verify_totp_multiple_valid_codes_over_time() {
+    let secret = generate_secret();
+
+    // Generate code now
+    let totp = build_totp(&secret, "test", "test").unwrap();
+    let code1 = totp.generate_current().unwrap();
+
+    // Verify it works
+    let result1 = verify_totp(&secret, &code1, None);
+    assert!(result1.is_ok());
+}
+
+#[test]
+fn test_recovery_code_wrong_hash() {
+    let codes = generate_recovery_codes();
+    let code = &codes[0];
+    let hash = hash_recovery_code(code).unwrap();
+
+    // Wrong code should fail
+    let result = verify_recovery_code(&codes[1], &hash);
+    assert!(!result.unwrap());
+}
+
+#[test]
+fn test_verify_totp_invalid_code_format() {
+    let secret = generate_secret();
+
+    // Try with non-numeric code
+    let result = verify_totp(&secret, "abcdef", None);
+    // Should error on invalid format
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_verify_totp_too_short_code() {
+    let secret = generate_secret();
+    let result = verify_totp(&secret, "123", None);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_verify_totp_too_long_code() {
+    let secret = generate_secret();
+    let result = verify_totp(&secret, "1234567", None);
+    assert!(result.is_err());
+}

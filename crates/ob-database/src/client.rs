@@ -1,9 +1,9 @@
 use ob_core::Error;
 use ob_core::config::DatabaseConfig;
+use std::time::Duration;
 use surrealdb::Surreal;
 use surrealdb::engine::any::{Any, connect as connect_any};
 use surrealdb::opt::auth::Root;
-use std::time::Duration;
 
 /// Wrapper around the SurrealDB client with connection management and resilience.
 #[derive(Clone)]
@@ -68,23 +68,16 @@ impl DatabaseClient {
     }
 
     /// Execute a query with a timeout to prevent long-running queries from blocking.
-    pub async fn query_with_timeout(
-        &self,
-        query: &str,
-        timeout_secs: u64,
-    ) -> ob_core::Result<()> {
-        tokio::time::timeout(
-            Duration::from_secs(timeout_secs),
-            self.db.query(query),
-        )
-        .await
-        .map_err(|_| {
-            Error::Database(format!(
-                "Query timeout exceeded ({}s). Query may be too complex or resource-intensive.",
-                timeout_secs
-            ))
-        })?
-        .map_err(|e| Error::Database(format!("Query execution failed: {e}")))?;
+    pub async fn query_with_timeout(&self, query: &str, timeout_secs: u64) -> ob_core::Result<()> {
+        tokio::time::timeout(Duration::from_secs(timeout_secs), self.db.query(query))
+            .await
+            .map_err(|_| {
+                Error::Database(format!(
+                    "Query timeout exceeded ({}s). Query may be too complex or resource-intensive.",
+                    timeout_secs
+                ))
+            })?
+            .map_err(|e| Error::Database(format!("Query execution failed: {e}")))?;
         Ok(())
     }
 }

@@ -701,14 +701,12 @@ async fn system_alerts(State(state): State<AdminState>) -> Result<Json<Value>> {
 
 /// POST /_admin/jwt/rotate — Rotate JWT signing keys (admin-only).
 /// Generates new RS256 key pair, moves current to previous, saves metadata.
-async fn rotate_jwt_keys(
-    State(_state): State<AdminState>,
-) -> Result<Json<Value>> {
+async fn rotate_jwt_keys(State(_state): State<AdminState>) -> Result<Json<Value>> {
     use std::path::Path;
-    
+
     // Keys directory (same as used in main.rs)
     let keys_dir = Path::new("./data/keys");
-    
+
     match ob_auth::rotate_keys(keys_dir) {
         Ok(new_fingerprint) => {
             tracing::info!(
@@ -731,14 +729,12 @@ async fn rotate_jwt_keys(
 }
 
 /// GET /_admin/jwt/status — View current JWT key metadata and rotation history.
-async fn jwt_key_status(
-    State(_state): State<AdminState>,
-) -> Result<Json<Value>> {
+async fn jwt_key_status(State(_state): State<AdminState>) -> Result<Json<Value>> {
     use std::path::Path;
-    
+
     let keys_dir = Path::new("./data/keys");
     let rotation_metadata_path = keys_dir.join("key_rotation.json");
-    
+
     if !rotation_metadata_path.exists() {
         return Ok(Json(json!({
             "status": "no_rotation_metadata",

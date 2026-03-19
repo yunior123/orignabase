@@ -145,7 +145,10 @@ async fn test_601_shipping_calc_cross_province() {
     .await;
 
     // Should accept cross-province shipping for non-perishable items
-    assert!(status == 200 || status == 400, "Cross-province shipping should be allowed");
+    assert!(
+        status == 200 || status == 400,
+        "Cross-province shipping should be allowed"
+    );
 }
 
 #[tokio::test]
@@ -181,7 +184,10 @@ async fn test_602_shipping_calc_free_shipping_threshold() {
     .await;
 
     // May return free shipping or reduced shipping cost
-    assert!(status == 200 || status == 400, "Free shipping threshold should apply");
+    assert!(
+        status == 200 || status == 400,
+        "Free shipping threshold should apply"
+    );
 }
 
 #[tokio::test]
@@ -477,7 +483,10 @@ async fn test_612_sequential_user_operations() {
         )
         .await;
 
-        assert!(status == 200 || status == 400, "Sequential updates should succeed");
+        assert!(
+            status == 200 || status == 400,
+            "Sequential updates should succeed"
+        );
     }
 }
 

@@ -336,14 +336,8 @@ async fn test_order_requires_authentication() {
     let client = reqwest::Client::new();
 
     // Try to create order without token
-    let (status, _body) = make_request(
-        &client,
-        "POST",
-        "/api/orders/create",
-        None,
-        Some(json!({})),
-    )
-    .await;
+    let (status, _body) =
+        make_request(&client, "POST", "/api/orders/create", None, Some(json!({}))).await;
 
     // Should require authentication
     assert!(status == 401 || status == 403);

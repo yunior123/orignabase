@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
+use ob_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::Path;
-use ob_core::{Error, Result};
 
 /// Metadata for a rotated key
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,7 +92,7 @@ impl KeyRotationManager {
 
 /// Generate SHA256 fingerprint of a public key (first 16 chars hex)
 pub fn fingerprint_public_key(public_pem: &[u8]) -> Result<String> {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();
     hasher.update(public_pem);

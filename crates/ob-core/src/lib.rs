@@ -9,4 +9,6 @@ pub use config::Config;
 pub use error::{Error, Result};
 pub use state::AppState;
 pub use tenant::TenantContext;
-pub use validate::{escape_surreal_string, validate_document_id, validate_identifier, validate_surreal_record_id};
+pub use validate::{
+    escape_surreal_string, validate_document_id, validate_identifier, validate_surreal_record_id,
+};

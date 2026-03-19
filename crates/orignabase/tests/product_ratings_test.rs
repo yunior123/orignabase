@@ -476,7 +476,8 @@ async fn test_get_ratings_list() {
 
     assert_eq!(status, 200, "Fetching ratings should succeed");
 
-    let empty_vec = vec![]; let ratings = ratings_resp["ratings"].as_array().unwrap_or(&empty_vec);
+    let empty_vec = vec![];
+    let ratings = ratings_resp["ratings"].as_array().unwrap_or(&empty_vec);
     assert!(
         !ratings.is_empty(),
         "Product should have at least one rating"
@@ -484,10 +485,7 @@ async fn test_get_ratings_list() {
 
     // Verify rating data structure
     let rating = &ratings[0];
-    assert!(
-        rating.get("userId").is_some(),
-        "Rating should have userId"
-    );
+    assert!(rating.get("userId").is_some(), "Rating should have userId");
     assert!(
         rating.get("rating").is_some(),
         "Rating should have rating field"
@@ -532,7 +530,8 @@ async fn test_get_ratings_pagination() {
 
     assert_eq!(status, 200, "Fetching ratings should succeed");
 
-    let empty_vec = vec![]; let ratings = ratings_resp["ratings"].as_array().unwrap_or(&empty_vec);
+    let empty_vec = vec![];
+    let ratings = ratings_resp["ratings"].as_array().unwrap_or(&empty_vec);
     assert!(
         ratings.len() <= 5,
         "Ratings list should respect limit parameter"

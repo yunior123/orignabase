@@ -34,10 +34,7 @@ async fn register_test_user(client: &Client) -> (String, String) {
         .as_str()
         .expect("missing access_token")
         .to_string();
-    let user_id = body["user"]["id"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
+    let user_id = body["user"]["id"].as_str().unwrap_or("").to_string();
     (token, user_id)
 }
 
@@ -121,11 +118,15 @@ async fn test_order_create_pending_status() {
     assert!(!order_id.is_empty(), "Order should have an ID");
 
     // Verify order has correct initial status
-    let (status, detail) = api_get(&client, &format!("/api/orders/{}", order_id), &buyer_token).await;
+    let (status, detail) =
+        api_get(&client, &format!("/api/orders/{}", order_id), &buyer_token).await;
     assert_eq!(status, 200, "Order detail should be retrievable");
-    
+
     let status_field = detail["status"].as_str().unwrap_or("unknown");
-    assert_eq!(status_field, "pending", "Initial order status should be 'pending'");
+    assert_eq!(
+        status_field, "pending",
+        "Initial order status should be 'pending'"
+    );
 }
 
 #[tokio::test]
@@ -186,10 +187,14 @@ async fn test_order_cancel_pending() {
     assert_eq!(status, 200, "Cancelling pending order should succeed");
 
     // Verify order is now cancelled
-    let (status, detail) = api_get(&client, &format!("/api/orders/{}", order_id), &buyer_token).await;
+    let (status, detail) =
+        api_get(&client, &format!("/api/orders/{}", order_id), &buyer_token).await;
     assert_eq!(status, 200);
     let status_field = detail["status"].as_str().unwrap_or("unknown");
-    assert_eq!(status_field, "cancelled", "Order status should be 'cancelled'");
+    assert_eq!(
+        status_field, "cancelled",
+        "Order status should be 'cancelled'"
+    );
 }
 
 #[tokio::test]
@@ -239,7 +244,7 @@ async fn test_order_cannot_cancel_delivered() {
     // NOTE: In real scenario, this would be: pending → confirmed → shipped → delivered
     // For this test, we directly try to cancel an order in delivered state
     // Admin would first transition it to delivered via internal endpoint
-    
+
     // Try to cancel delivered order (should fail with 400)
     let (status, _) = api_post(
         &client,
@@ -256,9 +261,13 @@ async fn test_order_cannot_cancel_delivered() {
     // Note: If order is still pending, this will succeed, so real test needs admin override
     if status == 200 {
         // Order was still in pending/confirmed state, verify it wasn't delivered
-        let (_, detail) = api_get(&client, &format!("/api/orders/{}", order_id), &buyer_token).await;
+        let (_, detail) =
+            api_get(&client, &format!("/api/orders/{}", order_id), &buyer_token).await;
         let s = detail["status"].as_str().unwrap_or("");
-        assert_ne!(s, "delivered", "Order should not be in delivered state for cancellation to succeed");
+        assert_ne!(
+            s, "delivered",
+            "Order should not be in delivered state for cancellation to succeed"
+        );
     }
 }
 
@@ -306,7 +315,8 @@ async fn test_order_state_transitions() {
     let order_id = order["id"].as_str().unwrap_or("").to_string();
 
     // Verify initial state: pending
-    let (status, detail) = api_get(&client, &format!("/api/orders/{}", order_id), &buyer_token).await;
+    let (status, detail) =
+        api_get(&client, &format!("/api/orders/{}", order_id), &buyer_token).await;
     assert_eq!(status, 200);
     assert_eq!(detail["status"].as_str().unwrap_or(""), "pending");
 
@@ -326,14 +336,18 @@ async fn test_order_state_transitions() {
     // The test demonstrates the pattern even if this specific transition fails
 
     // Verify order has all required fields
-    let (status, detail) = api_get(&client, &format!("/api/orders/{}", order_id), &buyer_token).await;
+    let (status, detail) =
+        api_get(&client, &format!("/api/orders/{}", order_id), &buyer_token).await;
     assert_eq!(status, 200);
-    
+
     // Verify required fields exist
     assert!(detail.get("buyerId").is_some(), "Order must have buyerId");
     assert!(detail.get("sellerId").is_some(), "Order must have sellerId");
     assert!(detail.get("status").is_some(), "Order must have status");
-    assert!(detail.get("totalAmountCents").is_some(), "Order must have totalAmountCents");
+    assert!(
+        detail.get("totalAmountCents").is_some(),
+        "Order must have totalAmountCents"
+    );
     assert!(detail.get("items").is_some(), "Order must have items");
 }
 
@@ -396,7 +410,8 @@ async fn test_buyer_orders_pagination() {
     .await;
     assert_eq!(status, 200, "Fetching buyer orders should succeed");
 
-    let empty_vec = vec![]; let orders_list = orders["orders"].as_array().unwrap_or(&empty_vec);
+    let empty_vec = vec![];
+    let orders_list = orders["orders"].as_array().unwrap_or(&empty_vec);
     assert!(
         orders_list.len() <= 2,
         "Should respect limit parameter (got {})",
@@ -417,12 +432,16 @@ async fn test_buyer_orders_pagination() {
     .await;
     assert_eq!(status, 200);
 
-    let empty_vec2 = vec![]; let orders_list2 = orders_page2["orders"].as_array().unwrap_or(&empty_vec2);
+    let empty_vec2 = vec![];
+    let orders_list2 = orders_page2["orders"].as_array().unwrap_or(&empty_vec2);
     // Verify pages are different
     if !orders_list.is_empty() && !orders_list2.is_empty() {
         let first_page_id = orders_list[0]["id"].as_str().unwrap_or("");
         let second_page_id = orders_list2[0]["id"].as_str().unwrap_or("");
-        assert_ne!(first_page_id, second_page_id, "Different pages should have different orders");
+        assert_ne!(
+            first_page_id, second_page_id,
+            "Different pages should have different orders"
+        );
     }
 }
 
@@ -483,14 +502,12 @@ async fn test_seller_orders_listing() {
     .await;
     assert_eq!(status, 200, "Seller should be able to fetch their orders");
 
-    let empty_vec = vec![]; let orders_list = seller_orders["orders"].as_array().unwrap_or(&empty_vec);
+    let empty_vec = vec![];
+    let orders_list = seller_orders["orders"].as_array().unwrap_or(&empty_vec);
     let found = orders_list
         .iter()
         .any(|o| o["id"].as_str().unwrap_or("") == order_id);
-    assert!(
-        found,
-        "Created order should appear in seller's orders list"
-    );
+    assert!(found, "Created order should appear in seller's orders list");
 }
 
 #[tokio::test]
@@ -545,7 +562,8 @@ async fn test_order_detail_fields() {
     let order_id = order["id"].as_str().unwrap_or("").to_string();
 
     // Fetch full order detail
-    let (status, detail) = api_get(&client, &format!("/api/orders/{}", order_id), &buyer_token).await;
+    let (status, detail) =
+        api_get(&client, &format!("/api/orders/{}", order_id), &buyer_token).await;
     assert_eq!(status, 200);
 
     // Validate all required fields
@@ -556,7 +574,8 @@ async fn test_order_detail_fields() {
     assert_eq!(detail["taxAmountCents"].as_i64().unwrap_or(0), 0);
     assert_eq!(detail["shippingCostCents"].as_i64().unwrap_or(0), 0);
 
-    let empty_vec = vec![]; let items = detail["items"].as_array().unwrap_or(&empty_vec);
+    let empty_vec = vec![];
+    let items = detail["items"].as_array().unwrap_or(&empty_vec);
     assert_eq!(items.len(), 1, "Should have exactly 1 item");
     assert_eq!(items[0]["quantity"].as_i64().unwrap_or(0), 2);
     assert_eq!(items[0]["unitPriceCents"].as_i64().unwrap_or(0), 12500);

@@ -370,10 +370,7 @@ async fn test_shipping_cost_in_integer_cents() {
         );
 
         let cost_value = cost.unwrap();
-        assert!(
-            cost_value >= 0,
-            "Shipping cost should never be negative"
-        );
+        assert!(cost_value >= 0, "Shipping cost should never be negative");
     }
 }
 
@@ -440,6 +437,9 @@ async fn test_shipping_update_cost() {
         // If cost increased significantly, approval would be required
     } else {
         // May fail if approval is required; that's expected
-        assert!(status >= 400, "Update should either succeed or require approval");
+        assert!(
+            status >= 400,
+            "Update should either succeed or require approval"
+        );
     }
 }

@@ -265,9 +265,6 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["error"]["code"], 415);
-        assert_eq!(
-            json["error"]["message"],
-            "Unsupported media type: bad type"
-        );
+        assert_eq!(json["error"]["message"], "Unsupported media type: bad type");
     }
 }

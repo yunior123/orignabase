@@ -466,19 +466,14 @@ async fn test_712_connection_timeout_recovery() {
 
     // Rapid successive requests to test connection reuse
     for i in 0..10 {
-        let (status, _body) = make_request(
-            &client,
-            "GET",
-            "/api/user/profile",
-            Some(&token),
-            None,
-        )
-        .await;
+        let (status, _body) =
+            make_request(&client, "GET", "/api/user/profile", Some(&token), None).await;
 
         // Should maintain connection or gracefully fail
         assert!(
             status == 200 || status == 400,
-            "Request {} should complete", i
+            "Request {} should complete",
+            i
         );
     }
 }

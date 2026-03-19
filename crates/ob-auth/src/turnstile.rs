@@ -30,9 +30,7 @@ pub async fn validate_turnstile_token(token: &str, secret_key: &str) -> Result<(
     }
 
     if token.is_empty() {
-        return Err(Error::Validation(
-            "Turnstile token is required".into(),
-        ));
+        return Err(Error::Validation("Turnstile token is required".into()));
     }
 
     let client = reqwest::Client::new();

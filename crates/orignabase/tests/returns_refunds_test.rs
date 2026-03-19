@@ -110,7 +110,7 @@ async fn test_create_return_for_delivered_order() {
     // In a real scenario, order would transition to delivered via workflow
     // For this test, we attempt to create a return regardless of state
     // (The backend will validate if order is in a valid state for returns)
-    
+
     let (status, return_resp) = api_post(
         &client,
         "/api/returns/create",
@@ -367,7 +367,10 @@ async fn test_return_request_approval() {
 
         assert_eq!(status, 200, "Approving return should succeed");
         let new_status = approve_resp["newStatus"].as_str().unwrap_or("");
-        assert!(!new_status.is_empty(), "Return approval should return a status");
+        assert!(
+            !new_status.is_empty(),
+            "Return approval should return a status"
+        );
     }
 }
 
@@ -582,7 +585,7 @@ async fn test_cancel_order_with_refund() {
             cancel_resp.get("refunded").is_some(),
             "Response should have refunded field"
         );
-        
+
         // If refunded is true, validate it
         let refunded = cancel_resp["refunded"].as_bool().unwrap_or(false);
         if refunded {

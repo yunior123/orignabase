@@ -126,7 +126,10 @@ async fn test_501_push_register_token_missing_fields() {
     .await;
 
     // Should reject missing required fields
-    assert!(status == 400 || status == 422, "Should reject missing fcmToken");
+    assert!(
+        status == 400 || status == 422,
+        "Should reject missing fcmToken"
+    );
 }
 
 #[tokio::test]
@@ -148,7 +151,10 @@ async fn test_502_push_register_token_empty_token() {
     .await;
 
     // Should reject empty token
-    assert!(status == 400 || status == 422, "Should reject empty fcmToken");
+    assert!(
+        status == 400 || status == 422,
+        "Should reject empty fcmToken"
+    );
 }
 
 #[tokio::test]
@@ -277,7 +283,10 @@ async fn test_506_push_unregister_empty_token() {
     .await;
 
     // Should reject empty token
-    assert!(status == 400 || status == 422, "Should reject empty fcmToken");
+    assert!(
+        status == 400 || status == 422,
+        "Should reject empty fcmToken"
+    );
 }
 
 // =============================================================================
@@ -421,11 +430,7 @@ async fn test_511_push_rate_limit_check() {
 
         // Should eventually hit rate limit or succeed
         assert!(
-            status == 200
-                || status == 201
-                || status == 400
-                || status == 429
-                || status == 503,
+            status == 200 || status == 201 || status == 400 || status == 429 || status == 503,
             "Rate limit should be enforced: status={}",
             status
         );

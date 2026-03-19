@@ -128,28 +128,29 @@ pub fn validate_surreal_record_id(id: &str) -> Result<&str> {
     if id.len() > 512 {
         return Err(Error::Validation("Record ID too long (max 512)".into()));
     }
-    
+
     let parts: Vec<&str> = id.split(':').collect();
     if parts.len() != 2 {
-        return Err(Error::Validation(
-            format!("Record ID '{}' must be in format 'collection:record_id'", id)
-        ));
+        return Err(Error::Validation(format!(
+            "Record ID '{}' must be in format 'collection:record_id'",
+            id
+        )));
     }
-    
+
     let [collection, record_id] = [parts[0], parts[1]];
-    
+
     // Validate collection name (identifier rules)
     if collection.is_empty() {
         return Err(Error::Validation("Collection name cannot be empty".into()));
     }
     validate_identifier(collection)?;
-    
+
     // Validate record ID part (document ID rules)
     if record_id.is_empty() {
         return Err(Error::Validation("Record ID part cannot be empty".into()));
     }
     validate_document_id(record_id)?;
-    
+
     Ok(id)
 }
 
@@ -176,7 +177,6 @@ mod record_id_tests {
         assert!(validate_surreal_record_id("users:rec;DROP").is_err()); // invalid chars
     }
 }
-
 
 #[cfg(test)]
 mod additional_tests {
@@ -285,10 +285,7 @@ mod additional_tests {
 
     #[test]
     fn test_escape_surreal_string_quotes() {
-        assert_eq!(
-            escape_surreal_string("It's"),
-            "It\\'s"
-        );
+        assert_eq!(escape_surreal_string("It's"), "It\\'s");
     }
 
     #[test]
@@ -355,7 +352,6 @@ mod additional_tests {
         assert!(validate_document_id("abc#123").is_err());
     }
 }
-
 
 #[cfg(test)]
 mod phone_tests {

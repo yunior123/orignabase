@@ -312,9 +312,7 @@ pub async fn delete_known_device(
     }
 
     // Extract just the record key from the full SurrealDB id
-    let record_id = devices[0]["id"]
-        .as_str()
-        .unwrap_or(&path.id);
+    let record_id = devices[0]["id"].as_str().unwrap_or(&path.id);
 
     // Delete — use the collection + short id
     let parts: Vec<&str> = record_id.splitn(2, ':').collect();

@@ -104,9 +104,7 @@ async fn test_ask_product_question() {
     let success = question_resp["success"].as_bool().unwrap_or(false);
     assert!(success, "Question response should have success: true");
 
-    let question_id = question_resp["questionId"]
-        .as_str()
-        .unwrap_or("");
+    let question_id = question_resp["questionId"].as_str().unwrap_or("");
     assert!(!question_id.is_empty(), "Question should have an ID");
 }
 
@@ -360,7 +358,10 @@ async fn test_question_validation_length() {
     )
     .await;
 
-    assert_eq!(status, 200, "Question within 1000 char limit should succeed");
+    assert_eq!(
+        status, 200,
+        "Question within 1000 char limit should succeed"
+    );
 }
 
 #[tokio::test]

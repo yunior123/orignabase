@@ -112,14 +112,7 @@ async fn test_user_get_profile_success() {
 async fn test_user_get_profile_requires_authentication() {
     let client = reqwest::Client::new();
 
-    let (status, _body) = make_request(
-        &client,
-        "POST",
-        "/api/users/get-profile",
-        None,
-        None,
-    )
-    .await;
+    let (status, _body) = make_request(&client, "POST", "/api/users/get-profile", None, None).await;
 
     assert!(status == 401 || status == 403);
 }
@@ -207,7 +200,11 @@ async fn test_user_add_address() {
     .await;
 
     assert!(status == 200 || status == 201);
-    assert!(body.get("addressId").is_some() || body.get("id").is_some() || body.get("address").is_some());
+    assert!(
+        body.get("addressId").is_some()
+            || body.get("id").is_some()
+            || body.get("address").is_some()
+    );
 }
 
 #[tokio::test]
@@ -328,14 +325,8 @@ async fn test_user_get_addresses() {
 async fn test_user_get_addresses_requires_authentication() {
     let client = reqwest::Client::new();
 
-    let (status, _body) = make_request(
-        &client,
-        "POST",
-        "/api/users/get-addresses",
-        None,
-        None,
-    )
-    .await;
+    let (status, _body) =
+        make_request(&client, "POST", "/api/users/get-addresses", None, None).await;
 
     assert!(status == 401 || status == 403);
 }

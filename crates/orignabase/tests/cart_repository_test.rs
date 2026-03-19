@@ -99,7 +99,11 @@ async fn test_cart_add_item() {
     // Should succeed or fail with 400 if product doesn't exist
     assert!(status == 200 || status == 201 || status == 400);
     if status == 200 || status == 201 {
-        assert!(body.get("cartId").is_some() || body.get("id").is_some() || body.get("success").is_some());
+        assert!(
+            body.get("cartId").is_some()
+                || body.get("id").is_some()
+                || body.get("success").is_some()
+        );
     }
 }
 
@@ -221,14 +225,7 @@ async fn test_cart_get() {
     let client = reqwest::Client::new();
     let (token, _user_id, _email) = register_test_user(&client).await;
 
-    let (status, body) = make_request(
-        &client,
-        "POST",
-        "/api/cart/get",
-        Some(&token),
-        None,
-    )
-    .await;
+    let (status, body) = make_request(&client, "POST", "/api/cart/get", Some(&token), None).await;
 
     assert_eq!(status, 200, "Should retrieve cart");
     // Cart may be empty initially
@@ -240,14 +237,7 @@ async fn test_cart_get() {
 async fn test_cart_get_requires_authentication() {
     let client = reqwest::Client::new();
 
-    let (status, _body) = make_request(
-        &client,
-        "POST",
-        "/api/cart/get",
-        None,
-        None,
-    )
-    .await;
+    let (status, _body) = make_request(&client, "POST", "/api/cart/get", None, None).await;
 
     assert!(status == 401 || status == 403);
 }
@@ -317,14 +307,8 @@ async fn test_cart_clear() {
     let client = reqwest::Client::new();
     let (token, _user_id, _email) = register_test_user(&client).await;
 
-    let (status, _body) = make_request(
-        &client,
-        "POST",
-        "/api/cart/clear",
-        Some(&token),
-        None,
-    )
-    .await;
+    let (status, _body) =
+        make_request(&client, "POST", "/api/cart/clear", Some(&token), None).await;
 
     // Should succeed (even if cart already empty)
     assert_eq!(status, 200);
@@ -335,14 +319,7 @@ async fn test_cart_clear() {
 async fn test_cart_clear_requires_authentication() {
     let client = reqwest::Client::new();
 
-    let (status, _body) = make_request(
-        &client,
-        "POST",
-        "/api/cart/clear",
-        None,
-        None,
-    )
-    .await;
+    let (status, _body) = make_request(&client, "POST", "/api/cart/clear", None, None).await;
 
     assert!(status == 401 || status == 403);
 }

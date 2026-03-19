@@ -1,4 +1,6 @@
-use crate::registry::{ChangeAction, ChangeEvent, RealtimeMessage, Subscription, SubscriptionRegistry};
+use crate::registry::{
+    ChangeAction, ChangeEvent, RealtimeMessage, Subscription, SubscriptionRegistry,
+};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 

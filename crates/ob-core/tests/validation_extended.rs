@@ -120,12 +120,18 @@ fn test_escape_surreal_string_single_quotes() {
 
 #[test]
 fn test_escape_surreal_string_backslashes() {
-    assert_eq!(escape_surreal_string("path\\to\\file"), "path\\\\to\\\\file");
+    assert_eq!(
+        escape_surreal_string("path\\to\\file"),
+        "path\\\\to\\\\file"
+    );
 }
 
 #[test]
 fn test_escape_surreal_string_mixed() {
-    assert_eq!(escape_surreal_string("O'Neil's\\path"), "O\\'Neil\\'s\\\\path");
+    assert_eq!(
+        escape_surreal_string("O'Neil's\\path"),
+        "O\\'Neil\\'s\\\\path"
+    );
 }
 
 #[test]

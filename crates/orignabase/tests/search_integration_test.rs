@@ -98,7 +98,11 @@ async fn test_400_search_products_empty_query() {
     .await;
 
     // Should succeed — empty query returns all products (browsing)
-    assert_eq!(status, 200, "Empty query should return products: {:?}", body);
+    assert_eq!(
+        status, 200,
+        "Empty query should return products: {:?}",
+        body
+    );
     assert!(body.get("hits").is_some(), "Should have hits array");
 }
 
@@ -239,7 +243,10 @@ async fn test_405_search_products_filter_price_range() {
     )
     .await;
 
-    assert!(status == 200 || status == 400, "Price range filter should be supported");
+    assert!(
+        status == 200 || status == 400,
+        "Price range filter should be supported"
+    );
 }
 
 #[tokio::test]
@@ -264,7 +271,10 @@ async fn test_406_search_products_filter_seller_id() {
     )
     .await;
 
-    assert!(status == 200 || status == 400, "Seller filter should be supported");
+    assert!(
+        status == 200 || status == 400,
+        "Seller filter should be supported"
+    );
 }
 
 #[tokio::test]
@@ -323,7 +333,10 @@ async fn test_408_search_products_sort_by_price_asc() {
     )
     .await;
 
-    assert!(status == 200 || status == 400, "Price ascending sort should be supported");
+    assert!(
+        status == 200 || status == 400,
+        "Price ascending sort should be supported"
+    );
 }
 
 #[tokio::test]
@@ -346,7 +359,10 @@ async fn test_409_search_products_sort_by_price_desc() {
     )
     .await;
 
-    assert!(status == 200 || status == 400, "Price descending sort should be supported");
+    assert!(
+        status == 200 || status == 400,
+        "Price descending sort should be supported"
+    );
 }
 
 #[tokio::test]
@@ -369,7 +385,10 @@ async fn test_410_search_products_sort_by_newest() {
     )
     .await;
 
-    assert!(status == 200 || status == 400, "Created date sort should be supported");
+    assert!(
+        status == 200 || status == 400,
+        "Created date sort should be supported"
+    );
 }
 
 // =============================================================================
@@ -421,5 +440,8 @@ async fn test_412_autocomplete_empty_query() {
     .await;
 
     // Empty autocomplete may return nothing or top products
-    assert!(status == 200 || status == 400, "Empty autocomplete should be handled");
+    assert!(
+        status == 200 || status == 400,
+        "Empty autocomplete should be handled"
+    );
 }

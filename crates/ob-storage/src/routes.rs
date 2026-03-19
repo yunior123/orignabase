@@ -594,7 +594,9 @@ mod tests {
     #[test]
     fn test_validate_png_valid() {
         // PNG magic bytes: 89 50 4E 47 0D 0A 1A 0A
-        let png_bytes = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D];
+        let png_bytes = [
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+        ];
         assert!(validate_file_signature(&png_bytes, "image/png").is_ok());
     }
 
@@ -610,7 +612,9 @@ mod tests {
     #[test]
     fn test_validate_mime_mismatch() {
         // PNG magic bytes but claiming to be JPEG
-        let png_bytes = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D];
+        let png_bytes = [
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+        ];
         let result = validate_file_signature(&png_bytes, "image/jpeg");
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();

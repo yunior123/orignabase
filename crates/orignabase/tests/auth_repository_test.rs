@@ -75,7 +75,10 @@ async fn test_auth_register_success() {
     .await;
 
     assert_eq!(status, 200, "Registration should succeed");
-    assert!(body.get("access_token").is_some(), "Should return access token");
+    assert!(
+        body.get("access_token").is_some(),
+        "Should return access token"
+    );
     assert!(body.get("user").is_some(), "Should return user object");
 }
 
@@ -238,7 +241,10 @@ async fn test_auth_login_success() {
     .await;
 
     assert_eq!(status_login, 200, "Login should succeed");
-    assert!(body_login.get("access_token").is_some(), "Should return access token");
+    assert!(
+        body_login.get("access_token").is_some(),
+        "Should return access token"
+    );
 }
 
 #[tokio::test]
@@ -349,14 +355,7 @@ async fn test_auth_protected_endpoint_requires_token() {
     let client = reqwest::Client::new();
 
     // Try to access protected endpoint without token
-    let (status, _body) = make_request(
-        &client,
-        "POST",
-        "/api/users/get-profile",
-        None,
-        None,
-    )
-    .await;
+    let (status, _body) = make_request(&client, "POST", "/api/users/get-profile", None, None).await;
 
     assert!(status == 401 || status == 403);
 }
@@ -430,14 +429,8 @@ async fn test_auth_logout() {
         .to_string();
 
     // Logout
-    let (status_logout, _body_logout) = make_request(
-        &client,
-        "POST",
-        "/auth/logout",
-        Some(&token),
-        None,
-    )
-    .await;
+    let (status_logout, _body_logout) =
+        make_request(&client, "POST", "/auth/logout", Some(&token), None).await;
 
     // Should succeed (200) or return 404 if endpoint doesn't exist
     assert!(status_logout == 200 || status_logout == 404);
@@ -468,14 +461,8 @@ async fn test_auth_refresh_token() {
         .to_string();
 
     // Try refresh
-    let (status_refresh, body_refresh) = make_request(
-        &client,
-        "POST",
-        "/auth/refresh",
-        Some(&token),
-        None,
-    )
-    .await;
+    let (status_refresh, body_refresh) =
+        make_request(&client, "POST", "/auth/refresh", Some(&token), None).await;
 
     // Should succeed (200) or return 404 if endpoint doesn't exist
     assert!(status_refresh == 200 || status_refresh == 404);

@@ -29,7 +29,9 @@ fn build_cors_layer(is_test_mode: bool) -> CorsLayer {
         "https://orignagta.ca".parse::<HeaderValue>().unwrap(),
         "https://www.orignagta.ca".parse::<HeaderValue>().unwrap(),
         "https://dev.orignagta.ca".parse::<HeaderValue>().unwrap(),
-        "https://staging.orignagta.ca".parse::<HeaderValue>().unwrap(),
+        "https://staging.orignagta.ca"
+            .parse::<HeaderValue>()
+            .unwrap(),
     ];
 
     // Allow localhost ONLY in test mode (for local development)
@@ -38,15 +40,13 @@ fn build_cors_layer(is_test_mode: bool) -> CorsLayer {
         allowed_origins.push("http://localhost:5173".parse::<HeaderValue>().unwrap());
     }
 
-    let mut cors = CorsLayer::new()
-        .allow_credentials(true);
+    let mut cors = CorsLayer::new().allow_credentials(true);
 
     for origin in allowed_origins {
         cors = cors.allow_origin(origin);
     }
 
-    cors
-        .allow_methods(tower_http::cors::Any)
+    cors.allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any)
 }
 
