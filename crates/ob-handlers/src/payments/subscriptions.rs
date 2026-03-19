@@ -1167,6 +1167,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             stripe_client: None,
             stripe_base_url,
+            turnstile_secret_key: None,
         }
     }
 
@@ -1179,7 +1180,7 @@ mod tests {
     fn test_create_request_deser() {
         let json = r#"{"userId": "u1"}"#;
         let req: CreateSubscriptionRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.user_id, "u1");
+        assert_eq!(req.user_id, Some("u1".to_string()));
         assert!(req.payment_method_id.is_none());
     }
 
@@ -1206,7 +1207,7 @@ mod tests {
     fn test_cancel_request_deser() {
         let json = r#"{"userId": "user-99"}"#;
         let req: CancelSubscriptionRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.user_id, "user-99");
+        assert_eq!(req.user_id, Some("user-99".to_string()));
     }
 
     #[test]
@@ -1228,7 +1229,7 @@ mod tests {
     fn test_reactivate_request_deser() {
         let json = r#"{"userId": "u42"}"#;
         let req: ReactivateSubscriptionRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.user_id, "u42");
+        assert_eq!(req.user_id, Some("u42".to_string()));
     }
 
     #[test]
@@ -1244,7 +1245,7 @@ mod tests {
     fn test_notification_prefs_request_deser() {
         let json = r#"{"userId":"u1","notifyNewProducts":true}"#;
         let req: SubscriptionNotificationPrefsRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.user_id, "u1");
+        assert_eq!(req.user_id, Some("u1".to_string()));
         assert_eq!(req.notify_new_products, Some(true));
         assert_eq!(req.notify_trending, None);
     }
@@ -1373,7 +1374,7 @@ mod tests {
     fn test_status_request_deser() {
         let json = r#"{"userId":"user-42"}"#;
         let req: SubscriptionStatusRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.user_id, "user-42");
+        assert_eq!(req.user_id, Some("user-42".to_string()));
     }
 
     // --- Cancel fix: cancel_pending instead of cancelled ---

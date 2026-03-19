@@ -294,7 +294,7 @@ mod tests {
         let json = r#"{"orderId": "order-abc-123", "userId": "seller-xyz"}"#;
         let req: CapturePaymentRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.order_id, "order-abc-123");
-        assert_eq!(req.user_id, "seller-xyz");
+        assert_eq!(req.user_id, Some("seller-xyz".to_string()));
     }
 
     #[test]

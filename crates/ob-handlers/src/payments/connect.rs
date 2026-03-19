@@ -424,7 +424,7 @@ mod tests {
     fn test_create_account_request_deser() {
         let json = r#"{"userId": "u1", "email": "test@example.com"}"#;
         let req: CreateAccountRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.user_id, "u1");
+        assert_eq!(req.user_id, Some("u1".to_string()));
         assert_eq!(req.email.as_deref(), Some("test@example.com"));
         assert!(req.country.is_none());
     }
@@ -486,7 +486,7 @@ mod tests {
     fn test_account_status_request_missing_field() {
         let json = r#"{"userId": "u1"}"#;
         let result: AccountStatusRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(result.user_id, "u1");
+        assert_eq!(result.user_id, Some("u1".to_string()));
         assert!(result.account_id.is_none());
     }
 

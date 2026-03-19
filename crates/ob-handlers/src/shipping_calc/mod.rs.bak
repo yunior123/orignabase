@@ -641,7 +641,7 @@ mod tests {
     fn test_base_cost_tiers() {
         assert!((base_cost_for_distance(3.0) - 4.99).abs() < 0.01);
         assert!((base_cost_for_distance(10.0) - 6.99).abs() < 0.01);
-        assert!((base_cost_for_distance(30.0) - 8.99).abs() < 0.01);
+        assert!((base_cost_for_distance(30.0) - 899).abs() < 0.01);
         assert!((base_cost_for_distance(100.0) - 11.99).abs() < 0.01);
         assert!((base_cost_for_distance(300.0) - 14.99).abs() < 0.01);
         assert!((base_cost_for_distance(800.0) - 17.99).abs() < 0.01);
@@ -755,7 +755,7 @@ mod tests {
         };
         let items = vec![&item];
         let (cost, breakdown) = calculate_fallback_itemized(&items, "ON", "ON", "standard");
-        assert!(((cost as f64 / 100.0) - FALLBACK_SAME_PROVINCE).abs() < 0.01);
+        assert!((cost - FALLBACK_SAME_PROVINCE).abs() < 0.01);
         assert!(breakdown.contains_key("ci1"));
     }
 
@@ -764,7 +764,7 @@ mod tests {
         let item = make_item();
         let items = vec![&item];
         let (cost, _) = calculate_fallback_itemized(&items, "ON", "QC", "standard");
-        assert!(((cost as f64 / 100.0) - FALLBACK_ADJACENT).abs() < 0.01);
+        assert!((cost - FALLBACK_ADJACENT).abs() < 0.01);
     }
 
     #[test]
@@ -772,7 +772,7 @@ mod tests {
         let item = make_item();
         let items = vec![&item];
         let (cost, _) = calculate_fallback_itemized(&items, "BC", "NS", "standard");
-        assert!(((cost as f64 / 100.0) - NATIONAL_CEILING).abs() < 0.01);
+        assert!((cost - NATIONAL_CEILING).abs() < 0.01);
     }
 
     #[test]
@@ -781,7 +781,7 @@ mod tests {
         let items = vec![&item];
         let (standard, _) = calculate_fallback_itemized(&items, "ON", "QC", "standard");
         let (express, _) = calculate_fallback_itemized(&items, "ON", "QC", "express");
-        assert!(((express as f64 / standard as f64) - EXPRESS_REGIONAL).abs() < 0.01);
+        assert!((express / standard - EXPRESS_REGIONAL).abs() < 0.01);
     }
 
     #[test]
@@ -794,7 +794,7 @@ mod tests {
         let items = vec![&item];
         let (cost, _) = calculate_tiered_itemized(25.0, &items, "standard");
         // 25km => tier 8.99, qty=1, weight=1.0 < 5.0 threshold, multiplier=1.0
-        assert!(((cost as f64 / 100.0) - 8.99).abs() < 0.01);
+        assert!((cost - 899).abs() < 0.01);
     }
 
     #[test]
@@ -808,7 +808,7 @@ mod tests {
         let (cost, _) = calculate_tiered_itemized(25.0, &items, "standard");
         // base=8.99, additional=2*(8.99*0.35)=6.293, total=15.283
         let expected = 8.99 + 2.0 * (8.99 * ADDITIONAL_ITEM_RATE);
-        assert!(((cost as f64 / 100.0) - expected).abs() < 0.01);
+        assert!((cost - expected).abs() < 0.01);
     }
 
     #[test]
@@ -820,7 +820,7 @@ mod tests {
         let items = vec![&item];
         let (cost, _) = calculate_tiered_itemized(25.0, &items, "standard");
         // base=8.99, surcharge=(8-5)*1.50=4.50, total=13.49
-        assert!(((cost as f64 / 100.0) - 13.49).abs() < 0.01);
+        assert!((cost - 13.49).abs() < 0.01);
     }
 
     #[test]
@@ -833,7 +833,7 @@ mod tests {
         let (standard, _) = calculate_tiered_itemized(25.0, &items, "standard");
         let (express, _) = calculate_tiered_itemized(25.0, &items, "express");
         assert!(express > standard);
-        assert!(((express as f64 / standard as f64) - EXPRESS_LOCAL).abs() < 0.01);
+        assert!((express / standard - EXPRESS_LOCAL).abs() < 0.01);
     }
 
     #[test]
@@ -844,7 +844,7 @@ mod tests {
         };
         let items = vec![&item];
         let (cost, _) = calculate_tiered_itemized(25.0, &items, "standard");
-        assert!(((cost as f64 / 100.0) - 8.99).abs() < 0.01);
+        assert!((cost - 899).abs() < 0.01);
     }
 
     #[test]
@@ -866,10 +866,10 @@ mod tests {
     #[test]
     fn test_response_serialization() {
         let mut breakdown = HashMap::new();
-        breakdown.insert("item1".to_string(), 899);
+        breakdown.insert("item1".to_string(), 8.99);
         let resp = CalculateShippingResponse {
             success: true,
-            total_cost_cents: 899,
+            total_cost_cents: 8.99,
             breakdown,
         };
         let json = serde_json::to_value(&resp).unwrap();
@@ -949,7 +949,7 @@ mod tests {
         let item = make_item();
         let items = vec![&item];
         let (cost, _) = calculate_fallback_itemized(&items, "NB", "NL", "standard");
-        assert!(((cost as f64 / 100.0) - FALLBACK_SAME_REGION).abs() < 0.01);
+        assert!((cost - FALLBACK_SAME_REGION).abs() < 0.01);
     }
 
     #[test]
@@ -958,7 +958,7 @@ mod tests {
         let items = vec![&item];
         let (standard, _) = calculate_fallback_itemized(&items, "NB", "NL", "standard");
         let (express, _) = calculate_fallback_itemized(&items, "NB", "NL", "express");
-        assert!(((express as f64 / standard as f64) - EXPRESS_REGIONAL).abs() < 0.01);
+        assert!((express / standard - EXPRESS_REGIONAL).abs() < 0.01);
     }
 
     #[test]
@@ -997,9 +997,9 @@ mod tests {
         // Second item: 2 * 6.99 * 0.35 = 4.893
         let expected_first = base;
         let expected_second = 2.0 * base * ADDITIONAL_ITEM_RATE;
-        assert!(((breakdown["cart_first"] as f64 / 100.0) - expected_first).abs() < 0.01);
-        assert!(((breakdown["cart_second"] as f64 / 100.0) - expected_second).abs() < 0.01);
-        assert!(((total as f64 / 100.0) - (expected_first + expected_second)).abs() < 0.01);
+        assert!((breakdown["cart_first"] - expected_first).abs() < 0.01);
+        assert!((breakdown["cart_second"] - expected_second).abs() < 0.01);
+        assert!((total - (expected_first + expected_second)).abs() < 0.01);
     }
 
     #[test]
@@ -1016,7 +1016,7 @@ mod tests {
         let item_base = base + 2.0 * (base * ADDITIONAL_ITEM_RATE);
         let surcharge = (7.0 - WEIGHT_SURCHARGE_THRESHOLD_KG) * WEIGHT_SURCHARGE_PER_KG * 3.0;
         let expected = item_base + surcharge;
-        assert!(((cost as f64 / 100.0) - expected).abs() < 0.01);
+        assert!((cost - expected).abs() < 0.01);
     }
 
     #[test]
@@ -1045,7 +1045,7 @@ mod tests {
         assert!((base_cost_for_distance(5.0) - 4.99).abs() < 0.01);
         assert!((base_cost_for_distance(5.01) - 6.99).abs() < 0.01);
         assert!((base_cost_for_distance(15.0) - 6.99).abs() < 0.01);
-        assert!((base_cost_for_distance(15.01) - 8.99).abs() < 0.01);
+        assert!((base_cost_for_distance(15.01) - 899).abs() < 0.01);
         assert!((base_cost_for_distance(150.0) - 11.99).abs() < 0.01);
         assert!((base_cost_for_distance(150.01) - 14.99).abs() < 0.01);
         assert!((base_cost_for_distance(1000.0) - 17.99).abs() < 0.01);
@@ -1062,12 +1062,12 @@ mod tests {
         let (standard, _) = calculate_tiered_itemized(10.0, &items, "standard");
         let (same_day, _) = calculate_tiered_itemized(10.0, &items, "same_day");
         // 10km => SAME_DAY_HYPER_LOCAL = 2.0
-        assert!(((same_day as f64 / standard as f64) - SAME_DAY_HYPER_LOCAL).abs() < 0.01);
+        assert!((same_day / standard - SAME_DAY_HYPER_LOCAL).abs() < 0.01);
     }
 
     #[test]
     fn test_shipping_constants_match_python() {
-        assert!((FALLBACK_SAME_PROVINCE - 8.99).abs() < 0.01);
+        assert!((FALLBACK_SAME_PROVINCE - 899).abs() < 0.01);
         assert!((FALLBACK_ADJACENT - 11.99).abs() < 0.01);
         assert!((FALLBACK_SAME_REGION - 14.99).abs() < 0.01);
         assert!((NATIONAL_CEILING - 21.99).abs() < 0.01);
@@ -1193,9 +1193,9 @@ mod tests {
         // Second item: 3 * 8.99 * 0.35 = 9.4395
         let expected_first = FALLBACK_SAME_PROVINCE;
         let expected_second = 3.0 * FALLBACK_SAME_PROVINCE * ADDITIONAL_ITEM_RATE;
-        assert!(((breakdown["ci1"] as f64 / 100.0) - expected_first).abs() < 0.01);
-        assert!(((breakdown["ci2"] as f64 / 100.0) - expected_second).abs() < 0.01);
-        assert!(((total as f64 / 100.0) - (expected_first + expected_second)).abs() < 0.01);
+        assert!((breakdown["ci1"] - expected_first).abs() < 0.01);
+        assert!((breakdown["ci2"] - expected_second).abs() < 0.01);
+        assert!((total - (expected_first + expected_second)).abs() < 0.01);
     }
 
     #[tokio::test]
@@ -1367,7 +1367,7 @@ mod tests {
         // First item (normal): FALLBACK_ADJACENT = 11.99
         // Second item (perishable): 1 * 11.99 * 0.35 + 5.0 = 9.1965
         let perish_cost = resp.breakdown["cart_perish"];
-        assert!((perish_cost as f64 / 100.0) > 1.0 * FALLBACK_ADJACENT * ADDITIONAL_ITEM_RATE);
+        assert!(perish_cost > 1.0 * FALLBACK_ADJACENT * ADDITIONAL_ITEM_RATE);
     }
 
     #[tokio::test]
@@ -1408,8 +1408,8 @@ mod tests {
         .unwrap();
 
         assert!(resp.success);
-        assert_eq!(resp.breakdown["cart_perishable"], 1699);
-        assert_eq!(resp.breakdown["cart_standard"], 2969);
+        assert_eq!(resp.breakdown["cart_perishable"], 16.99);
+        assert_eq!(resp.breakdown["cart_standard"], 29.69);
         assert_eq!(resp.total_cost_cents, 4668);
     }
 }

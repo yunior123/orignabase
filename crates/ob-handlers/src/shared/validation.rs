@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn test_validate_postal_code_ca_formatted_output() {
         let result = validate_postal_code_ca("m5v3a8");
-        assert_eq!(result, Ok("M5V 3A8".to_string()));
+        assert_eq!(result.unwrap(), "M5V 3A8");
     }
 
     #[test]

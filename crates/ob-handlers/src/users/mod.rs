@@ -883,7 +883,7 @@ mod tests {
     fn test_create_profile_request_deser() {
         let json_str = r#"{"userId":"u1","email":"a@b.com","name":"Test","roles":["buyer"]}"#;
         let req: CreateProfileRequest = serde_json::from_str(json_str).unwrap();
-        assert_eq!(req.user_id, "u1");
+        assert_eq!(req.user_id, Some("u1".to_string()));
         assert_eq!(req.email, "a@b.com");
         assert_eq!(req.name, "Test");
         assert!(req.roles.is_some());
@@ -921,7 +921,7 @@ mod tests {
     fn test_email_consent_request_deser() {
         let json_str = r#"{"userId":"u1","consent":false}"#;
         let req: EmailConsentRequest = serde_json::from_str(json_str).unwrap();
-        assert_eq!(req.user_id, "u1");
+        assert_eq!(req.user_id, Some("u1".to_string()));
         assert!(!req.consent);
     }
 
@@ -1083,7 +1083,7 @@ mod tests {
             "isDefault": true
         }"#;
         let req: AddBuyerAddressRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.user_id, "u1");
+        assert_eq!(req.user_id, Some("u1".to_string()));
         assert_eq!(req.country, COUNTRY_CANADA); // default
         assert_eq!(req.label.as_deref(), Some("Home"));
         assert!(req.is_default);

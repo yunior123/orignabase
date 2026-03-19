@@ -1513,9 +1513,8 @@ mod tests {
 
         let Json(mismatch_resp) = verify_cart_prices(
             State(state.clone()),
-            Extension(auth("test")),
             Json(VerifyPricesRequest {
-                user_id: Some("buyer_1".to_string()),
+                user_id: "buyer_1".to_string(),
                 items: vec![
                     VerifyPriceItem {
                         product_id: "prod_ok".into(),
@@ -1571,9 +1570,8 @@ mod tests {
 
         let Json(valid_resp) = verify_cart_prices(
             State(state),
-            Extension(auth("test")),
             Json(VerifyPricesRequest {
-                user_id: Some("buyer_1".to_string()),
+                user_id: "buyer_1".to_string(),
                 items: vec![VerifyPriceItem {
                     product_id: "prod_ok".into(),
                     expected_price_cents: 1000,
@@ -2025,9 +2023,8 @@ mod tests {
         let state = setup_state().await;
         let err = verify_cart_prices(
             State(state),
-            Extension(auth("test")),
             Json(VerifyPricesRequest {
-                user_id: Some("buyer_1".to_string()),
+                user_id: "buyer_1".to_string(),
                 items: vec![],
             }),
         )
