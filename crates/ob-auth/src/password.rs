@@ -195,4 +195,3 @@ mod tests {
         assert!(verify_password(password, &hash).unwrap());
         assert!(!verify_password("b", &hash).unwrap());
     }
-}

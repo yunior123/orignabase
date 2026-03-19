@@ -72,7 +72,7 @@ impl DatabaseClient {
         &self,
         query: &str,
         timeout_secs: u64,
-    ) -> ob_core::Result<surrealdb::opt::PullableStatement> {
+    ) -> ob_core::Result<()> {
         tokio::time::timeout(
             Duration::from_secs(timeout_secs),
             self.db.query(query),
@@ -84,6 +84,7 @@ impl DatabaseClient {
                 timeout_secs
             ))
         })?
-        .map_err(|e| Error::Database(format!("Query execution failed: {e}")))
+        .map_err(|e| Error::Database(format!("Query execution failed: {e}")))?;
+        Ok(())
     }
 }

@@ -732,4 +732,3 @@ mod tests {
         assert!(!claims.email_verified);
         assert!(!claims.mfa_required);
     }
-}

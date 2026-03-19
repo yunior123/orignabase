@@ -435,4 +435,3 @@ mod tests {
         let result = verify_totp(&secret, "1234567", None);
         assert!(result.is_err());
     }
-}

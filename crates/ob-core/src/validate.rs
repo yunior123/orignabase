@@ -177,6 +177,10 @@ mod record_id_tests {
     }
 }
 
+
+#[cfg(test)]
+mod additional_tests {
+    use super::*;
     #[test]
     fn test_postal_code_validation_valid() {
         assert!(is_valid_canadian_postal("M5V2H1"));
@@ -351,6 +355,7 @@ mod record_id_tests {
         assert!(validate_document_id("abc#123").is_err());
     }
 }
+
 
 #[cfg(test)]
 mod phone_tests {
