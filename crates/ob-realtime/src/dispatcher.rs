@@ -180,7 +180,7 @@ mod tests {
     fn test_change_event_creation_and_fields() {
         let event = ChangeEvent {
             action: ChangeAction::Create,
-            collection: Arc::from("products"),
+            collection: "products".to_string(),
             document_id: "products:xyz".to_string(),
             before_data: None,
             after_data: Some(serde_json::json!({"title": "Widget", "price": 9.99})),

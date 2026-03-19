@@ -2060,7 +2060,6 @@ struct VerifyPriceItem {
 /// Returns any mismatches so the UI can prompt the user to refresh.
 async fn verify_cart_prices(
     State(state): State<HandlersState>,
-    Extension(auth("test")),
     Json(req): Json<VerifyPricesRequest>,
 ) -> Result<Json<Value>, ob_core::Error> {
     validate_uid("userId", &req.user_id)?;

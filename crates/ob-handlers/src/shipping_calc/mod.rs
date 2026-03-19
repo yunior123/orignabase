@@ -641,7 +641,7 @@ mod tests {
     fn test_base_cost_tiers() {
         assert!((base_cost_for_distance(3.0) - 4.99).abs() < 0.01);
         assert!((base_cost_for_distance(10.0) - 6.99).abs() < 0.01);
-        assert!((base_cost_for_distance(30.0) - 8.99).abs() < 0.01);
+        assert!((base_cost_for_distance(30.0) - 899).abs() < 0.01);
         assert!((base_cost_for_distance(100.0) - 11.99).abs() < 0.01);
         assert!((base_cost_for_distance(300.0) - 14.99).abs() < 0.01);
         assert!((base_cost_for_distance(800.0) - 17.99).abs() < 0.01);
@@ -794,7 +794,7 @@ mod tests {
         let items = vec![&item];
         let (cost, _) = calculate_tiered_itemized(25.0, &items, "standard");
         // 25km => tier 8.99, qty=1, weight=1.0 < 5.0 threshold, multiplier=1.0
-        assert!((cost - 8.99).abs() < 0.01);
+        assert!((cost - 899).abs() < 0.01);
     }
 
     #[test]
@@ -844,7 +844,7 @@ mod tests {
         };
         let items = vec![&item];
         let (cost, _) = calculate_tiered_itemized(25.0, &items, "standard");
-        assert!((cost - 8.99).abs() < 0.01);
+        assert!((cost - 899).abs() < 0.01);
     }
 
     #[test]
@@ -1045,7 +1045,7 @@ mod tests {
         assert!((base_cost_for_distance(5.0) - 4.99).abs() < 0.01);
         assert!((base_cost_for_distance(5.01) - 6.99).abs() < 0.01);
         assert!((base_cost_for_distance(15.0) - 6.99).abs() < 0.01);
-        assert!((base_cost_for_distance(15.01) - 8.99).abs() < 0.01);
+        assert!((base_cost_for_distance(15.01) - 899).abs() < 0.01);
         assert!((base_cost_for_distance(150.0) - 11.99).abs() < 0.01);
         assert!((base_cost_for_distance(150.01) - 14.99).abs() < 0.01);
         assert!((base_cost_for_distance(1000.0) - 17.99).abs() < 0.01);
@@ -1067,7 +1067,7 @@ mod tests {
 
     #[test]
     fn test_shipping_constants_match_python() {
-        assert!((FALLBACK_SAME_PROVINCE - 8.99).abs() < 0.01);
+        assert!((FALLBACK_SAME_PROVINCE - 899).abs() < 0.01);
         assert!((FALLBACK_ADJACENT - 11.99).abs() < 0.01);
         assert!((FALLBACK_SAME_REGION - 14.99).abs() < 0.01);
         assert!((NATIONAL_CEILING - 21.99).abs() < 0.01);
@@ -1087,9 +1087,8 @@ mod tests {
                     latitude: None,
                     longitude: None,
                     state: Some("ON".into()),
-                ,
+                },
                 subtotal_cents: None,
-            },
                 items: vec![
                     ShippingItem {
                         product_id: "free_1".into(),
@@ -1111,7 +1110,7 @@ mod tests {
         .unwrap();
 
         assert!(resp.success);
-        assert_eq!(resp.total_cost_cents, 0.0);
+        assert_eq!(resp.total_cost_cents, 0);
         assert!(resp.breakdown.is_empty());
     }
 
@@ -1126,9 +1125,8 @@ mod tests {
                     latitude: None,
                     longitude: None,
                     state: Some("QC".into()),
-                ,
+                },
                 subtotal_cents: None,
-            },
                 items: vec![ShippingItem {
                     product_id: "local_1".into(),
                     seller_id: Some("seller_1".into()),
@@ -1248,9 +1246,8 @@ mod tests {
                     latitude: Some(43.7),
                     longitude: Some(-79.4),
                     state: Some("ON".into()),
-                ,
+                },
                 subtotal_cents: None,
-            },
                 items: vec![ShippingItem {
                     product_id: "p1".into(),
                     seller_id: Some("seller_1".into()),
@@ -1302,9 +1299,8 @@ mod tests {
                     latitude: Some(43.7),
                     longitude: Some(-79.4),
                     state: Some("ON".into()),
-                ,
+                },
                 subtotal_cents: None,
-            },
                 items: vec![ShippingItem {
                     product_id: "p1".into(),
                     seller_id: Some("seller_1".into()),
@@ -1339,9 +1335,8 @@ mod tests {
                     latitude: None,
                     longitude: None,
                     state: Some("QC".into()),
-                ,
+                },
                 subtotal_cents: None,
-            },
                 items: vec![
                     ShippingItem {
                         product_id: "normal_1".into(),
@@ -1386,9 +1381,8 @@ mod tests {
                     latitude: None,
                     longitude: None,
                     state: Some("QC".into()),
-                ,
+                },
                 subtotal_cents: None,
-            },
                 items: vec![
                     ShippingItem {
                         product_id: "perishable_1".into(),
@@ -1416,6 +1410,6 @@ mod tests {
         assert!(resp.success);
         assert_eq!(resp.breakdown["cart_perishable"], 16.99);
         assert_eq!(resp.breakdown["cart_standard"], 29.69);
-        assert_eq!(resp.total_cost_cents, 46.68);
+        assert_eq!(resp.total_cost_cents, 4668);
     }
 }
