@@ -666,12 +666,12 @@ async fn create_product_atomic(
         30, // 30 products
         60, // per hour
     )
+    .await?;
 
     // Validate image URLs from allowed domains
     for url in &req.test_image_urls {
         validate_image_url(url)?;
     }
-    .await?;
 
     let mut product = req.product_data;
     let obj = product
