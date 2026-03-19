@@ -22,6 +22,7 @@ pub mod shipping_calc;
 pub mod users;
 pub mod warehouses;
 
+pub mod rest_api;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::extract::Request;
@@ -147,7 +148,8 @@ pub fn handlers_router(state: HandlersState) -> Router {
         .merge(users::router(state.clone()))
         .merge(warehouses::router(state.clone()))
         .merge(addresses::router(state.clone()))
-        .merge(shipping_calc::router(state))
+        .merge(shipping_calc::router(state.clone()))
+        .merge(rest_api::router(state))
         .layer(axum::middleware::from_fn(enforce_actor_identity_middleware))
 }
 
