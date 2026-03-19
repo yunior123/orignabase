@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use tracing::warn;
 
 use crate::HandlersState;
-use crate::shared::schema::app_config;
+use crate::shared::schema::{app_config, collections};
 
 // ===========================================================================
 // Shipping tier constants (from Python ShippingTiers)
@@ -537,7 +537,7 @@ async fn calculate_shipping(
                         for item in &chargeable {
                             if item.is_perishable.unwrap_or(false) {
                                 let id = item_identifier(item);
-                                *seller_breakdown.entry(id).or_insert(0.0) += perishable_surcharge;
+                                *seller_breakdown.entry(id).or_insert(0) += perishable_surcharge;
                                 seller_cost += perishable_surcharge;
                                 break;
                             }
@@ -568,7 +568,7 @@ async fn calculate_shipping(
             for item in &chargeable {
                 if item.is_perishable.unwrap_or(false) {
                     let id = item_identifier(item);
-                    *seller_breakdown.entry(id).or_insert(0.0) += perishable_surcharge;
+                    *seller_breakdown.entry(id).or_insert(0) += perishable_surcharge;
                     seller_cost += perishable_surcharge;
                     break;
                 }

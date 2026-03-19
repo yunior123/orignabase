@@ -11,8 +11,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use ob_auth::middleware::AuthContext;
-use ob_database::collections;
 use crate::HandlersState;
+use crate::shared::schema::collections;
 
 pub fn router(state: HandlersState) -> Router {
     Router::new()
@@ -316,9 +316,7 @@ async fn get_analytics(
 // ───────────────────────────────────────────────────────────────────────────
 
 fn require_authenticated(auth: &AuthContext) -> Result<String, ob_core::Error> {
-    auth.uid()
-        .map(|u| u.to_string())
-        .ok_or_else(|| ob_core::Error::Unauthorized("Authentication required".into()))
+    if auth.authenticated { Ok(auth.user_id.clone()) } else { Err(ob_core::Error::Auth("Authentication required".into())) }
 }
 
 fn escape_surreal_string(s: &str) -> String {

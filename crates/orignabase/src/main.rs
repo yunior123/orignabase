@@ -478,6 +478,7 @@ match /users/{userId} {
         }
         Commands::Schema { action } => {
             let db = DatabaseClient::connect(&config.database).await?;
+            match action {
 
                 SchemaAction::Inspect => {
                     let tables = db.query_raw("INFO FOR DB").await?;
@@ -573,7 +574,7 @@ fn build_cors_layer(is_test_mode: bool) -> tower_http::cors::CorsLayer {
     }
 
     let mut cors = tower_http::cors::CorsLayer::new()
-        .allow_credentials();
+        .allow_credentials(true);
 
     for origin in allowed_origins {
         cors = cors.allow_origin(origin);
@@ -917,7 +918,7 @@ async fn serve(config: Config) -> Result<()> {
         totp_encryption_key,
         base_url: base_url.clone(),
         oauth_state_nonces: Arc::new(dashmap::DashMap::new()),
-        turnstile_secret_key: config.secret("turnstile_secret_key"),
+        turnstile_secret_key: config.secret("turnstile_secret_key").map(|s| s.to_string()),
         http_client: auth_http_client,
     };
 
@@ -977,12 +978,12 @@ async fn serve(config: Config) -> Result<()> {
     }
 
     // --- Notifications (FCM Push) ---
-    let notifications_state = ob_notifications::NotificationsState {
-        db: db.clone(),
-        fcm_project_id: std::env::var("OB_FCM_PROJECT_ID").ok(),
-        fcm_service_account: std::env::var("OB_FCM_SERVICE_ACCOUNT").ok(),
-        http_client: http_client.clone(),
-    };
+    let notifications_state = ob_notifications::NotificationsState::new(
+        db.clone(),
+        std::env::var("OB_FCM_PROJECT_ID").ok(),
+        std::env::var("OB_FCM_SERVICE_ACCOUNT").ok(),
+        http_client.clone(),
+    );
 
     // --- Admin ---
     let admin_state = AdminState { db: db.clone() };

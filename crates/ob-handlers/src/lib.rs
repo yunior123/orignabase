@@ -56,7 +56,7 @@ impl HandlersState {
             .map(|key| Arc::new(stripe::Client::new(key)));
         let stripe_base_url = "https://api.stripe.com/v1".to_string();
 
-        let turnstile_secret_key = config.secret("turnstile_secret_key");
+        let turnstile_secret_key = config.secret("turnstile_secret_key").map(|s| s.to_string());
 
         Self {
             config,
@@ -144,7 +144,6 @@ pub fn handlers_router(state: HandlersState) -> Router {
         .merge(digital::router(state.clone()))
         .merge(coupons::router(state.clone()))
         .merge(geocoding::router(state.clone()))
-        .merge(admin::router(state.clone()))
         .merge(users::router(state.clone()))
         .merge(warehouses::router(state.clone()))
         .merge(addresses::router(state.clone()))

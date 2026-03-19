@@ -866,11 +866,12 @@ mod tests {
                         "questionText": "Is this available in blue?",
                         "answerText": "Yes, blue is in stock.",
                         "isAnswered": true,
-                    "upvotes": 4,
-                    fields::CREATED_AT: "2026-03-10T10:00:00Z",
-                    "answeredAt": "2026-03-10T11:00:00Z",
-                })
-            ))
+                        "upvotes": 4,
+                        fields::CREATED_AT: "2026-03-10T10:00:00Z",
+                        "answeredAt": "2026-03-10T11:00:00Z"
+                    }
+                }),
+            )
             .await
             .unwrap();
         state

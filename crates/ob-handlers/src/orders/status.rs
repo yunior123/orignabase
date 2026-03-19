@@ -203,7 +203,7 @@ fn mailjet_credentials(state: &HandlersState, order_id: &str) -> Option<(String,
         state.config.require_secret("mailjet_api_key"),
         state.config.require_secret("mailjet_secret_key"),
     ) {
-        (Ok(api_key), Ok(secret_key)) => Some((api_key, secret_key)),
+        (Ok(api_key), Ok(secret_key)) => Some((api_key.to_string(), secret_key.to_string())),
         (Err(err), _) | (_, Err(err)) => {
             warn!(order_id = %order_id, error = %err, "Mailjet credentials unavailable; skipping payout scheduled email");
             None

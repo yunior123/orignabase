@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/ob-mcp",
     "crates/orignabase",
     "crates/ob-core",
     "crates/ob-database",
@@ -96,6 +97,7 @@ ob-admin = { path = "crates/ob-admin" }
 ob-functions = { path = "crates/ob-functions" }
 ob-analytics = { path = "crates/ob-analytics" }
 ob-notifications = { path = "crates/ob-notifications" }
+ob-mcp = { path = "crates/ob-mcp" }
 ob-handlers = { path = "crates/ob-handlers" }
 
 # Crypto (for signed URLs)

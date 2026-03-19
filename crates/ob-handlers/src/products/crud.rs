@@ -385,7 +385,7 @@ async fn bulk_upload_products(
 
         // Sanitize and validate title
         let sanitized_title = sanitize_html(title);
-        if let Err(e) = validate_string("title", &sanitized_title, 1, 1000, false) {
+        if let Err(e) = validate_string("title", &sanitized_title, 1000) {
             errors.push(BulkProductError {
                 index: idx,
                 message: e.to_string(),
@@ -407,7 +407,7 @@ async fn bulk_upload_products(
 
         // Required: categoryId
         let category_id = obj
-            .get(fields::CATEGORY_ID)
+            .get(fields::CATEGORY)
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .trim();
@@ -423,7 +423,7 @@ async fn bulk_upload_products(
         // Sanitize description if present
         if let Some(desc) = obj.get(fields::DESCRIPTION).and_then(|v| v.as_str()) {
             let sanitized_desc = sanitize_html(desc);
-            if let Err(e) = validate_string("description", &sanitized_desc, 0, 5000, false) {
+            if let Err(e) = validate_string("description", &sanitized_desc, 5000) {
                 errors.push(BulkProductError {
                     index: idx,
                     message: e.to_string(),
@@ -534,6 +534,7 @@ async fn upload_images(
     for url in &req.image_urls {
         validate_image_url(url)?;
     }
+        let product = state.db
         .get_document(collections::PRODUCTS, &req.product_id)
         .await
         .map_err(|_| ob_core::Error::NotFound("Product not found".into()))?;

@@ -149,7 +149,6 @@ pub async fn support_chat(
 ) -> Result<Json<SupportChatResponse>, (axum::http::StatusCode, String)> {
     // Get Anthropic API key from secrets
     let api_key = state
-        .db
         .config
         .secrets
         .get("anthropic_api_key")

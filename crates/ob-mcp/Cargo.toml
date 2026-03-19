@@ -1,0 +1,44 @@
+[package]
+name = "ob-mcp"
+description = "MCP server integration for OrignaBase — exposes marketplace operations as tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Workspace crates
+ob-core = { workspace = true }
+ob-database = { workspace = true }
+ob-auth = { workspace = true }
+ob-search = { workspace = true }
+ob-handlers = { workspace = true }
+
+# Web framework (for HTTP transport)
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# UUID
+uuid = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+rstest = { workspace = true }
+proptest = { workspace = true }

@@ -4910,6 +4910,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "ob-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "ob-auth",
+ "ob-core",
+ "ob-database",
+ "ob-handlers",
+ "ob-search",
+ "proptest",
+ "rstest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-test",
+ "tower",
+ "tower-http",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ob-notifications"
 version = "0.1.0"
 dependencies = [

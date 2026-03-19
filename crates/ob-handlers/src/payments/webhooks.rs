@@ -63,7 +63,7 @@ async fn handle_stripe_webhook(
         if !signature.is_empty() {
             if !verify_stripe_signature(&body_bytes, signature, &webhook_secret) {
                 error!("Stripe webhook signature verification failed");
-                return Err(ob_core::Error::Unauthorized(
+                return Err(ob_core::Error::Auth(
                     "Invalid webhook signature".into(),
                 ));
             }
@@ -212,7 +212,6 @@ async fn store_webhook_event(
         .db
         .create_document(
             collections::WEBHOOK_EVENTS,
-            &event.id,
             serde_json::json!({
                 "id": event.id,
                 "type": event.r#type,
@@ -321,7 +320,7 @@ async fn restore_stock_for_order(
     // Build transaction to restore stock for all items
     let mut tx = Transaction::new();
 
-    for item in items {
+    for item in &items {
         let product_id = item
             .get(fields::PRODUCT_ID)
             .and_then(|v| v.as_str())
@@ -378,7 +377,7 @@ async fn decrement_stock_for_order(
     // Build transaction to decrement stock for all items
     let mut tx = Transaction::new();
 
-    for item in items {
+    for item in &items {
         let product_id = item
             .get(fields::PRODUCT_ID)
             .and_then(|v| v.as_str())
