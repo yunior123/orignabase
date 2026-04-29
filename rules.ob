@@ -115,6 +115,14 @@ rules security_alerts {
     list: hasRole("admin");
 }
 
+rules error_events {
+    read: hasRole("admin");
+    create: isAuthenticated() && auth.uid == incoming.userId;
+    update: hasRole("admin");
+    delete: hasRole("admin");
+    list: hasRole("admin");
+}
+
 rules rate_limits {
     read: hasRole("admin");
     create: false;
