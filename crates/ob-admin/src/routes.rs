@@ -19,6 +19,7 @@ static START_TIME: std::sync::LazyLock<std::time::Instant> =
 const PUBLIC_CONFIG_KEYS: &[&str] = &[
     "geoapify_api_key",
     "image_base_url",
+    "glitchtip_dsn",
     "sentry_dns",
     "google_web_client_id",
     "terms_and_conditions",
@@ -168,23 +169,29 @@ async fn require_admin_middleware(request: Request, next: Next) -> Result<Respon
 
 // ── Remote Config ──
 
+fn config_field<'a>(config: &'a Value, field: &str) -> Option<&'a Value> {
+    config
+        .get(field)
+        .or_else(|| config.get("data").and_then(|data| data.get(field)))
+}
+
 /// GET /config — Get all remote config key-value pairs (public, cached).
 async fn config_get_all(
     State(state): State<AdminState>,
 ) -> Result<([(header::HeaderName, &'static str); 1], Json<Value>)> {
     let configs = state
         .db
-        .query_raw("SELECT * FROM type::table('_config') ORDER BY key ASC")
+        .query_raw("SELECT * FROM _config LIMIT 100")
         .await?;
 
     let map: serde_json::Map<String, Value> = configs
         .iter()
         .filter_map(|c| {
-            let key = c.get("key")?.as_str()?;
+            let key = config_field(c, "key")?.as_str()?;
             if !PUBLIC_CONFIG_KEYS.contains(&key) {
                 return None;
             }
-            let value = c.get("value")?;
+            let value = config_field(c, "value")?;
             Some((key.to_string(), value.clone()))
         })
         .collect();
@@ -200,24 +207,18 @@ async fn config_get(
     State(state): State<AdminState>,
     axum::extract::Path(key): axum::extract::Path<String>,
 ) -> Result<([(header::HeaderName, &'static str); 1], Json<Value>)> {
-    let rows = state
+    let value = state
         .db
-        .query_raw(&format!(
-            "SELECT * FROM type::table('_config') WHERE key = '{}' LIMIT 1",
-            key.replace('\'', "\\'")
-        ))
-        .await?;
-
-    let value = rows
-        .first()
+        .get_document("_config", &key)
+        .await
+        .ok()
         .filter(|item| {
-            item.get("key")
-                .and_then(|v| v.as_str())
+            config_field(item, "key")
+                .and_then(Value::as_str)
                 .map(|cfg_key| PUBLIC_CONFIG_KEYS.contains(&cfg_key))
                 .unwrap_or(false)
         })
-        .and_then(|item| item.get("value"))
-        .cloned()
+        .and_then(|item| config_field(&item, "value").cloned())
         .unwrap_or(Value::Null);
 
     Ok((
@@ -230,8 +231,20 @@ async fn config_get(
 async fn admin_config_get_all(State(state): State<AdminState>) -> Result<Json<Value>> {
     let configs = state
         .db
-        .query_raw("SELECT * FROM type::table('_config') ORDER BY key ASC")
+        .query_raw("SELECT * FROM _config LIMIT 100")
         .await?;
+
+    let configs: Vec<Value> = configs
+        .into_iter()
+        .map(|config| {
+            json!({
+                "key": config_field(&config, "key").cloned().unwrap_or(Value::Null),
+                "value": config_field(&config, "value").cloned().unwrap_or(Value::Null),
+                "type": config_field(&config, "type").cloned().unwrap_or(Value::Null),
+                "description": config_field(&config, "description").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect();
 
     Ok(Json(json!({ "configs": configs })))
 }
@@ -264,9 +277,10 @@ async fn config_set(
     // Upsert: create or update
     state
         .db
-        .query_bind(
-            "UPSERT _config SET key = $key, value = $value, type = $type, description = $desc, updated_at = time::now() WHERE key = $key",
-            json!({ "key": key, "value": value, "type": value_type, "desc": description }),
+        .upsert_document(
+            "_config",
+            &key,
+            json!({ "key": key, "value": value, "type": value_type, "description": description }),
         )
         .await?;
 
@@ -280,13 +294,7 @@ async fn config_delete(
     State(state): State<AdminState>,
     axum::extract::Path(key): axum::extract::Path<String>,
 ) -> Result<Json<Value>> {
-    state
-        .db
-        .query_bind(
-            "DELETE FROM _config WHERE key = $key",
-            json!({ "key": key }),
-        )
-        .await?;
+    state.db.delete_document("_config", &key).await?;
 
     Ok(Json(json!({ "deleted": key })))
 }
@@ -698,7 +706,6 @@ async fn system_alerts(State(state): State<AdminState>) -> Result<Json<Value>> {
 }
 
 /// Build the admin router. All routes require admin authentication.
-
 /// POST /_admin/jwt/rotate — Rotate JWT signing keys (admin-only).
 /// Generates new RS256 key pair, moves current to previous, saves metadata.
 async fn rotate_jwt_keys(State(_state): State<AdminState>) -> Result<Json<Value>> {

@@ -19,6 +19,12 @@ fn normalize_data(data: Value) -> Value {
     }
 }
 
+fn config_field<'a>(config: &'a Value, field: &str) -> Option<&'a Value> {
+    config
+        .get(field)
+        .or_else(|| config.get("data").and_then(|data| data.get(field)))
+}
+
 pub struct QueryRoot;
 
 #[allow(clippy::too_many_arguments)]
@@ -145,20 +151,11 @@ impl QueryRoot {
     async fn config(&self, ctx: &Context<'_>, key: String) -> GqlResult<Value> {
         let db = ctx.data::<DatabaseClient>()?;
 
-        let results = db
-            .query_bind(
-                "SELECT value FROM _config WHERE key = $key LIMIT 1",
-                serde_json::json!({ "key": key }),
-            )
-            .await
-            .map_err(|e| {
-                tracing::error!("DB error: {e}");
-                async_graphql::Error::new("Internal server error")
-            })?;
+        let config = db.get_document("_config", &key).await.ok();
 
-        let value = results
-            .first()
-            .and_then(|r| r.get("value"))
+        let value = config
+            .as_ref()
+            .and_then(|config| config_field(config, "value"))
             .cloned()
             .unwrap_or(Value::Null);
 
@@ -170,7 +167,7 @@ impl QueryRoot {
         let db = ctx.data::<DatabaseClient>()?;
 
         let configs = db
-            .query_raw("SELECT key, value FROM _config ORDER BY key ASC")
+            .query_raw("SELECT * FROM _config LIMIT 100")
             .await
             .map_err(|e| {
                 tracing::error!("DB error: {e}");
@@ -180,8 +177,8 @@ impl QueryRoot {
         let map: serde_json::Map<String, Value> = configs
             .iter()
             .filter_map(|c| {
-                let key = c.get("key")?.as_str()?;
-                let value = c.get("value")?;
+                let key = config_field(c, "key")?.as_str()?;
+                let value = config_field(c, "value")?;
                 Some((key.to_string(), value.clone()))
             })
             .collect();
@@ -576,8 +573,8 @@ impl MutationRoot {
         })?;
 
         // Emit realtime change event
-        if let Ok(tx) = ctx.data::<mpsc::Sender<ChangeEvent>>() {
-            if let Err(e) = tx
+        if let Ok(tx) = ctx.data::<mpsc::Sender<ChangeEvent>>()
+            && let Err(e) = tx
                 .send(ChangeEvent {
                     action: ChangeAction::Delete,
                     collection: collection.clone(),
@@ -588,9 +585,8 @@ impl MutationRoot {
                     timestamp: chrono::Utc::now().to_rfc3339(),
                 })
                 .await
-            {
-                tracing::warn!("Realtime event dropped: {e}");
-            }
+        {
+            tracing::warn!("Realtime event dropped: {e}");
         }
 
         Ok(doc)
@@ -822,8 +818,8 @@ impl MutationRoot {
                 })?;
 
             // Emit change event
-            if let Ok(tx) = ctx.data::<mpsc::Sender<ChangeEvent>>() {
-                if let Err(e) = tx
+            if let Ok(tx) = ctx.data::<mpsc::Sender<ChangeEvent>>()
+                && let Err(e) = tx
                     .send(ChangeEvent {
                         action: ChangeAction::Update,
                         collection: collection.clone(),
@@ -834,9 +830,8 @@ impl MutationRoot {
                         timestamp: chrono::Utc::now().to_rfc3339(),
                     })
                     .await
-                {
-                    tracing::warn!("Realtime event dropped: {e}");
-                }
+            {
+                tracing::warn!("Realtime event dropped: {e}");
             }
 
             results.push(doc);
@@ -902,8 +897,8 @@ impl MutationRoot {
                 async_graphql::Error::new("Internal server error")
             })?;
 
-        if let Ok(tx) = ctx.data::<mpsc::Sender<ChangeEvent>>() {
-            if let Err(e) = tx
+        if let Ok(tx) = ctx.data::<mpsc::Sender<ChangeEvent>>()
+            && let Err(e) = tx
                 .send(ChangeEvent {
                     action: ChangeAction::Update,
                     collection: collection.clone(),
@@ -914,9 +909,8 @@ impl MutationRoot {
                     timestamp: chrono::Utc::now().to_rfc3339(),
                 })
                 .await
-            {
-                tracing::warn!("Realtime event dropped: {e}");
-            }
+        {
+            tracing::warn!("Realtime event dropped: {e}");
         }
 
         Ok(doc)
