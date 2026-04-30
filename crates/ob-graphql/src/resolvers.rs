@@ -104,7 +104,7 @@ impl QueryRoot {
             incoming: None,
         };
 
-        if !rules.check(&collection, "read", &sec_ctx).map_err(|e| {
+        if !rules.check(&collection, "list", &sec_ctx).map_err(|e| {
             tracing::error!("DB error: {e}");
             async_graphql::Error::new("Internal server error")
         })? {

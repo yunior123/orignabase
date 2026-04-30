@@ -1,0 +1,46 @@
+{
+  "rust-analyzer.check.command": "clippy",
+  "rust-analyzer.cargo.features": "all",
+  "rust-analyzer.cargo.allTargets": true,
+  "rust-analyzer.check.allTargets": true,
+  "rust-analyzer.procMacro.enable": true,
+  "rust-analyzer.imports.insertionPreset": "greedy",
+  "rust-analyzer.imports.group.enable": true,
+  "rust-analyzer.calls.goToDefinitionScope": "allSymbols",
+  "rust-analyzer.hover.documentation.enable": true,
+  "rust-analyzer.hover.links.enable": true,
+  "rust-analyzer.syntaxTree.viewMode": "full",
+  "rust-analyzer.completion.automaticBracketsCompletion": true,
+  "rust-analyzer.analysis.prioritizeImportMatching": true,
+  "[rust]": {
+    "editor.defaultFormatter": "rust-lang.rust-analyzer",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": "explicit",
+      "source.fix.all": "explicit"
+    },
+    "editor.semanticHighlighting.enabled": true,
+    "editor.guides.bracketPairs": true,
+    "editor.bracketPairColorization.enabled": true
+  },
+  "[toml]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode",
+    "editor.formatOnSave": true
+  },
+  "[markdown]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode",
+    "editor.formatOnSave": true,
+    "editor.wordWrap": "on"
+  },
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+  "files.trimFinalNewlines": true,
+  "editor.codeActionsOnSave": {
+    "source.organizeImports": "explicit"
+  },
+  "editor.formatOnSave": true,
+  "editor.rulers": [100],
+  "telemetry.telemetryLevel": "off",
+  "debug.console.fontSize": 14,
+  "debug.console.lineHeight": 20
+}

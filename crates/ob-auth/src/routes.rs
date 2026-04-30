@@ -195,14 +195,14 @@ fn validate_google_redirect_target(state: &AuthState, redirect_to: &str) -> Resu
 
     if let Ok(base_url) = reqwest::Url::parse(&state.base_url) {
         allowed_origins.push(base_url.origin().ascii_serialization());
-        if let Some(host) = base_url.host_str() {
-            if host.starts_with("api.") {
-                allowed_origins.push(format!(
-                    "{}://{}",
-                    base_url.scheme(),
-                    host.trim_start_matches("api.")
-                ));
-            }
+        if let Some(host) = base_url.host_str()
+            && host.starts_with("api.")
+        {
+            allowed_origins.push(format!(
+                "{}://{}",
+                base_url.scheme(),
+                host.trim_start_matches("api.")
+            ));
         }
     }
 

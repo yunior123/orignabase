@@ -600,6 +600,7 @@ impl NativeTriggerExecutor {
             .await;
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn create_notification_once(
         &self,
         claim_id: &str,
@@ -745,7 +746,7 @@ impl NativeTriggerExecutor {
             .db
             .query_bind_value(
                 "SELECT token FROM _push_tokens WHERE user_id = $user_id",
-                json!({"user_id": escaped_user_id})
+                json!({"user_id": escaped_user_id}),
             )
             .await
             .unwrap_or_default();
@@ -2109,11 +2110,11 @@ mod tests {
                 "userId": "buyer_1",
                 fields::ITEMS: [{ fields::SELLER_ID: "seller_1" }],
             });
-            if let Some(after_obj) = after.as_object_mut() {
-                if let Some(extra_obj) = extra.as_object() {
-                    for (key, value) in extra_obj {
-                        after_obj.insert(key.clone(), value.clone());
-                    }
+            if let Some(after_obj) = after.as_object_mut()
+                && let Some(extra_obj) = extra.as_object()
+            {
+                for (key, value) in extra_obj {
+                    after_obj.insert(key.clone(), value.clone());
                 }
             }
 
@@ -3476,7 +3477,7 @@ mod tests {
     #[test]
     fn buyer_order_status_message_delivered_auto_confirmed_fr() {
         let order = json!({ "autoConfirmed": true });
-        let (t, b) = buyer_order_status_message("DELIVERED", "orders:abc12345", &order, "fr");
+        let (t, _b) = buyer_order_status_message("DELIVERED", "orders:abc12345", &order, "fr");
         assert!(t.contains("Réception confirmée"));
     }
 
@@ -3557,37 +3558,41 @@ mod tests {
 
     #[test]
     fn seller_order_status_message_processing_fr() {
-        let (t, b) = seller_order_status_message("PROCESSING", "orders:abc12345", &json!({}), "fr");
+        let (t, _b) =
+            seller_order_status_message("PROCESSING", "orders:abc12345", &json!({}), "fr");
         assert!(t.contains("préparation"));
     }
 
     #[test]
     fn seller_order_status_message_processing_en() {
-        let (t, b) = seller_order_status_message("PROCESSING", "orders:abc12345", &json!({}), "en");
+        let (t, _b) =
+            seller_order_status_message("PROCESSING", "orders:abc12345", &json!({}), "en");
         assert!(t.contains("processing"));
     }
 
     #[test]
     fn seller_order_status_message_shipped_fr() {
-        let (t, b) = seller_order_status_message("SHIPPED", "orders:abc12345", &json!({}), "fr");
+        let (t, _b) = seller_order_status_message("SHIPPED", "orders:abc12345", &json!({}), "fr");
         assert!(t.contains("Expédition confirmée"));
     }
 
     #[test]
     fn seller_order_status_message_shipped_en() {
-        let (t, b) = seller_order_status_message("SHIPPED", "orders:abc12345", &json!({}), "en");
+        let (t, _b) = seller_order_status_message("SHIPPED", "orders:abc12345", &json!({}), "en");
         assert!(t.contains("Shipment confirmed"));
     }
 
     #[test]
     fn seller_order_status_message_in_transit_fr() {
-        let (t, b) = seller_order_status_message("IN_TRANSIT", "orders:abc12345", &json!({}), "fr");
+        let (t, _b) =
+            seller_order_status_message("IN_TRANSIT", "orders:abc12345", &json!({}), "fr");
         assert!(t.contains("transit"));
     }
 
     #[test]
     fn seller_order_status_message_in_transit_en() {
-        let (t, b) = seller_order_status_message("IN_TRANSIT", "orders:abc12345", &json!({}), "en");
+        let (t, _b) =
+            seller_order_status_message("IN_TRANSIT", "orders:abc12345", &json!({}), "en");
         assert!(t.contains("transit"));
     }
 
@@ -3607,26 +3612,26 @@ mod tests {
 
     #[test]
     fn seller_order_status_message_cancelled_fr() {
-        let (t, b) = seller_order_status_message("CANCELLED", "orders:abc12345", &json!({}), "fr");
+        let (t, _b) = seller_order_status_message("CANCELLED", "orders:abc12345", &json!({}), "fr");
         assert!(t.contains("annulée"));
     }
 
     #[test]
     fn seller_order_status_message_cancelled_en() {
-        let (t, b) = seller_order_status_message("CANCELLED", "orders:abc12345", &json!({}), "en");
+        let (t, _b) = seller_order_status_message("CANCELLED", "orders:abc12345", &json!({}), "en");
         assert!(t.contains("cancelled"));
     }
 
     #[test]
     fn seller_order_status_message_unknown_fr() {
-        let (t, b) =
+        let (t, _b) =
             seller_order_status_message("WEIRD_STATUS", "orders:abc12345", &json!({}), "fr");
         assert!(t.contains("Mise à jour"));
     }
 
     #[test]
     fn seller_order_status_message_unknown_en() {
-        let (t, b) =
+        let (t, _b) =
             seller_order_status_message("WEIRD_STATUS", "orders:abc12345", &json!({}), "en");
         assert!(t.contains("updated"));
     }
@@ -3656,7 +3661,7 @@ mod tests {
 
     #[test]
     fn buyer_payment_message_refunded_en_no_amount() {
-        let (t, b) = buyer_payment_message("REFUNDED", "orders:abc12345", None, "en");
+        let (_t, b) = buyer_payment_message("REFUNDED", "orders:abc12345", None, "en");
         assert!(b.contains("has been processed"));
     }
 
@@ -3669,13 +3674,13 @@ mod tests {
 
     #[test]
     fn buyer_payment_message_partial_refund_fr_no_amount() {
-        let (t, b) = buyer_payment_message("PARTIAL_REFUND", "orders:abc12345", None, "fr");
+        let (_t, b) = buyer_payment_message("PARTIAL_REFUND", "orders:abc12345", None, "fr");
         assert!(b.contains("partiel"));
     }
 
     #[test]
     fn buyer_payment_message_partial_refund_en_no_amount() {
-        let (t, b) = buyer_payment_message("PARTIAL_REFUND", "orders:abc12345", None, "en");
+        let (_t, b) = buyer_payment_message("PARTIAL_REFUND", "orders:abc12345", None, "en");
         assert!(b.contains("partial refund"));
     }
 
@@ -3688,31 +3693,31 @@ mod tests {
 
     #[test]
     fn buyer_payment_message_captured_en() {
-        let (t, b) = buyer_payment_message("CAPTURED", "orders:abc12345", None, "en");
+        let (t, _b) = buyer_payment_message("CAPTURED", "orders:abc12345", None, "en");
         assert!(t.contains("captured"));
     }
 
     #[test]
     fn buyer_payment_message_authorized_fr() {
-        let (t, b) = buyer_payment_message("AUTHORIZED", "orders:abc12345", None, "fr");
+        let (t, _b) = buyer_payment_message("AUTHORIZED", "orders:abc12345", None, "fr");
         assert!(t.contains("autorisé"));
     }
 
     #[test]
     fn buyer_payment_message_authorized_en() {
-        let (t, b) = buyer_payment_message("AUTHORIZED", "orders:abc12345", None, "en");
+        let (t, _b) = buyer_payment_message("AUTHORIZED", "orders:abc12345", None, "en");
         assert!(t.contains("authorized"));
     }
 
     #[test]
     fn buyer_payment_message_unknown_fr() {
-        let (t, b) = buyer_payment_message("WEIRD", "orders:abc12345", None, "fr");
+        let (t, _b) = buyer_payment_message("WEIRD", "orders:abc12345", None, "fr");
         assert!(t.contains("Mise à jour de paiement"));
     }
 
     #[test]
     fn buyer_payment_message_unknown_en() {
-        let (t, b) = buyer_payment_message("WEIRD", "orders:abc12345", None, "en");
+        let (t, _b) = buyer_payment_message("WEIRD", "orders:abc12345", None, "en");
         assert!(t.contains("Payment update"));
     }
 
@@ -3906,7 +3911,7 @@ mod tests {
 
     #[test]
     fn return_buyer_message_approved_en() {
-        let (t, b) = return_buyer_message("APPROVED", "orders:abc12345", "ret1", "en");
+        let (t, _b) = return_buyer_message("APPROVED", "orders:abc12345", "ret1", "en");
         assert!(t.contains("approved"));
     }
 
@@ -3919,7 +3924,7 @@ mod tests {
 
     #[test]
     fn return_buyer_message_rejected_en() {
-        let (t, b) = return_buyer_message("REJECTED", "orders:abc12345", "ret1", "en");
+        let (t, _b) = return_buyer_message("REJECTED", "orders:abc12345", "ret1", "en");
         assert!(t.contains("rejected"));
     }
 
@@ -3932,7 +3937,7 @@ mod tests {
 
     #[test]
     fn return_buyer_message_label_issued_en() {
-        let (t, b) = return_buyer_message("LABEL_ISSUED", "orders:abc12345", "ret1", "en");
+        let (t, _b) = return_buyer_message("LABEL_ISSUED", "orders:abc12345", "ret1", "en");
         assert!(t.contains("label ready"));
     }
 
@@ -3952,13 +3957,13 @@ mod tests {
 
     #[test]
     fn return_buyer_message_refunded_fr() {
-        let (t, b) = return_buyer_message("REFUNDED", "orders:abc12345", "ret1", "fr");
+        let (t, _b) = return_buyer_message("REFUNDED", "orders:abc12345", "ret1", "fr");
         assert!(t.contains("remboursé"));
     }
 
     #[test]
     fn return_buyer_message_refunded_en() {
-        let (t, b) = return_buyer_message("REFUNDED", "orders:abc12345", "ret1", "en");
+        let (t, _b) = return_buyer_message("REFUNDED", "orders:abc12345", "ret1", "en");
         assert!(t.contains("refunded"));
     }
 
@@ -4008,7 +4013,7 @@ mod tests {
 
     #[test]
     fn return_seller_message_received_fr() {
-        let (t, b) = return_seller_message("RECEIVED", "orders:abc12345", "ret1", "fr");
+        let (t, _b) = return_seller_message("RECEIVED", "orders:abc12345", "ret1", "fr");
         assert!(t.contains("reçu"));
     }
 
@@ -4028,13 +4033,13 @@ mod tests {
 
     #[test]
     fn return_seller_message_unknown_fr() {
-        let (t, b) = return_seller_message("WEIRD", "orders:abc12345", "ret1", "fr");
+        let (t, _b) = return_seller_message("WEIRD", "orders:abc12345", "ret1", "fr");
         assert!(t.contains("Mise à jour"));
     }
 
     #[test]
     fn return_seller_message_unknown_en() {
-        let (t, b) = return_seller_message("WEIRD", "orders:abc12345", "ret1", "en");
+        let (t, _b) = return_seller_message("WEIRD", "orders:abc12345", "ret1", "en");
         assert!(t.contains("Return update"));
     }
 
@@ -4832,7 +4837,7 @@ mod tests {
                         "userId": "buyer_1",
                         "variantKey": "blue"
                     }
-                })
+                }),
             )
             .await;
 

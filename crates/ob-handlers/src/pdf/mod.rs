@@ -426,7 +426,7 @@ mod tests {
 
     #[test]
     fn test_table_and_total_math_for_multiple_item_shapes() {
-        let items = vec![
+        let items = [
             InvoiceItem {
                 name: "Single".into(),
                 quantity: 1,

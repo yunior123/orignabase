@@ -54,8 +54,12 @@ const SAME_DAY_LOCAL: f64 = 2.5;
 const SAME_DAY_REGIONAL: f64 = 3.0;
 const SAME_DAY_DEFAULT: f64 = 3.5;
 
+// Perishable shipping constants (used in tests)
+#[allow(dead_code)]
 const PERISHABLE_CROSS_PROVINCE: f64 = 5.0;
+#[allow(dead_code)]
 const PERISHABLE_DISTANCE_THRESHOLD_KM: f64 = 200.0;
+#[allow(dead_code)]
 const PERISHABLE_LONG_DISTANCE: f64 = 10.0;
 
 // Helper: Convert dollars to cents
@@ -64,10 +68,10 @@ const fn dollars_to_cents(dollars: f64) -> i64 {
 }
 
 // Helper: Convert cents to dollars
+#[allow(dead_code)]
 fn cents_to_dollars(cents: i64) -> f64 {
     cents as f64 / 100.0
 }
-
 
 // ===========================================================================
 // Province adjacency & regions
@@ -272,19 +276,23 @@ fn calculate_tiered_itemized(
 
         let item_base_cents = if !first_handled {
             first_handled = true;
-            (base_cost_cents as f64 + ((qty - 1).max(0) as f64 * base_cost_cents as f64 * ADDITIONAL_ITEM_RATE)).round() as i64
+            (base_cost_cents as f64
+                + ((qty - 1).max(0) as f64 * base_cost_cents as f64 * ADDITIONAL_ITEM_RATE))
+                .round() as i64
         } else {
             (qty as f64 * base_cost_cents as f64 * ADDITIONAL_ITEM_RATE).round() as i64
         };
 
         let ew = effective_weight(item);
         let weight_surcharge_cents = if ew > WEIGHT_SURCHARGE_THRESHOLD_KG {
-            ((ew - WEIGHT_SURCHARGE_THRESHOLD_KG) * WEIGHT_SURCHARGE_PER_KG * qty as f64 * 100.0).round() as i64
+            ((ew - WEIGHT_SURCHARGE_THRESHOLD_KG) * WEIGHT_SURCHARGE_PER_KG * qty as f64 * 100.0)
+                .round() as i64
         } else {
             0
         };
 
-        let item_total_cents = ((item_base_cents as f64 + weight_surcharge_cents as f64) * multiplier).round() as i64;
+        let item_total_cents =
+            ((item_base_cents as f64 + weight_surcharge_cents as f64) * multiplier).round() as i64;
         breakdown.insert(id, item_total_cents);
         total_cents += item_total_cents;
     }
@@ -325,7 +333,9 @@ fn calculate_fallback_itemized(
 
         let item_cost_cents = if !first_handled {
             first_handled = true;
-            (base_cost_cents as f64 + ((qty - 1).max(0) as f64 * base_cost_cents as f64 * ADDITIONAL_ITEM_RATE)).round() as i64
+            (base_cost_cents as f64
+                + ((qty - 1).max(0) as f64 * base_cost_cents as f64 * ADDITIONAL_ITEM_RATE))
+                .round() as i64
         } else {
             (qty as f64 * base_cost_cents as f64 * ADDITIONAL_ITEM_RATE).round() as i64
         };
@@ -415,36 +425,36 @@ async fn calculate_shipping(
         let first_item = seller_items.first();
         if let Some(first) = first_item {
             let seller_id = first.seller_id.as_deref().unwrap_or("unknown");
-            
+
             // Check if seller has warehouse address configured
-            let seller = state.db.get_document(collections::USERS, seller_id)
+            let seller = state
+                .db
+                .get_document(collections::USERS, seller_id)
                 .await
-                .map_err(|_| ob_core::Error::NotFound(
-                    format!("Seller {} not found", seller_id)
-                ))?;
-            
-            let warehouse_addr = seller
-                .get("warehouseAddress")
-                .and_then(|v| v.as_object());
-            
+                .map_err(|_| ob_core::Error::NotFound(format!("Seller {} not found", seller_id)))?;
+
+            let warehouse_addr = seller.get("warehouseAddress").and_then(|v| v.as_object());
+
             if warehouse_addr.is_none() {
-                return Err(ob_core::Error::Validation(
-                    format!("Seller {} has no warehouse configured. Please contact seller to set up warehouse address.", seller_id)
-                ));
+                return Err(ob_core::Error::Validation(format!(
+                    "Seller {} has no warehouse configured. Please contact seller to set up warehouse address.",
+                    seller_id
+                )));
             }
-            
+
             // Validate warehouse has required fields
             let warehouse_province = warehouse_addr
                 .and_then(|w| w.get("province"))
                 .and_then(|v| v.as_str());
-            
+
             if warehouse_province.is_none() {
-                return Err(ob_core::Error::Validation(
-                    format!("Seller {} warehouse missing province field", seller_id)
-                ));
+                return Err(ob_core::Error::Validation(format!(
+                    "Seller {} warehouse missing province field",
+                    seller_id
+                )));
             }
         }
-        
+
         // Filter to chargeable items
         let chargeable: Vec<&ShippingItem> = seller_items
             .iter()
@@ -482,7 +492,7 @@ async fn calculate_shipping(
         let has_perishable = chargeable
             .iter()
             .any(|it| it.is_perishable.unwrap_or(false));
-        let mut perishable_surcharge: i64 = 0;
+        let perishable_surcharge: i64 = 0;
         // CRITICAL FIX: Block perishables from cross-province shipping entirely
         if has_perishable && seller_province != buyer_province {
             return Err(ob_core::Error::Validation(
@@ -495,6 +505,7 @@ async fn calculate_shipping(
         let should_call_geo = speed == "express" || speed == "same_day" || has_perishable;
         let geo_key = state.config.secret("geoapify_api_key");
 
+        #[allow(clippy::unnecessary_unwrap)]
         if should_call_geo
             && seller_lat.is_some()
             && seller_lon.is_some()

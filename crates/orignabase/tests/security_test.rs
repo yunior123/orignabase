@@ -100,7 +100,7 @@ mod injection {
         assert_eq!(status, 200);
         // Should have errors or empty data — NOT drop the table
         let has_errors = body.get("errors").is_some();
-        let data_null = body.get("data").map_or(true, |d| d.is_null());
+        let data_null = body.get("data").is_none_or(|d| d.is_null());
         assert!(
             has_errors || data_null,
             "Injection should not succeed: {body}"
@@ -113,7 +113,7 @@ mod injection {
         let c = client();
         let token = register_and_login(&c).await;
         // Attempt OR injection in filter
-        let (status, body) = graphql_request(
+        let (status, _body) = graphql_request(
             &c,
             r#"{ list(collection: "products", limit: 10, filters: {name: {_eq: "x\" OR 1==1 --"}}) }"#,
             Some(&token),
@@ -141,7 +141,7 @@ mod injection {
         let data_null = body
             .get("data")
             .and_then(|d| d.get("get"))
-            .map_or(true, |v| v.is_null());
+            .is_none_or(|v| v.is_null());
         assert!(
             has_errors || data_null,
             "Path traversal should not succeed: {body}"
@@ -248,7 +248,7 @@ mod jwt_tampering {
             let data_null = body
                 .get("data")
                 .and_then(|d| d.get("create"))
-                .map_or(true, |v| v.is_null());
+                .is_none_or(|v| v.is_null());
             assert!(
                 has_errors || data_null,
                 "Bad token should not allow mutation: {body}"
@@ -631,7 +631,7 @@ mod path_traversal {
             let data_null = body
                 .get("data")
                 .and_then(|d| d.get("list"))
-                .map_or(true, |v| v.is_null());
+                .is_none_or(|v| v.is_null());
             assert!(
                 has_errors || data_null,
                 "Path traversal should not succeed: {body}"
@@ -766,9 +766,10 @@ mod payload {
             .post(format!("{}/graphql", base_url()))
             .header("Content-Type", "application/json")
             .header("Authorization", format!("Bearer {token}"))
-            .body(format!(
-                r#"{{"query": "mutation {{ create(collection: \"test_nest\", data: \"{{}}\") }}"}}"#
-            ))
+            .body(
+                r#"{"query": "mutation { create(collection: \"test_nest\", data: \"{}\") }"}"#
+                    .to_string(),
+            )
             .send()
             .await
             .unwrap();

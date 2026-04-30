@@ -119,7 +119,7 @@ impl RuleEngine {
                 if let Some(Expression::Path(field)) = args.first() {
                     let resource_val = self.resolve_path(field, ctx);
                     if let (Some(uid), Value::String(owner_id)) = (&ctx.user_id, &resource_val) {
-                        Ok(uid == owner_id)
+                        Ok(owner_matches_uid(owner_id, uid))
                     } else {
                         Ok(false)
                     }
@@ -239,6 +239,10 @@ fn resolve_json_path(value: &Value, path: &[&str]) -> Value {
         }
     }
     current.clone()
+}
+
+fn owner_matches_uid(owner_id: &str, uid: &str) -> bool {
+    owner_id == uid || owner_id.rsplit_once(':').is_some_and(|(_, id)| id == uid)
 }
 
 fn is_truthy(value: &Value) -> bool {
@@ -421,6 +425,31 @@ mod tests {
         let engine = RuleEngine::new(rules);
         let ctx = ctx_with_resource("user123", serde_json::json!({"seller_id": "user123"}));
         assert!(engine.check("products", "update", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_is_owner_matches_record_reference() {
+        let rules = parse_rules(
+            r#"
+            rules cart {
+                create: isOwner(incoming.userId) || isOwner(incoming.parent_id);
+                read: isOwner(resource.userId) || isOwner(resource.parent_id);
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let create_ctx = ctx_with_incoming(
+            "user123",
+            serde_json::json!({"userId": "users:user123", "parent_id": "users:user123"}),
+        );
+        assert!(engine.check("cart", "create", &create_ctx).unwrap());
+
+        let read_ctx = ctx_with_resource(
+            "user123",
+            serde_json::json!({"userId": "users:user123", "parent_id": "users:user123"}),
+        );
+        assert!(engine.check("cart", "read", &read_ctx).unwrap());
     }
 
     #[test]

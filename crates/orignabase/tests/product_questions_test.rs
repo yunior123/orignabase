@@ -50,19 +50,6 @@ async fn api_post(client: &Client, path: &str, token: &str, body: Value) -> (u16
     (status, b)
 }
 
-async fn api_get(client: &Client, path: &str, token: &str) -> (u16, Value) {
-    let resp = client
-        .get(format!("{}{}", base_url(), path))
-        .header("Authorization", format!("Bearer {}", token))
-        .send()
-        .await
-        .expect("request failed");
-
-    let status = resp.status().as_u16();
-    let b: Value = resp.json().await.unwrap_or(json!({}));
-    (status, b)
-}
-
 #[tokio::test]
 #[ignore]
 async fn test_ask_product_question() {
@@ -412,7 +399,7 @@ async fn test_question_too_short() {
 #[ignore]
 async fn test_get_questions_pagination() {
     let client = Client::new();
-    let (buyer_token, buyer_id) = register_test_user(&client).await;
+    let (buyer_token, _buyer_id) = register_test_user(&client).await;
     let (seller_token, seller_id) = register_test_user(&client).await;
 
     // Create product
@@ -537,7 +524,7 @@ async fn test_get_questions_answered_only() {
 #[ignore]
 async fn test_questions_response_structure() {
     let client = Client::new();
-    let (buyer_token, buyer_id) = register_test_user(&client).await;
+    let (buyer_token, _buyer_id) = register_test_user(&client).await;
     let (seller_token, seller_id) = register_test_user(&client).await;
 
     // Create product

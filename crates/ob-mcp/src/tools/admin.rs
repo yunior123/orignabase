@@ -1,8 +1,8 @@
 //! Admin tools — analytics, reviews
 
-use crate::errors::{McpError, McpResult};
 use crate::McpState;
-use serde_json::{json, Value};
+use crate::errors::{McpError, McpResult};
+use serde_json::{Value, json};
 
 /// Get marketplace analytics (admin only)
 pub async fn get_analytics(_state: McpState, params: &Value) -> McpResult<Value> {
@@ -16,7 +16,7 @@ pub async fn get_analytics(_state: McpState, params: &Value) -> McpResult<Value>
         _ => {
             return Err(McpError::ValidationError(
                 "Period must be 'day', 'week', or 'month'".to_string(),
-            ))
+            ));
         }
     }
 
@@ -39,11 +39,7 @@ pub async fn get_analytics(_state: McpState, params: &Value) -> McpResult<Value>
 }
 
 /// Create product review (any authenticated user)
-pub async fn create_review(
-    _state: McpState,
-    user_id: &str,
-    params: &Value,
-) -> McpResult<Value> {
+pub async fn create_review(_state: McpState, user_id: &str, params: &Value) -> McpResult<Value> {
     let product_id = params
         .get("product_id")
         .and_then(|v| v.as_str())
@@ -54,7 +50,7 @@ pub async fn create_review(
         .and_then(|v| v.as_u64())
         .ok_or_else(|| McpError::InvalidParams("Missing 'rating'".to_string()))?;
 
-    if rating < 1 || rating > 5 {
+    if !(1..=5).contains(&rating) {
         return Err(McpError::ValidationError("Rating must be 1-5".to_string()));
     }
 

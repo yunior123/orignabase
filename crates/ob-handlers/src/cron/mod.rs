@@ -30,22 +30,16 @@ async fn acquire_cron_lock(state: &HandlersState, job_name: &str, ttl_minutes: i
     let cutoff = now - Duration::minutes(ttl_minutes);
 
     // Check existing lock
-    match state
+    if let Ok(doc) = state
         .db
         .get_document(collections::CRON_LOCKS, job_name)
         .await
+        && let Some(locked_at) = doc.get("lockedAt").and_then(|v| v.as_str())
+        && let Ok(ts) = chrono::DateTime::parse_from_rfc3339(locked_at)
+        && ts.with_timezone(&Utc) > cutoff
+        && doc.get("status").and_then(|v| v.as_str()) == Some("running")
     {
-        Ok(doc) => {
-            if let Some(locked_at) = doc.get("lockedAt").and_then(|v| v.as_str())
-                && let Ok(ts) = chrono::DateTime::parse_from_rfc3339(locked_at)
-                && ts.with_timezone(&Utc) > cutoff
-            {
-                if doc.get("status").and_then(|v| v.as_str()) == Some("running") {
-                    return false; // Lock still held and running
-                }
-            }
-        }
-        Err(_) => {} // No lock doc exists — proceed
+        return false; // Lock still held and running
     }
 
     // Create/update lock
@@ -150,7 +144,7 @@ async fn stripe_create_transfer(
     let resp = state
         .http_client
         .post(format!("{}/transfers", state.stripe_base_url))
-        .basic_auth(&stripe_key, None::<&str>)
+        .basic_auth(stripe_key, None::<&str>)
         .header("Idempotency-Key", format!("{}-{}", order_id, seller_id))
         .form(&form)
         .send()
@@ -168,7 +162,6 @@ async fn stripe_create_transfer(
         .map(|s| s.to_string())
         .ok_or_else(|| "No transfer ID in response".to_string())
 }
-
 
 // ---------------------------------------------------------------------------
 // Cron job: auto_capture_confirmed_receipts
@@ -329,13 +322,8 @@ async fn run_auto_capture(state: &HandlersState) -> std::result::Result<(), Stri
                 .await;
 
             // CRITICAL FIX: Actually create Stripe Transfer
-            let transfer_result = stripe_create_transfer(
-                state,
-                seller_id,
-                net_cents,
-                order_id,
-            )
-            .await;
+            let transfer_result =
+                stripe_create_transfer(state, seller_id, net_cents, order_id).await;
 
             match transfer_result {
                 Ok(transfer_id) => {
@@ -451,11 +439,11 @@ pub async fn check_expired_authorizations(state: &HandlersState) {
                         if !is_digital {
                             let pid = item.get("productId").and_then(|v| v.as_str()).unwrap_or("");
                             let qty = item.get("quantity").and_then(|v| v.as_i64()).unwrap_or(1);
-                            if !pid.is_empty() && qty > 0 {
-                                if let Err(e) = state
+                            if !pid.is_empty() && qty > 0
+                                && let Err(e) = state
                                     .db
                                     .query_bind(
-                                        &format!("UPDATE type::thing($table, $product_id) SET stockQuantity += $quantity, updatedAt = $updatedAt"),
+                                        "UPDATE type::thing($table, $product_id) SET stockQuantity += $quantity, updatedAt = $updatedAt",
                                         json!({
                                             "table": collections::PRODUCTS,
                                             "product_id": pid,
@@ -467,7 +455,6 @@ pub async fn check_expired_authorizations(state: &HandlersState) {
                                 {
                                     error!(product_id = %pid, error = %e, "Failed to restore expired-order stock");
                                 }
-                            }
                         }
                     }
                 }
@@ -666,10 +653,11 @@ pub async fn cleanup_orphaned_r2_images(state: &HandlersState) {
 
     let result = async {
         // Collect all referenced image URLs from products
-        let products = state.db.query_bind_value(
-            "SELECT imageUrls FROM products LIMIT 5000",
-            json!({})
-        ).await.map_err(|e| e.to_string())?;
+        let products = state
+            .db
+            .query_bind_value("SELECT imageUrls FROM products LIMIT 5000", json!({}))
+            .await
+            .map_err(|e| e.to_string())?;
 
         let mut referenced_keys: std::collections::HashSet<String> =
             std::collections::HashSet::new();
@@ -1154,10 +1142,14 @@ pub async fn send_abandoned_cart_emails(state: &HandlersState) {
             }
 
             // Query cart items
-            if let Ok(cart_items) = state.db.query_bind_value(
-                "SELECT * FROM cart WHERE userId = $user_id LIMIT 10",
-                json!({"user_id": user_id})
-            ).await {
+            if let Ok(cart_items) = state
+                .db
+                .query_bind_value(
+                    "SELECT * FROM cart WHERE userId = $user_id LIMIT 10",
+                    json!({"user_id": user_id}),
+                )
+                .await
+            {
                 if cart_items.is_empty() {
                     continue;
                 }
@@ -3027,7 +3019,7 @@ mod tests {
             .db
             .query_bind_value(
                 "SELECT * FROM order_events WHERE eventType = $eventType",
-                json!({"eventType": "authorization_expired"})
+                json!({"eventType": "authorization_expired"}),
             )
             .await
             .unwrap();
@@ -4520,7 +4512,7 @@ mod tests {
             .db
             .query_bind_value(
                 "SELECT * FROM security_alerts WHERE type = $type",
-                json!({"type": "seller_metrics_breach"})
+                json!({"type": "seller_metrics_breach"}),
             )
             .await
             .unwrap();

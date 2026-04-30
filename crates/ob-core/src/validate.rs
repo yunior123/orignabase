@@ -355,7 +355,6 @@ mod additional_tests {
 
 #[cfg(test)]
 mod phone_tests {
-    use super::*;
 
     fn is_valid_e164_phone(phone: &str) -> bool {
         // E.164 format: +1-15 digits
@@ -423,10 +422,10 @@ pub fn is_valid_canadian_postal(code: &str) -> bool {
     if code.len() != 6 {
         return false;
     }
-    
+
     let code = code.to_uppercase();
     let chars: Vec<char> = code.chars().collect();
-    
+
     // Pattern: letter-digit-letter-digit-letter-digit
     (chars[0].is_alphabetic() && chars[1].is_numeric() && chars[2].is_alphabetic() &&
      chars[3].is_numeric() && chars[4].is_alphabetic() && chars[5].is_numeric()) &&

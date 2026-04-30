@@ -90,7 +90,7 @@ async fn test_shipping_calculate_perishable_local_only() {
     let (token, _) = register_test_user(&client).await;
 
     // Test 1: Perishable, local (< 50km) — should succeed
-    let (status, shipping_resp) = api_post(
+    let (status, _shipping_resp) = api_post(
         &client,
         "/api/shipping/calculate",
         &token,
@@ -125,7 +125,7 @@ async fn test_shipping_calculate_perishable_local_only() {
     // Should fail or return unavailable
     if status == 200 {
         // May return success with special handling; verify cost
-        let shipping_cost = api_post(
+        let _shipping_cost = api_post(
             &client,
             "/api/shipping/calculate",
             &token,
@@ -170,7 +170,7 @@ async fn test_shipping_free_threshold() {
     let product_cheap_id = product_cheap["id"].as_str().unwrap_or("").to_string();
 
     // Test 1: Order below threshold — should have shipping cost
-    let (status, order1) = api_post(
+    let (status, _order1) = api_post(
         &client,
         "/api/orders/create",
         &buyer_token,
@@ -205,7 +205,7 @@ async fn test_shipping_free_threshold() {
     .await;
     assert_eq!(status, 200);
 
-    let order2_id = order2["id"].as_str().unwrap_or("").to_string();
+    let _order2_id = order2["id"].as_str().unwrap_or("").to_string();
 
     // Verify the free-shipping order has zero shipping
     let order2_shipping = order2["shippingCostCents"].as_i64().unwrap_or(-1);
@@ -433,7 +433,7 @@ async fn test_shipping_update_cost() {
 
     // May require buyer approval if increase exceeds threshold
     if status == 200 {
-        let approval_required = update_resp["approvalRequired"].as_bool().unwrap_or(false);
+        let _approval_required = update_resp["approvalRequired"].as_bool().unwrap_or(false);
         // If cost increased significantly, approval would be required
     } else {
         // May fail if approval is required; that's expected

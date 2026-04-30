@@ -77,23 +77,22 @@ pub fn redact_contact_info(text: &str) -> String {
     result
 }
 
-
 /// Validate phone number in E.164 format.
 /// Format: +[1-9]{1-15 digits}
 /// Example: +14165551234
 pub fn validate_phone_e164(phone: &str) -> ob_core::Result<()> {
     let phone_trimmed = phone.trim();
-    
+
     // E.164 format: +[1-9]{1,15}
     let e164_regex = regex_lite::Regex::new(r"^\+[1-9]\d{1,14}$")
         .map_err(|_| ob_core::Error::Internal("Regex compile error".into()))?;
-    
+
     if !e164_regex.is_match(phone_trimmed) {
         return Err(ob_core::Error::Validation(
             "Phone must be in E.164 format (e.g., +14165551234)".into(),
         ));
     }
-    
+
     Ok(())
 }
 
@@ -101,23 +100,19 @@ pub fn validate_phone_e164(phone: &str) -> ob_core::Result<()> {
 /// Format: A1A 1A1 (letter-digit-letter space digit-letter-digit)
 pub fn validate_postal_code_ca(postal_code: &str) -> ob_core::Result<String> {
     let normalized = postal_code.to_uppercase().replace(" ", "");
-    
+
     // Canadian postal code: A1A1A1
     let postal_regex = regex_lite::Regex::new(r"^[A-Z]\d[A-Z]\d[A-Z]\d$")
         .map_err(|_| ob_core::Error::Internal("Regex compile error".into()))?;
-    
+
     if !postal_regex.is_match(&normalized) {
         return Err(ob_core::Error::Validation(
             "Invalid Canadian postal code. Format: A1A 1A1 (e.g., M5V 3A8)".into(),
         ));
     }
-    
+
     // Return formatted: A1A 1A1
-    Ok(format!(
-        "{} {}",
-        &normalized[0..3],
-        &normalized[3..6]
-    ))
+    Ok(format!("{} {}", &normalized[0..3], &normalized[3..6]))
 }
 
 #[cfg(test)]
@@ -234,5 +229,4 @@ mod tests {
         assert!(validate_postal_code_ca("123 456").is_err()); // All numbers
         assert!(validate_postal_code_ca("MMMMMM").is_err()); // All letters
     }
-
 }

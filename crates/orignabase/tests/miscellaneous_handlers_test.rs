@@ -315,7 +315,7 @@ async fn test_708_double_payment_prevention() {
     // Try processing the same payment twice
     let order_id = "ord_double_payment_test";
 
-    let (status_1, _body_1) = make_request(
+    let (_status_1, _body_1) = make_request(
         &client,
         "POST",
         "/api/payments/capture",
@@ -427,7 +427,7 @@ async fn test_711_refund_already_refunded() {
     let order_id = "ord_refund_test";
 
     // Try to refund twice (should handle idempotently)
-    let (status_1, _body_1) = make_request(
+    let (_status_1, _body_1) = make_request(
         &client,
         "POST",
         "/api/orders/refund",

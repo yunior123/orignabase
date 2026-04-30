@@ -158,7 +158,7 @@ async fn test_602_shipping_calc_free_shipping_threshold() {
     let (token, _user_id, _) = register_test_user(&client).await;
 
     // Order subtotal above free shipping threshold ($75 CAD = 7500 cents)
-    let (status, body) = make_request(
+    let (status, _body) = make_request(
         &client,
         "POST",
         "/api/shipping/calculate",
@@ -405,7 +405,7 @@ async fn test_608_email_duplicate_prevention() {
 async fn test_609_public_product_list() {
     let client = reqwest::Client::new();
 
-    let (status, body) = make_request(
+    let (status, _body) = make_request(
         &client,
         "POST",
         "/api/products/list",

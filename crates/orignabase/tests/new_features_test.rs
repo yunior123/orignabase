@@ -1,5 +1,5 @@
 //! New features live integration tests
-//! 
+//!
 //! Tests new features and infrastructure improvements:
 //! - Bulk product upload endpoint
 //! - Email notification triggers
@@ -11,11 +11,11 @@
 //! - Data retention (webhook cleanup)
 //! - Subscription double-create prevention
 //! - Password reset token invalidation
-//! 
+//!
 //! Run: cargo test --test new_features_test -- --ignored
 
 use reqwest::{Client, StatusCode};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 mod new_features {
@@ -35,7 +35,7 @@ mod new_features {
 
     async fn register_and_login(email: &str, password: &str) -> String {
         let client = client();
-        
+
         client
             .post(format!("{}/auth/register", base_url()))
             .json(&json!({"email": email, "password": password}))
@@ -81,8 +81,7 @@ mod new_features {
 
         // Should include checks for critical dependencies
         assert!(
-            body["status"].as_str() == Some("ok")
-                || body["healthy"].as_bool() == Some(true),
+            body["status"].as_str() == Some("ok") || body["healthy"].as_bool() == Some(true),
             "health status should indicate ok"
         );
 
@@ -178,17 +177,17 @@ mod new_features {
                 Ok(resp) => {
                     if resp.status() == StatusCode::OK {
                         let body: Value = resp.json().await.unwrap_or(json!([]));
-                        
+
                         // Should have email notifications queued
                         if let Some(arr) = body.as_array() {
-                            println!(
-                                "Email notifications: {} pending",
-                                arr.len()
-                            );
+                            println!("Email notifications: {} pending", arr.len());
                             // At least order confirmation should be queued
                             assert!(
                                 arr.iter().any(|n| {
-                                    n["type"].as_str().map(|t| t.contains("order")).unwrap_or(false)
+                                    n["type"]
+                                        .as_str()
+                                        .map(|t| t.contains("order"))
+                                        .unwrap_or(false)
                                 }),
                                 "order confirmation email should be queued"
                             );
@@ -280,7 +279,7 @@ mod new_features {
 
         if response.status() == StatusCode::OK {
             let body: Value = response.json().await.unwrap_or(json!({}));
-            
+
             // Should have lat/lng or similar
             assert!(
                 body.get("lat").is_some() || body.get("latitude").is_some(),
@@ -299,10 +298,7 @@ mod new_features {
 
         // Query that should use index on orders.status
         let response = client
-            .get(format!(
-                "{}/orders?status=confirmed&limit=10",
-                base_url()
-            ))
+            .get(format!("{}/orders?status=confirmed&limit=10", base_url()))
             .send()
             .await
             .expect("indexed query failed");
@@ -349,10 +345,10 @@ mod new_features {
 
         if response.status() == StatusCode::OK {
             let body: Value = response.json().await.unwrap_or(json!({}));
-            
+
             if let Some(webhook_days) = body["webhookEventRetentionDays"].as_i64() {
                 assert!(
-                    webhook_days >= 30 && webhook_days <= 180,
+                    (30..=180).contains(&webhook_days),
                     "webhook retention should be between 30-180 days (got {})",
                     webhook_days
                 );
@@ -383,7 +379,7 @@ mod new_features {
 
         if first.status() == StatusCode::OK || first.status() == StatusCode::CREATED {
             let first_body: Value = first.json().await.unwrap_or(json!({}));
-            let first_id = first_body["id"].as_str().unwrap_or("").to_string();
+            let _first_id = first_body["id"].as_str().unwrap_or("").to_string();
 
             // Attempt to create duplicate
             let second = client

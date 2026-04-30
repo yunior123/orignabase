@@ -54,6 +54,7 @@ async fn api_post(client: &Client, path: &str, token: &str, body: Value) -> (u16
 }
 
 /// Helper to make GET request to OrignaBase API.
+#[allow(dead_code)]
 async fn api_get(client: &Client, path: &str, token: &str) -> (u16, Value) {
     let resp = client
         .get(format!("{}{}", base_url(), path))
@@ -321,7 +322,7 @@ async fn test_order_state_transitions() {
     assert_eq!(detail["status"].as_str().unwrap_or(""), "pending");
 
     // Transition to confirmed (via admin/payment webhook in real flow)
-    let (status, _) = api_post(
+    let (_status, _) = api_post(
         &client,
         "/api/orders/update-status",
         &seller_token,

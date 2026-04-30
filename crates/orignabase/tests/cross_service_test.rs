@@ -86,14 +86,14 @@ async fn search_finds_created_product() {
             &format!(r#"{{ search(collection: "products", query: "{name}", limit: 5) }}"#),
         )
         .await;
-        if let Some(results) = resp["data"]["search"].as_array() {
-            if results.iter().any(|r| {
+        if let Some(results) = resp["data"]["search"].as_array()
+            && results.iter().any(|r| {
                 r["name"].as_str() == Some(&name)
                     || serde_json::to_string(r).unwrap_or_default().contains(&name)
-            }) {
-                found = true;
-                break;
-            }
+            })
+        {
+            found = true;
+            break;
         }
     }
     if !found {
@@ -118,7 +118,7 @@ async fn search_reflects_updated_name() {
         &json!({"name": old_name, "price": 999}),
     )
     .await;
-    let clean_id = doc_id.split(':').last().unwrap_or(&doc_id);
+    let clean_id = doc_id.split(':').next_back().unwrap_or(&doc_id);
 
     tokio::time::sleep(Duration::from_secs(2)).await;
 
@@ -164,7 +164,7 @@ async fn deleted_product_removed_from_search() {
     let (token, _) = register_test_user(&c).await;
     let name = format!("DeleteMe_{}", Uuid::new_v4().simple());
     let doc_id = create_doc(&c, &token, "products", &json!({"name": name, "price": 100})).await;
-    let clean_id = doc_id.split(':').last().unwrap_or(&doc_id);
+    let clean_id = doc_id.split(':').next_back().unwrap_or(&doc_id);
 
     tokio::time::sleep(Duration::from_secs(2)).await;
 
@@ -190,7 +190,7 @@ async fn deleted_product_removed_from_search() {
         !text.contains(&name)
             || resp["data"]["search"]
                 .as_array()
-                .map_or(true, |a| a.is_empty()),
+                .is_none_or(|a| a.is_empty()),
         "Deleted product should not appear in search"
     );
 }
@@ -365,7 +365,7 @@ async fn create_then_read_matches() {
         &json!({"name": "verify_me", "count": 42}),
     )
     .await;
-    let clean_id = doc_id.split(':').last().unwrap_or(&doc_id);
+    let clean_id = doc_id.split(':').next_back().unwrap_or(&doc_id);
 
     let body = graphql(
         &c,

@@ -3,9 +3,9 @@
 
 use axum::{Extension, Json, Router, extract::State, routing::post};
 use ob_auth::middleware::AuthContext;
+use ob_database::Transaction;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use ob_database::Transaction;
 use tracing::{error, info, warn};
 
 use crate::HandlersState;
@@ -124,7 +124,9 @@ async fn create_checkout_session(
         }
     } else if std::env::var("OB_TEST_MODE").unwrap_or_default() != "1" {
         // Require Turnstile token in production
-        return Err(ob_core::Error::Validation("Turnstile token is required".into()));
+        return Err(ob_core::Error::Validation(
+            "Turnstile token is required".into(),
+        ));
     }
 
     let user_id = resolve_self_user_id(&auth, req.user_id.as_deref(), "userId")?;
@@ -294,9 +296,10 @@ async fn create_checkout_session(
         // JWT has "users:xyz123", seller_id from product is "xyz123" (short form)
         let user_id_short = user_id.strip_prefix("users:").unwrap_or(&user_id);
         if seller_id == user_id_short {
-            return Err(ob_core::Error::Validation(
-                format!("Cannot purchase your own products (seller: {}, buyer: {})", seller_id, user_id_short),
-            ));
+            return Err(ob_core::Error::Validation(format!(
+                "Cannot purchase your own products (seller: {}, buyer: {})",
+                seller_id, user_id_short
+            )));
         }
 
         // Age verification for restricted items
@@ -374,35 +377,34 @@ async fn create_checkout_session(
             }
         }
 
-    // --- Seller Stripe Connect onboarding check (CRITICAL FIX: P0) ---
-    for seller_id in &unique_seller_ids {
-        if let Ok(seller) = state.db.get_document(collections::USERS, seller_id).await {
-            // Verify seller has completed Stripe Connect onboarding
-            let onboarding_completed = seller
-                .get(fields::ONBOARDING_COMPLETED)
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if !onboarding_completed {
-                return Err(ob_core::Error::Validation(format!(
-                    "Seller {} has not completed Stripe Connect onboarding. Cannot accept orders from this seller.",
-                    seller_id
-                )));
-            }
-            
-            // Verify payouts are enabled
-            let payouts_enabled = seller
-                .get(fields::PAYOUTS_ENABLED)
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if !payouts_enabled {
-                return Err(ob_core::Error::Validation(format!(
-                    "Seller {} cannot currently accept payments.",
-                    seller_id
-                )));
+        // --- Seller Stripe Connect onboarding check (CRITICAL FIX: P0) ---
+        for seller_id in &unique_seller_ids {
+            if let Ok(seller) = state.db.get_document(collections::USERS, seller_id).await {
+                // Verify seller has completed Stripe Connect onboarding
+                let onboarding_completed = seller
+                    .get(fields::ONBOARDING_COMPLETED)
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if !onboarding_completed {
+                    return Err(ob_core::Error::Validation(format!(
+                        "Seller {} has not completed Stripe Connect onboarding. Cannot accept orders from this seller.",
+                        seller_id
+                    )));
+                }
+
+                // Verify payouts are enabled
+                let payouts_enabled = seller
+                    .get(fields::PAYOUTS_ENABLED)
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if !payouts_enabled {
+                    return Err(ob_core::Error::Validation(format!(
+                        "Seller {} cannot currently accept payments.",
+                        seller_id
+                    )));
+                }
             }
         }
-    }
-
     }
 
     // --- Duplicate order detection (5-minute window) ---
@@ -451,7 +453,10 @@ async fn create_checkout_session(
         ("metadata[order_id]".to_string(), order_id.clone()),
         ("metadata[user_id]".to_string(), user_id.clone()),
         // Platform fee: 5% of subtotal, collected via Stripe Connect
-        ("application_fee_amount".to_string(), platform_fee_cents.to_string()),
+        (
+            "application_fee_amount".to_string(),
+            platform_fee_cents.to_string(),
+        ),
     ];
 
     for (i, item) in validated_items.iter().enumerate() {
@@ -474,8 +479,12 @@ async fn create_checkout_session(
         form_data.push((format!("line_items[{}][quantity]", i), qty.to_string()));
     }
 
-    let idempotency_key = format!("checkout_{}_{}", order_id, chrono::Utc::now().timestamp_millis());
-    
+    let idempotency_key = format!(
+        "checkout_{}_{}",
+        order_id,
+        chrono::Utc::now().timestamp_millis()
+    );
+
     let stripe_response = state
         .http_client
         .post(format!("{}/checkout/sessions", state.stripe_base_url))
@@ -532,16 +541,16 @@ async fn create_checkout_session(
     // CRITICAL: Stock check and decrement must be atomic to prevent race conditions
     // where two concurrent buyers both pass validation on stock 2 and create negative stock.
     // Use SurrealDB transaction to ensure all-or-nothing semantics.
-    
+
     // Build atomic transaction: create order + reserve stock for all physical items
     let mut tx = Transaction::new();
-    
+
     // Operation 1: Create the order
     tx.add(
         &format!("CREATE {} CONTENT $order", collections::ORDERS),
         Some(serde_json::json!({"order": order_doc})),
     );
-    
+
     // Operations 2+: Decrement stock for each non-digital item
     // This is atomic with order creation — if stock goes negative, entire transaction rolls back
     for item in &validated_items {
@@ -572,13 +581,11 @@ async fn create_checkout_session(
     }
 
     // Execute transaction atomically
-    tx.commit(&state.db)
-        .await
-        .map_err(|e| {
-            ob_core::Error::Database(format!(
-                "Failed to create order and reserve stock (atomic transaction): {e}"
-            ))
-        })?;
+    tx.commit(&state.db).await.map_err(|e| {
+        ob_core::Error::Database(format!(
+            "Failed to create order and reserve stock (atomic transaction): {e}"
+        ))
+    })?;
 
     info!(
         order_id = %order_id,
@@ -756,9 +763,15 @@ mod tests {
         // Even at $100k, tolerance is fixed $2.00
         let actual = 10_000_000; // $100,000
         let tolerance = checkout_subtotal_tolerance(actual);
-        assert_eq!(tolerance, 200, "Tolerance for $100k should be fixed $2.00, not $1k");
+        assert_eq!(
+            tolerance, 200,
+            "Tolerance for $100k should be fixed $2.00, not $1k"
+        );
         assert!(subtotal_matches_with_tolerance(actual + tolerance, actual));
-        assert!(!subtotal_matches_with_tolerance(actual + tolerance + 1, actual));
+        assert!(!subtotal_matches_with_tolerance(
+            actual + tolerance + 1,
+            actual
+        ));
     }
 
     #[test]
@@ -926,7 +939,7 @@ mod tests {
         // age_restricted = true, age_verification_accepted = true → should pass
         let age_verification_accepted = true;
         assert!(
-            !(age_restricted && !age_verification_accepted),
+            !age_restricted || age_verification_accepted,
             "Should allow when verified"
         );
 
@@ -934,7 +947,7 @@ mod tests {
         let age_restricted = false;
         let age_verification_accepted = false;
         assert!(
-            !(age_restricted && !age_verification_accepted),
+            !age_restricted || age_verification_accepted,
             "Non-restricted items should not require verification"
         );
     }

@@ -1,0 +1,129 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "OrignaBase (cargo run)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/orignabase",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "RUST_LOG": "debug",
+        "RUST_BACKTRACE": "1"
+      },
+      "preLaunchTask": "orignabase: cargo build (debug)",
+      "sourceLanguages": ["rust"]
+    },
+    {
+      "name": "OrignaBase (cargo run --release)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/release/orignabase",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "RUST_LOG": "info",
+        "RUST_BACKTRACE": "1"
+      },
+      "preLaunchTask": "orignabase: cargo build (release)",
+      "sourceLanguages": ["rust"]
+    },
+    {
+      "name": "OrignaBase Attach (LLDB)",
+      "type": "lldb",
+      "request": "attach",
+      "program": "${workspaceFolder}/target/debug/orignabase",
+      "pid": "${command:pickProcess}",
+      "sourceLanguages": ["rust"]
+    },
+    {
+      "name": "Test Current Crate (debug)",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": "test --package ${input:cargoPackage} --lib",
+        "filter": {
+          "name": "${input:testName}",
+          "excludedNames": []
+        }
+      },
+      "sourceLanguages": ["rust"],
+      "presentation": {
+        "hidden": false
+      }
+    },
+    {
+      "name": "Test Current Crate (release)",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": "test --release --package ${input:cargoPackage} --lib",
+        "filter": {
+          "name": "${input:testName}",
+          "excludedNames": []
+        }
+      },
+      "sourceLanguages": ["rust"]
+    },
+    {
+      "name": "Run Example",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": "run --package ${input:cargoPackage} --example ${input:exampleName}",
+        "filter": {
+          "name": "",
+          "excludedNames": []
+        }
+      },
+      "sourceLanguages": ["rust"]
+    },
+    {
+      "name": "Debug Tests in Crate",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": "test --package ${input:cargoPackage}",
+        "filter": {
+          "name": "",
+          "excludedNames": ["bench_"]
+        }
+      },
+      "sourceLanguages": ["rust"]
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Debug All",
+      "configurations": ["OrignaBase (cargo run)"]
+    }
+  ],
+  "inputs": [
+    {
+      "id": "cargoPackage",
+      "type": "pickString",
+      "options": [
+        {"label": "ob-core", "value": "ob-core"},
+        {"label": "ob-api", "value": "ob-api"},
+        {"label": "ob-auth", "value": "ob-auth"},
+        {"label": "ob-db", "value": "ob-db"},
+        {"label": "ob-storage", "value": "ob-storage"},
+        {"label": "ob-graphql", "value": "ob-graphql"},
+        {"label": "ob-mcp", "value": "ob-mcp"},
+        {"label": "ob-email", "value": "ob-email"}
+      ],
+      "description": "Select cargo package"
+    },
+    {
+      "id": "testName",
+      "type": "promptString",
+      "description": "Test name to run (leave empty for all)"
+    },
+    {
+      "id": "exampleName",
+      "type": "promptString",
+      "description": "Example name to run"
+    }
+  ]
+}

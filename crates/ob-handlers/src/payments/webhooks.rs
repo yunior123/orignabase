@@ -59,15 +59,12 @@ async fn handle_stripe_webhook(
         .map_err(|e| ob_core::Error::Internal(format!("Failed to read body: {e}")))?;
 
     // --- Verify webhook signature if secret is configured ---
-    if let Ok(webhook_secret) = state.config.require_secret("stripe_webhook_secret") {
-        if !signature.is_empty() {
-            if !verify_stripe_signature(&body_bytes, signature, &webhook_secret) {
-                error!("Stripe webhook signature verification failed");
-                return Err(ob_core::Error::Auth(
-                    "Invalid webhook signature".into(),
-                ));
-            }
-        }
+    if let Ok(webhook_secret) = state.config.require_secret("stripe_webhook_secret")
+        && !signature.is_empty()
+        && !verify_stripe_signature(&body_bytes, signature, webhook_secret)
+    {
+        error!("Stripe webhook signature verification failed");
+        return Err(ob_core::Error::Auth("Invalid webhook signature".into()));
     }
 
     // --- Parse event ---
@@ -472,6 +469,7 @@ async fn release_coupon_reservation(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn str_field<'a>(value: &'a Value, field: &str) -> &'a str {
     value.get(field).and_then(|v| v.as_str()).unwrap_or("")
 }

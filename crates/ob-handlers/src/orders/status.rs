@@ -38,6 +38,7 @@ impl DeliveryStatus {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "pending" => Some(Self::Pending),
@@ -2628,7 +2629,7 @@ mod tests {
         // Then seller_items won't include it, but the code sets is_seller based on seller_items being non-empty.
         // This is getting complex. Let me just test the admin SHIPPED cascade path instead.
         // Actually for coverage, let's skip this edge case and focus on admin paths.
-        assert!(true); // placeholder, real coverage via admin path tests below
+        // placeholder - real coverage via admin path tests below
     }
 
     // -----------------------------------------------------------------------
@@ -3271,6 +3272,6 @@ mod tests {
         // But wait — what about items with no sellerId at all? Those would have sellerId="" which
         // wouldn't be "seller_1", so they wouldn't get shipped. And distinct sellers would include "".
         // Two distinct → multi-seller block. So line 552 is indeed unreachable.
-        assert!(true); // Confirmed unreachable
+        // Confirmed unreachable
     }
 }

@@ -47,8 +47,10 @@ struct GoogleTokenInfo {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct GoogleTokenExchangeResponse {
     id_token: Option<String>,
+    #[allow(dead_code)]
     access_token: Option<String>,
 }
 
@@ -132,6 +134,7 @@ pub async fn exchange_google_authorization_code(
 // ── Apple OAuth ──
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 struct AppleTokenRequest {
     grant_type: String,
     code: String,
@@ -147,8 +150,10 @@ struct AppleTokenInfo {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct AppleTokenResponse {
     id_token: Option<String>,
+    #[allow(dead_code)]
     access_token: Option<String>,
 }
 
@@ -297,8 +302,10 @@ struct OidcTokenInfo {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct OidcTokenResponse {
     id_token: Option<String>,
+    #[allow(dead_code)]
     access_token: Option<String>,
 }
 
@@ -401,11 +408,12 @@ pub async fn exchange_oidc_authorization_code(
 // ── Utilities ──
 
 /// Base64 URL decode with padding
-fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, base64::DecodeError> {
+#[allow(dead_code)]
+fn _base64_decode(input: &str) -> std::result::Result<Vec<u8>, base64::DecodeError> {
     use base64::prelude::*;
     let mut input = input.to_string();
     // Add padding
-    while input.len() % 4 != 0 {
+    while !input.len().is_multiple_of(4) {
         input.push('=');
     }
     // Replace URL-safe characters
@@ -413,48 +421,10 @@ fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, base64::DecodeErro
     BASE64_STANDARD.decode(&input)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_oauth_user_info_serialization() {
-        let user_info = OAuthUserInfo {
-            provider_id: "sub_123".to_string(),
-            provider: OAuthProvider::Google,
-            email: Some("user@example.com".to_string()),
-            display_name: Some("John Doe".to_string()),
-            picture: Some("https://example.com/pic.jpg".to_string()),
-        };
-
-        let json = serde_json::to_string(&user_info).unwrap();
-        let decoded: OAuthUserInfo = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(decoded.provider_id, "sub_123");
-        assert_eq!(decoded.provider, OAuthProvider::Google);
-        assert_eq!(decoded.email, Some("user@example.com".to_string()));
-    }
-
-    #[test]
-    fn test_oauth_provider_display() {
-        assert_eq!(OAuthProvider::Google.to_string(), "google");
-        assert_eq!(OAuthProvider::Apple.to_string(), "apple");
-        assert_eq!(OAuthProvider::Oidc.to_string(), "oidc");
-    }
-
-    #[test]
-    fn test_base64_decode() {
-        let encoded = "eyJzdWIiOiIxMjM0NTY3ODkwIn0"; // {"sub":"1234567890"}
-        let decoded = base64_decode(encoded).unwrap();
-        let claims: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
-        assert_eq!(claims["sub"], "1234567890");
-    }
-}
-
 /// Takes team_id, key_id, service_id (client_id), and private_key (p8 format).
 pub fn generate_apple_client_secret(
     team_id: &str,
-    key_id: &str,
+    _key_id: &str,
     service_id: &str,
     private_key: &str,
 ) -> Result<String> {
@@ -532,4 +502,42 @@ pub async fn verify_oidc_token(access_token: &str, issuer_url: &str) -> Result<O
         redirect_uri,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_oauth_user_info_serialization() {
+        let user_info = OAuthUserInfo {
+            provider_id: "sub_123".to_string(),
+            provider: OAuthProvider::Google,
+            email: Some("user@example.com".to_string()),
+            display_name: Some("John Doe".to_string()),
+            picture: Some("https://example.com/pic.jpg".to_string()),
+        };
+
+        let json = serde_json::to_string(&user_info).unwrap();
+        let decoded: OAuthUserInfo = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.provider_id, "sub_123");
+        assert_eq!(decoded.provider, OAuthProvider::Google);
+        assert_eq!(decoded.email, Some("user@example.com".to_string()));
+    }
+
+    #[test]
+    fn test_oauth_provider_display() {
+        assert_eq!(OAuthProvider::Google.to_string(), "google");
+        assert_eq!(OAuthProvider::Apple.to_string(), "apple");
+        assert_eq!(OAuthProvider::Oidc.to_string(), "oidc");
+    }
+
+    #[test]
+    fn test_base64_decode() {
+        let encoded = "eyJzdWIiOiIxMjM0NTY3ODkwIn0"; // {"sub":"1234567890"}
+        let decoded = _base64_decode(encoded).unwrap();
+        let claims: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(claims["sub"], "1234567890");
+    }
 }

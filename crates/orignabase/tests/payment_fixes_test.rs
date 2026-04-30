@@ -1,5 +1,5 @@
 //! Payment and checkout fixes live integration tests
-//! 
+//!
 //! Tests critical payment/checkout fixes against dev SurrealDB:
 //! - Platform fee calculation (5% of subtotal)
 //! - Order total includes tax + shipping
@@ -11,11 +11,11 @@
 //! - Payout requires delivered status
 //! - Seller Connect validation
 //! - Subtotal tolerance
-//! 
+//!
 //! Run: cargo test --test payment_fixes_test -- --ignored
 
 use reqwest::{Client, StatusCode};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 mod payment_fixes {
@@ -35,7 +35,7 @@ mod payment_fixes {
 
     async fn register_and_login(email: &str, password: &str) -> String {
         let client = client();
-        
+
         client
             .post(format!("{}/auth/register", base_url()))
             .json(&json!({"email": email, "password": password}))
@@ -87,12 +87,12 @@ mod payment_fixes {
 
         if response.status() == StatusCode::OK || response.status() == StatusCode::CREATED {
             let body: Value = response.json().await.unwrap_or(json!({}));
-            
+
             if let (Some(subtotal), Some(fee)) = (
                 body["subtotalCents"].as_i64(),
                 body["platformFeeTotalCents"].as_i64(),
             ) {
-                let expected_fee = subtotal / 20;  // 5% = 1/20
+                let expected_fee = subtotal / 20; // 5% = 1/20
                 assert_eq!(
                     fee, expected_fee,
                     "platform fee {} should be 5% of subtotal {}",
@@ -131,7 +131,7 @@ mod payment_fixes {
         if response.status() == StatusCode::OK || response.status() == StatusCode::CREATED {
             let body: Value = response.json().await.unwrap_or(json!({}));
 
-            if let (Some(subtotal), Some(tax), Some(shipping), Some(total), Some(fee)) = (
+            if let (Some(subtotal), Some(tax), Some(shipping), Some(total), Some(_fee)) = (
                 body["subtotalCents"].as_i64(),
                 body["taxAmountCents"].as_i64(),
                 body["shippingCostCents"].as_i64(),
@@ -170,11 +170,16 @@ mod payment_fixes {
             .await
             .expect("request failed");
 
-        if below_threshold.status() == StatusCode::OK || below_threshold.status() == StatusCode::CREATED {
+        if below_threshold.status() == StatusCode::OK
+            || below_threshold.status() == StatusCode::CREATED
+        {
             let body_below: Value = below_threshold.json().await.unwrap_or(json!({}));
             let shipping_below = body_below["shippingCostCents"].as_i64().unwrap_or(0);
 
-            assert!(shipping_below > 0, "shipping should be charged below $75 threshold");
+            assert!(
+                shipping_below > 0,
+                "shipping should be charged below $75 threshold"
+            );
         }
 
         // Order with subtotal at/above threshold (10000 cents = $100)
@@ -189,7 +194,9 @@ mod payment_fixes {
             .await
             .expect("request failed");
 
-        if above_threshold.status() == StatusCode::OK || above_threshold.status() == StatusCode::CREATED {
+        if above_threshold.status() == StatusCode::OK
+            || above_threshold.status() == StatusCode::CREATED
+        {
             let body_above: Value = above_threshold.json().await.unwrap_or(json!({}));
             let shipping_above = body_above["shippingCostCents"].as_i64().unwrap_or(0);
 
@@ -318,7 +325,7 @@ mod payment_fixes {
         let client = client();
 
         // Create checkout with coupon
-        let response = client
+        let _response = client
             .post(format!("{}/payments/checkout", base_url()))
             .header("Authorization", format!("Bearer {}", token))
             .json(&json!({
@@ -340,7 +347,7 @@ mod payment_fixes {
 
         if coupon_check.status() == StatusCode::OK {
             let body: Value = coupon_check.json().await.unwrap_or(json!({}));
-            
+
             // isUsed should be false until webhook confirms payment
             if let Some(is_used) = body["isUsed"].as_bool() {
                 assert!(
@@ -370,7 +377,7 @@ mod payment_fixes {
 
         if response.status() == StatusCode::OK {
             let body: Value = response.json().await.unwrap_or(json!({}));
-            
+
             // Payout status should be nil/pending (not released)
             if let Some(status) = body["status"].as_str() {
                 assert_ne!(
@@ -494,7 +501,7 @@ mod payment_fixes {
                 let difference = (subtotal - expected_subtotal).abs();
 
                 assert!(
-                    difference <= 200,  // $2 = 200 cents
+                    difference <= 200, // $2 = 200 cents
                     "subtotal difference {} should be within $2 tolerance",
                     difference
                 );

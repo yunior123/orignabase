@@ -431,7 +431,8 @@ mod tests {
     use ob_database::DatabaseClient;
     use std::sync::Arc;
 
-    async fn setup_state() -> HandlersState { HandlersState {
+    async fn setup_state() -> HandlersState {
+        HandlersState {
             config: Arc::new(Config::load(None).unwrap()),
             db: DatabaseClient::new_mem().await,
             http_client: reqwest::Client::new(),
@@ -530,7 +531,7 @@ mod tests {
             .db
             .query_bind_value(
                 "SELECT * FROM $collection WHERE parent_id = $parent_id",
-                json!({"collection": collection, "parent_id": warehouse_parent("seller_1")})
+                json!({"collection": collection, "parent_id": warehouse_parent("seller_1")}),
             )
             .await
             .unwrap();

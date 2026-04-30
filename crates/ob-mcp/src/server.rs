@@ -1,14 +1,13 @@
 //! MCP server core — orchestrates tool routing and execution
 
+use crate::McpState;
 use crate::auth::McpContext;
-use crate::errors::{McpError, McpResult, JsonRpcError};
+use crate::errors::{JsonRpcError, McpError, McpResult};
 use crate::safeguards::{IdempotencyTracker, SpendLimit};
 use crate::tools;
-use crate::McpState;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::collections::HashMap;
-use tracing::{info, warn, error};
+use serde_json::{Value, json};
+use tracing::{error, info};
 
 /// MCP Server — routes JSON-RPC 2.0 requests to tool handlers
 pub struct OrignaGtaMcp {
@@ -18,11 +17,7 @@ pub struct OrignaGtaMcp {
 }
 
 impl OrignaGtaMcp {
-    pub fn new(
-        state: McpState,
-        idempotency: IdempotencyTracker,
-        spend_limit: SpendLimit,
-    ) -> Self {
+    pub fn new(state: McpState, idempotency: IdempotencyTracker, spend_limit: SpendLimit) -> Self {
         Self {
             state,
             idempotency,
@@ -40,51 +35,25 @@ impl OrignaGtaMcp {
 
         let result = match request.method.as_str() {
             // Catalog tools (no auth required)
-            "search_products" => {
-                self.search_products(&request.params, &ctx).await
-            }
-            "get_product" => {
-                self.get_product(&request.params, &ctx).await
-            }
-            "check_inventory" => {
-                self.check_inventory(&request.params, &ctx).await
-            }
+            "search_products" => self.search_products(&request.params, &ctx).await,
+            "get_product" => self.get_product(&request.params, &ctx).await,
+            "check_inventory" => self.check_inventory(&request.params, &ctx).await,
 
             // Shopping tools (auth required)
-            "get_cart" => {
-                self.get_cart(&request.params, &ctx).await
-            }
-            "add_to_cart" => {
-                self.add_to_cart(&request.params, &ctx).await
-            }
-            "remove_from_cart" => {
-                self.remove_from_cart(&request.params, &ctx).await
-            }
-            "apply_coupon" => {
-                self.apply_coupon(&request.params, &ctx).await
-            }
+            "get_cart" => self.get_cart(&request.params, &ctx).await,
+            "add_to_cart" => self.add_to_cart(&request.params, &ctx).await,
+            "remove_from_cart" => self.remove_from_cart(&request.params, &ctx).await,
+            "apply_coupon" => self.apply_coupon(&request.params, &ctx).await,
 
             // Order tools (auth required)
-            "list_orders" => {
-                self.list_orders(&request.params, &ctx).await
-            }
-            "get_order" => {
-                self.get_order(&request.params, &ctx).await
-            }
-            "request_return" => {
-                self.request_return(&request.params, &ctx).await
-            }
-            "create_checkout" => {
-                self.create_checkout(&request.params, &ctx).await
-            }
+            "list_orders" => self.list_orders(&request.params, &ctx).await,
+            "get_order" => self.get_order(&request.params, &ctx).await,
+            "request_return" => self.request_return(&request.params, &ctx).await,
+            "create_checkout" => self.create_checkout(&request.params, &ctx).await,
 
             // Admin tools (admin role required)
-            "get_analytics" => {
-                self.get_analytics(&request.params, &ctx).await
-            }
-            "create_review" => {
-                self.create_review(&request.params, &ctx).await
-            }
+            "get_analytics" => self.get_analytics(&request.params, &ctx).await,
+            "create_review" => self.create_review(&request.params, &ctx).await,
 
             // Info tools
             "tools/list" => Ok(self.list_tools()),

@@ -336,7 +336,7 @@ async fn test_unsubscribe_not_subscribed() {
     // Should handle gracefully (200 or 400 both acceptable)
     if status == 200 {
         // Idempotent unsubscribe
-        let unsubscribed = unsub_resp["unsubscribed"].as_bool().unwrap_or(false);
+        let _unsubscribed = unsub_resp["unsubscribed"].as_bool().unwrap_or(false);
         // May return false since user wasn't subscribed
     }
 }

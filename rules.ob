@@ -69,6 +69,34 @@ rules cart {
     list: isAuthenticated();
 }
 
+rules users__cart {
+    read: isAuthenticated() && (
+        isOwner(resource.userId) ||
+        isOwner(resource.ownerId) ||
+        isOwner(resource.uid) ||
+        isOwner(resource.parent_id)
+    );
+    create: isAuthenticated() && (
+        isOwner(incoming.userId) ||
+        isOwner(incoming.ownerId) ||
+        isOwner(incoming.uid) ||
+        isOwner(incoming.parent_id)
+    );
+    update: isAuthenticated() && (
+        isOwner(resource.userId) ||
+        isOwner(resource.ownerId) ||
+        isOwner(resource.uid) ||
+        isOwner(resource.parent_id)
+    );
+    delete: isAuthenticated() && (
+        isOwner(resource.userId) ||
+        isOwner(resource.ownerId) ||
+        isOwner(resource.uid) ||
+        isOwner(resource.parent_id)
+    );
+    list: isAuthenticated();
+}
+
 rules warehouses {
     read: isAuthenticated() && (
         hasRole("admin") ||

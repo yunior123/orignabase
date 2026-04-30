@@ -112,7 +112,7 @@ async fn test_401_search_products_with_query() {
     let client = reqwest::Client::new();
     let (token, _user_id, _) = register_test_user(&client).await;
 
-    let (status, body) = make_request(
+    let (status, _body) = make_request(
         &client,
         "POST",
         "/api/search/products",

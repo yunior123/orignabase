@@ -326,7 +326,7 @@ async fn test_508_notifications_mark_read() {
     let (token, _user_id, _) = register_test_user(&client).await;
 
     // First get notifications to see if any exist
-    let (status_get, body_get) = make_request(
+    let (status_get, _body_get) = make_request(
         &client,
         "POST",
         "/api/notifications/get",

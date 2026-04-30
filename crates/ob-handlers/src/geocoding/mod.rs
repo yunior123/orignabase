@@ -93,13 +93,10 @@ async fn autocomplete(
         )));
     }
 
-    let data: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to parse Geoapify response: {e}");
-            Error::Internal(format!("Failed to parse Geoapify response: {e}"))
-        })?;
+    let data: serde_json::Value = resp.json().await.map_err(|e| {
+        tracing::error!("Failed to parse Geoapify response: {e}");
+        Error::Internal(format!("Failed to parse Geoapify response: {e}"))
+    })?;
 
     let features = data
         .get("features")

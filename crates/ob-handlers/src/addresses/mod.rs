@@ -270,10 +270,10 @@ fn validate_address_payload(addr: &AddressPayload) -> Result<()> {
     }
     validate_postal_code(&addr.postal_code)?;
 
-    if let Some(apt) = &addr.apartment {
-        if apt.len() > 50 {
-            return Err(Error::Validation("apartment too long".into()));
-        }
+    if let Some(apt) = &addr.apartment
+        && apt.len() > 50
+    {
+        return Err(Error::Validation("apartment too long".into()));
     }
 
     Ok(())
@@ -312,6 +312,7 @@ mod tests {
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_get_suggestions_success() {
         use ob_core::Config;
         use ob_database::DatabaseClient;
@@ -435,6 +436,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_get_suggestions_api_error() {
         use ob_core::Config;
         use ob_database::DatabaseClient;
@@ -485,6 +487,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_get_suggestions_timeout() {
         use ob_core::Config;
         use ob_database::DatabaseClient;
@@ -722,9 +725,6 @@ mod tests {
     // Lines 183-204: update_buyer_address
     #[tokio::test]
     async fn test_update_buyer_address_success() {
-        use ob_core::Config;
-        use ob_database::DatabaseClient;
-
         let state = setup_state().await;
         // First create an address
         let address_id = "addr_test123";

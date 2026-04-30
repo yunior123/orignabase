@@ -285,7 +285,7 @@ async fn test_token_expiry_accuracy() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let _ = token.is_expired();
-    assert!(true, "Token expiry check should complete without panic");
+    // Token expiry check completed without panic
 }
 
 // ============================================================================
@@ -989,10 +989,8 @@ fn test_ip_addr_parsing() {
 
 #[test]
 fn test_future_integration() {
-    use std::future::Future;
-
-    fn make_async_work() -> impl Future<Output = i32> {
-        async { 42 }
+    async fn make_async_work() -> i32 {
+        42
     }
 
     let rt = tokio::runtime::Runtime::new().unwrap();

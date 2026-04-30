@@ -293,7 +293,7 @@ async fn test_order_cancel_requires_pending_status() {
     let (token, _user_id, _email) = register_test_user(&client).await;
 
     // Try to cancel non-existent order
-    let (status, body) = make_request(
+    let (status, _body) = make_request(
         &client,
         "POST",
         "/api/orders/cancel-order",

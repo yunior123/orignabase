@@ -1,12 +1,12 @@
 //! Catalog tools — search, get product, check inventory
 
-use crate::errors::{McpError, McpResult};
 use crate::McpState;
-use serde_json::{json, Value};
+use crate::errors::{McpError, McpResult};
+use serde_json::{Value, json};
 
 /// Search products by query, category, price range
 pub async fn search_products(state: McpState, params: &Value) -> McpResult<Value> {
-    let query = params
+    let _query = params
         .get("query")
         .and_then(|v| v.as_str())
         .ok_or_else(|| McpError::InvalidParams("Missing 'query' parameter".to_string()))?;
@@ -25,7 +25,7 @@ pub async fn search_products(state: McpState, params: &Value) -> McpResult<Value
     }
 
     // If Meilisearch is available, use it; otherwise fall back to SurrealDB
-    if let Some(search) = &state.search {
+    if let Some(_search) = &state.search {
         // Build Meilisearch filter query
         let mut filters = Vec::new();
         if let Some(cat) = category {
@@ -40,7 +40,7 @@ pub async fn search_products(state: McpState, params: &Value) -> McpResult<Value
         filters.push("lifecycleStatus = 'active'".to_string());
 
         // Call Meilisearch
-        let filter_str = if filters.is_empty() {
+        let _filter_str = if filters.is_empty() {
             None
         } else {
             Some(filters.join(" AND "))
@@ -67,7 +67,7 @@ pub async fn search_products(state: McpState, params: &Value) -> McpResult<Value
 }
 
 /// Get product by ID
-pub async fn get_product(state: McpState, params: &Value) -> McpResult<Value> {
+pub async fn get_product(_state: McpState, params: &Value) -> McpResult<Value> {
     let product_id = params
         .get("product_id")
         .and_then(|v| v.as_str())
@@ -94,7 +94,7 @@ pub async fn get_product(state: McpState, params: &Value) -> McpResult<Value> {
 }
 
 /// Check inventory for a product
-pub async fn check_inventory(state: McpState, params: &Value) -> McpResult<Value> {
+pub async fn check_inventory(_state: McpState, params: &Value) -> McpResult<Value> {
     let product_id = params
         .get("product_id")
         .and_then(|v| v.as_str())

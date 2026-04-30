@@ -654,14 +654,14 @@ mod tests {
     #[test]
     fn test_max_upload_size_enforced() {
         // Verify that MAX_UPLOAD_SIZE constant is set
-        assert!(MAX_UPLOAD_SIZE > 0);
+        const _: () = assert!(MAX_UPLOAD_SIZE > 0);
         assert_eq!(MAX_UPLOAD_SIZE, 500 * 1024 * 1024); // 500MB
     }
 
     #[test]
     fn test_max_resumable_size_enforced() {
         // Verify that MAX_RESUMABLE_SIZE constant is set
-        assert!(MAX_RESUMABLE_SIZE > 0);
+        const _: () = assert!(MAX_RESUMABLE_SIZE > 0);
         assert_eq!(MAX_RESUMABLE_SIZE, 5 * 1024 * 1024 * 1024); // 5GB
     }
 }

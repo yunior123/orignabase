@@ -737,7 +737,7 @@ mod tests {
             .db
             .query_bind_value(
                 "SELECT * FROM admin_logs WHERE action = $action",
-                json!({"action": "update_payment_provider"})
+                json!({"action": "update_payment_provider"}),
             )
             .await
             .unwrap();

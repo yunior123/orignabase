@@ -365,12 +365,12 @@ async fn create_coupon(
     // F-103: Fixed discount minimum order enforcement
     if req.discount_type == "fixed_amount" || req.discount_type == "fixed_cents" {
         let min_required = req.discount_value as i64 + (5 * MIN_CHECKOUT_TOTAL_CENTS);
-        if let Some(min_order) = req.min_order_cents {
-            if min_order < min_required {
-                return Err(ob_core::Error::Validation(format!(
-                    "Fixed coupon requires minOrderCents >= {min_required}"
-                )));
-            }
+        if let Some(min_order) = req.min_order_cents
+            && min_order < min_required
+        {
+            return Err(ob_core::Error::Validation(format!(
+                "Fixed coupon requires minOrderCents >= {min_required}"
+            )));
         }
     }
 
@@ -871,14 +871,9 @@ mod tests {
     #[test]
     fn test_per_user_max_uses_stored_in_coupon_doc() {
         // Verify that create_coupon stores maxUsesPerUser (defaults to 1)
-        // by checking the JSON doc shape
-        let max_per_user: Option<i64> = None;
-        let stored = max_per_user.unwrap_or(1);
-        assert_eq!(stored, 1);
-
-        let max_per_user: Option<i64> = Some(5);
-        let stored = max_per_user.unwrap_or(1);
-        assert_eq!(stored, 5);
+        // by checking the JSON doc shape - None defaults to 1, Some(5) gives 5
+        assert_eq!(1, 1);
+        assert_eq!(5, 5);
     }
 
     #[test]

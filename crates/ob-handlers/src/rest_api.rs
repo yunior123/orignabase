@@ -1,18 +1,17 @@
 //! REST API endpoints for MCP server integration
 //! Provides GET-based endpoints that wrap existing business logic handlers
 
-use axum::{
-    extract::{Path, Query, State, Extension},
-    http::StatusCode,
-    response::IntoResponse,
-    routing::{get, post, delete},
-    Json, Router,
-};
-use serde::{Deserialize, Serialize};
-use serde_json::json;
-use ob_auth::middleware::AuthContext;
 use crate::HandlersState;
 use crate::shared::schema::collections;
+use axum::{
+    Json, Router,
+    extract::{Extension, Path, Query, State},
+    http::StatusCode,
+    routing::{delete, get, post},
+};
+use ob_auth::middleware::AuthContext;
+use serde::Deserialize;
+use serde_json::json;
 
 pub fn router(state: HandlersState) -> Router {
     Router::new()
@@ -41,10 +40,12 @@ pub fn router(state: HandlersState) -> Router {
 
 #[derive(Deserialize)]
 pub struct SearchProductsQuery {
+    #[allow(dead_code)]
     q: Option<String>,
     category: Option<String>,
     min_price: Option<i64>,
     max_price: Option<i64>,
+    #[allow(dead_code)]
     sort: Option<String>,
     #[serde(default = "default_limit")]
     limit: i64,
@@ -52,7 +53,9 @@ pub struct SearchProductsQuery {
     offset: i64,
 }
 
-fn default_limit() -> i64 { 20 }
+fn default_limit() -> i64 {
+    20
+}
 
 async fn get_products(
     State(state): State<HandlersState>,
@@ -102,6 +105,7 @@ async fn get_product(
 pub struct AddToCartRequest {
     #[serde(rename = "productId")]
     product_id: String,
+    #[allow(dead_code)]
     quantity: i64,
 }
 
@@ -118,10 +122,7 @@ async fn get_cart(
         .await
         .map_err(|_| ob_core::Error::NotFound("User not found".into()))?;
 
-    let cart = user
-        .get("cart")
-        .cloned()
-        .unwrap_or_else(|| json!([]));
+    let cart = user.get("cart").cloned().unwrap_or_else(|| json!([]));
 
     Ok(Json(cart))
 }
@@ -131,7 +132,7 @@ async fn add_to_cart(
     Extension(auth): Extension<AuthContext>,
     Json(req): Json<AddToCartRequest>,
 ) -> Result<Json<serde_json::Value>, ob_core::Error> {
-    let user_id = require_authenticated(&auth)?;
+    let _user_id = require_authenticated(&auth)?;
 
     // Get product to verify it exists and get price
     let _product = state
@@ -146,7 +147,7 @@ async fn add_to_cart(
 }
 
 async fn remove_from_cart(
-    State(state): State<HandlersState>,
+    State(_state): State<HandlersState>,
     Extension(auth): Extension<AuthContext>,
     Path(_product_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ob_core::Error> {
@@ -157,11 +158,12 @@ async fn remove_from_cart(
 
 #[derive(Deserialize)]
 pub struct ApplyCouponRequest {
+    #[allow(dead_code)]
     code: String,
 }
 
 async fn apply_coupon(
-    State(state): State<HandlersState>,
+    State(_state): State<HandlersState>,
     Extension(auth): Extension<AuthContext>,
     Json(_req): Json<ApplyCouponRequest>,
 ) -> Result<Json<serde_json::Value>, ob_core::Error> {
@@ -197,10 +199,16 @@ async fn list_orders(
     );
 
     if let Some(status) = &qs.status {
-        query.push_str(&format!(" AND status = '{}'", escape_surreal_string(status)));
+        query.push_str(&format!(
+            " AND status = '{}'",
+            escape_surreal_string(status)
+        ));
     }
 
-    query.push_str(&format!(" ORDER BY createdAt DESC LIMIT {} OFFSET {}", qs.limit, qs.offset));
+    query.push_str(&format!(
+        " ORDER BY createdAt DESC LIMIT {} OFFSET {}",
+        qs.limit, qs.offset
+    ));
 
     let results = state.db.query_raw(&query).await?;
 
@@ -221,13 +229,12 @@ async fn get_order(
         .map_err(|_| ob_core::Error::NotFound("Order not found".into()))?;
 
     // Verify user owns this order
-    let buyer_id = order
-        .get("buyerId")
-        .and_then(|b| b.as_str())
-        .unwrap_or("");
+    let buyer_id = order.get("buyerId").and_then(|b| b.as_str()).unwrap_or("");
 
     if buyer_id != user_id {
-        return Err(ob_core::Error::Forbidden("You do not own this order".into()));
+        return Err(ob_core::Error::Forbidden(
+            "You do not own this order".into(),
+        ));
     }
 
     Ok(Json(order))
@@ -235,7 +242,9 @@ async fn get_order(
 
 #[derive(Deserialize)]
 pub struct CreateReturnRequest {
+    #[allow(dead_code)]
     items: Vec<serde_json::Value>,
+    #[allow(dead_code)]
     reason: String,
 }
 
@@ -266,11 +275,12 @@ async fn create_return_request(
 pub struct CreateReviewRequest {
     rating: i32,
     #[serde(default)]
+    #[allow(dead_code)]
     review: String,
 }
 
 async fn create_review(
-    State(state): State<HandlersState>,
+    State(_state): State<HandlersState>,
     Extension(auth): Extension<AuthContext>,
     Path(_product_id): Path<String>,
     Json(req): Json<CreateReviewRequest>,
@@ -293,11 +303,12 @@ async fn create_review(
 
 #[derive(Deserialize)]
 pub struct AnalyticsQuery {
+    #[allow(dead_code)]
     period: Option<String>, // "day", "week", "month"
 }
 
 async fn get_analytics(
-    State(state): State<HandlersState>,
+    State(_state): State<HandlersState>,
     Extension(auth): Extension<AuthContext>,
     Query(_qs): Query<AnalyticsQuery>,
 ) -> Result<Json<serde_json::Value>, ob_core::Error> {
@@ -316,7 +327,11 @@ async fn get_analytics(
 // ───────────────────────────────────────────────────────────────────────────
 
 fn require_authenticated(auth: &AuthContext) -> Result<String, ob_core::Error> {
-    if auth.authenticated { Ok(auth.user_id.clone()) } else { Err(ob_core::Error::Auth("Authentication required".into())) }
+    if auth.authenticated {
+        Ok(auth.user_id.clone())
+    } else {
+        Err(ob_core::Error::Auth("Authentication required".into()))
+    }
 }
 
 fn escape_surreal_string(s: &str) -> String {

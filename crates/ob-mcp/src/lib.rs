@@ -10,20 +10,20 @@
 //! - Authentication via JWT middleware
 //! - Safeguards: idempotency keys, confirmation tokens, spend limits
 
+pub mod auth;
+pub mod errors;
+pub mod safeguards;
 pub mod server;
 pub mod tools;
-pub mod auth;
-pub mod safeguards;
 pub mod transport;
-pub mod errors;
 
 pub use server::OrignaGtaMcp;
 pub use transport::McpRouter;
 
-use std::sync::Arc;
+use ob_core::Config;
 use ob_database::DatabaseClient;
 use ob_search::SearchClient;
-use ob_core::Config;
+use std::sync::Arc;
 
 /// MCP server state — shared across all tool invocations
 #[derive(Clone)]

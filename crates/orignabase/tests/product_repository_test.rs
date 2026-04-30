@@ -121,7 +121,7 @@ async fn test_product_create_missing_title() {
     let mut payload = test_product_payload();
     payload.as_object_mut().unwrap().remove("title");
 
-    let (status, body) = make_request(
+    let (status, _body) = make_request(
         &client,
         "POST",
         "/api/products/create",
@@ -143,7 +143,7 @@ async fn test_product_create_invalid_price() {
     let mut payload = test_product_payload();
     payload["priceCents"] = json!(-100);
 
-    let (status, body) = make_request(
+    let (status, _body) = make_request(
         &client,
         "POST",
         "/api/products/create",
@@ -165,7 +165,7 @@ async fn test_product_create_invalid_stock() {
     let mut payload = test_product_payload();
     payload["stockQuantity"] = json!(-50);
 
-    let (status, body) = make_request(
+    let (status, _body) = make_request(
         &client,
         "POST",
         "/api/products/create",
@@ -183,7 +183,7 @@ async fn test_product_create_invalid_stock() {
 async fn test_product_create_requires_authentication() {
     let client = reqwest::Client::new();
 
-    let (status, body) = make_request(
+    let (status, _body) = make_request(
         &client,
         "POST",
         "/api/products/create",
@@ -267,7 +267,7 @@ async fn test_product_list_filters() {
 async fn test_product_get_by_id() {
     let client = reqwest::Client::new();
 
-    let (status, body) = make_request(
+    let (status, _body) = make_request(
         &client,
         "POST",
         "/api/products/get",
@@ -287,7 +287,7 @@ async fn test_product_get_by_id() {
 async fn test_product_update_requires_authentication() {
     let client = reqwest::Client::new();
 
-    let (status, body) = make_request(
+    let (status, _body) = make_request(
         &client,
         "POST",
         "/api/products/update",
@@ -308,7 +308,7 @@ async fn test_product_update_nonexistent() {
     let client = reqwest::Client::new();
     let (token, _user_id, _email) = register_test_user(&client).await;
 
-    let (status, body) = make_request(
+    let (status, _body) = make_request(
         &client,
         "POST",
         "/api/products/update",
@@ -329,7 +329,7 @@ async fn test_product_update_nonexistent() {
 async fn test_product_delete_requires_authentication() {
     let client = reqwest::Client::new();
 
-    let (status, body) = make_request(
+    let (status, _body) = make_request(
         &client,
         "POST",
         "/api/products/delete",
@@ -349,7 +349,7 @@ async fn test_product_delete_nonexistent() {
     let client = reqwest::Client::new();
     let (token, _user_id, _email) = register_test_user(&client).await;
 
-    let (status, body) = make_request(
+    let (status, _body) = make_request(
         &client,
         "POST",
         "/api/products/delete",
@@ -397,7 +397,7 @@ async fn test_product_search() {
 async fn test_product_search_with_filters() {
     let client = reqwest::Client::new();
 
-    let (status, body) = make_request(
+    let (status, _body) = make_request(
         &client,
         "POST",
         "/api/search/products",
@@ -428,7 +428,7 @@ async fn test_product_digital_no_shipping() {
     let mut payload = test_product_payload();
     payload["isDigital"] = json!(true);
 
-    let (status, body) = make_request(
+    let (status, _body) = make_request(
         &client,
         "POST",
         "/api/products/create",
@@ -450,7 +450,7 @@ async fn test_product_perishable_local_delivery() {
     let mut payload = test_product_payload();
     payload["isPerishable"] = json!(true);
 
-    let (status, body) = make_request(
+    let (status, _body) = make_request(
         &client,
         "POST",
         "/api/products/create",

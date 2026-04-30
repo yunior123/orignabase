@@ -190,11 +190,13 @@ Always be clear and concise. Format responses in a friendly, conversational tone
     // Call Anthropic API with timeout
     let response = tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        state.http_client.post("https://api.anthropic.com/v1/messages")
+        state
+            .http_client
+            .post("https://api.anthropic.com/v1/messages")
             .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01")
             .json(&anthropic_request)
-            .send()
+            .send(),
     )
     .await
     .map_err(|_| {
@@ -245,7 +247,6 @@ Always be clear and concise. Format responses in a friendly, conversational tone
 
     Ok(Json(SupportChatResponse { reply, escalated }))
 }
-
 
 // ─── Router ─────────────────────────────────────────────────────────────────
 
@@ -489,8 +490,7 @@ async fn send_message(
     let text_raw = req.message_text.as_deref().unwrap_or("");
     let image_urls = req.image_urls.as_ref();
 
-    if req.chat_id.is_empty() || (text_raw.is_empty() && image_urls.map_or(true, |v| v.is_empty()))
-    {
+    if req.chat_id.is_empty() || (text_raw.is_empty() && image_urls.is_none_or(|v| v.is_empty())) {
         return Err(ob_core::Error::Validation(
             "chatId and text/images required.".into(),
         ));
@@ -560,10 +560,9 @@ async fn send_message(
     if !text.is_empty()
         && last_text == Some(&text)
         && let Some(update_ts) = last_update
+        && (chrono::Utc::now() - update_ts).num_seconds() < 5
     {
-        if (chrono::Utc::now() - update_ts).num_seconds() < 5 {
-            return Err(ob_core::Error::Validation("Message already sent.".into()));
-        }
+        return Err(ob_core::Error::Validation("Message already sent.".into()));
     }
 
     // Thread capacity check
@@ -650,16 +649,16 @@ async fn send_message(
     // Metrics
     if uid == buyer_id && chat.get("firstBuyerMessageAt").is_none() {
         thread_update["firstBuyerMessageAt"] = json!(now);
-    } else if uid == seller_id && chat.get("firstSellerReplyAt").is_none() {
-        if let Some(first_buyer_at) = chat
+    } else if uid == seller_id
+        && chat.get("firstSellerReplyAt").is_none()
+        && let Some(first_buyer_at) = chat
             .get("firstBuyerMessageAt")
             .and_then(|v| v.as_str())
             .and_then(parse_rfc3339)
-        {
-            let hours = (chrono::Utc::now() - first_buyer_at).num_minutes() as f64 / 60.0;
-            thread_update["firstSellerReplyAt"] = json!(now);
-            thread_update["firstReplyHours"] = json!(hours);
-        }
+    {
+        let hours = (chrono::Utc::now() - first_buyer_at).num_minutes() as f64 / 60.0;
+        thread_update["firstSellerReplyAt"] = json!(now);
+        thread_update["firstReplyHours"] = json!(hours);
     }
 
     state

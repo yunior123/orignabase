@@ -628,6 +628,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_send_email_success() {
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -656,6 +657,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_send_email_api_error_unauthorized() {
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};

@@ -1,5 +1,5 @@
 //! Security fixes live integration tests
-//! 
+//!
 //! Tests critical security fixes against dev SurrealDB:
 //! - Auth bypass prevention
 //! - CORS validation
@@ -8,11 +8,11 @@
 //! - JWT expiry
 //! - Input validation
 //! - SurrealQL injection prevention
-//! 
+//!
 //! Run: cargo test --test security_fixes_test -- --ignored
 
 use reqwest::{Client, StatusCode};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 mod security_fixes {
@@ -32,7 +32,7 @@ mod security_fixes {
 
     async fn register_and_login(email: &str, password: &str) -> String {
         let client = client();
-        
+
         client
             .post(format!("{}/auth/register", base_url()))
             .json(&json!({"email": email, "password": password}))
@@ -153,9 +153,7 @@ mod security_fixes {
             .expect("create product failed");
 
         if product_resp.status() != StatusCode::OK {
-            println!(
-                "Product creation not fully implemented; skipping test assertion"
-            );
+            println!("Product creation not fully implemented; skipping test assertion");
             return;
         }
 

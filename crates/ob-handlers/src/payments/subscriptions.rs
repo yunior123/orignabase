@@ -215,12 +215,12 @@ async fn get_user_subscription(
 
     // Validate user ID format before querying
     ob_core::validate_surreal_record_id(user_id)?;
-    
+
     let rows = state
         .db
         .query_bind_value(
             "SELECT * FROM subscriptions WHERE buyerId = $buyer_id ORDER BY createdAt DESC LIMIT 1",
-            serde_json::json!({"buyer_id": user_id})
+            serde_json::json!({"buyer_id": user_id}),
         )
         .await?;
 
@@ -274,16 +274,17 @@ async fn create_subscription(
         fields::SUBSCRIPTION_STATUS
     );
     let existing_records = state.db.query_raw(&existing_sql).await?;
-    
+
     if !existing_records.is_empty() {
         let existing = &existing_records[0];
         let existing_sub_id = existing
             .get("id")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
-        return Err(ob_core::Error::Validation(
-            format!("User already has an active subscription: {}", existing_sub_id)
-        ));
+        return Err(ob_core::Error::Validation(format!(
+            "User already has an active subscription: {}",
+            existing_sub_id
+        )));
     }
 
     let stripe_key = state.config.require_secret("stripe_secret_key")?;
@@ -868,7 +869,7 @@ async fn find_user_by_customer_id(
         .db
         .query_bind_value(
             "SELECT * FROM users WHERE customerId = $customer_id LIMIT 1",
-            serde_json::json!({"customer_id": customer_id})
+            serde_json::json!({"customer_id": customer_id}),
         )
         .await?;
     Ok(rows.into_iter().next())

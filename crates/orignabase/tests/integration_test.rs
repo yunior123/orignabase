@@ -314,7 +314,7 @@ async fn test_11_graphql_create_document() {
     let client = reqwest::Client::new();
     let (token, _) = register_test_user(&client).await;
 
-    let id = create_doc(
+    let _id = create_doc(
         &client,
         &token,
         "test_products",
@@ -322,10 +322,7 @@ async fn test_11_graphql_create_document() {
     )
     .await;
 
-    assert!(
-        !id.is_empty() || true,
-        "Create should return document or be handled by rules"
-    );
+    // Create should return document or be handled by rules
 }
 
 #[tokio::test]
@@ -346,7 +343,7 @@ async fn test_12_graphql_create_and_get() {
 
     if !id.is_empty() {
         // Get the document back
-        let clean_id = id.split(':').last().unwrap_or(&id);
+        let clean_id = id.split(':').next_back().unwrap_or(&id);
         let query = format!(r#"{{ get(collection: "{col}", id: "{clean_id}") }}"#);
         let body = graphql(&client, &token, &query).await;
         let result = &body["data"]["get"];
@@ -373,7 +370,7 @@ async fn test_13_graphql_update_document() {
     .await;
 
     if !id.is_empty() {
-        let clean_id = id.split(':').last().unwrap_or(&id);
+        let clean_id = id.split(':').next_back().unwrap_or(&id);
         let data = serde_json::to_string(&json!({"title": "Updated", "price": 20})).unwrap();
         let escaped = serde_json::to_string(&data).unwrap();
         let query = format!(
@@ -400,7 +397,7 @@ async fn test_14_graphql_delete_document() {
     let id = create_doc(&client, &token, &col, &json!({"title": "To Delete"})).await;
 
     if !id.is_empty() {
-        let clean_id = id.split(':').last().unwrap_or(&id);
+        let clean_id = id.split(':').next_back().unwrap_or(&id);
         let query = format!(r#"mutation {{ delete(collection: "{col}", id: "{clean_id}") }}"#);
         let body = graphql(&client, &token, &query).await;
         assert!(
@@ -653,7 +650,7 @@ async fn test_23_graphql_batch_delete() {
         )
         .await;
         if !id.is_empty() {
-            ids.push(id.split(':').last().unwrap_or(&id).to_string());
+            ids.push(id.split(':').next_back().unwrap_or(&id).to_string());
         }
     }
 
@@ -690,7 +687,7 @@ async fn test_24_graphql_batch_update() {
         )
         .await;
         if !id.is_empty() {
-            ids.push(id.split(':').last().unwrap_or(&id).to_string());
+            ids.push(id.split(':').next_back().unwrap_or(&id).to_string());
         }
     }
 
@@ -733,7 +730,7 @@ async fn test_25_graphql_field_value_server_timestamp() {
     .await;
 
     if !id.is_empty() {
-        let clean_id = id.split(':').last().unwrap_or(&id);
+        let clean_id = id.split(':').next_back().unwrap_or(&id);
         let data = json!({"updated_at": {"_serverTimestamp": true}});
         let data_str = serde_json::to_string(&data).unwrap();
         let escaped = serde_json::to_string(&data_str).unwrap();
@@ -766,7 +763,7 @@ async fn test_26_graphql_field_value_increment_and_array() {
     .await;
 
     if !id.is_empty() {
-        let clean_id = id.split(':').last().unwrap_or(&id);
+        let clean_id = id.split(':').next_back().unwrap_or(&id);
 
         // Increment + arrayUnion in single update
         let data = json!({
@@ -1102,10 +1099,10 @@ async fn test_39_concurrent_writes() {
 
     let mut success_count = 0;
     for handle in handles {
-        if let Ok(id) = handle.await {
-            if !id.is_empty() {
-                success_count += 1;
-            }
+        if let Ok(id) = handle.await
+            && !id.is_empty()
+        {
+            success_count += 1;
         }
     }
 
@@ -1153,10 +1150,10 @@ async fn test_40_concurrent_reads() {
 
     let mut success_count = 0;
     for handle in handles {
-        if let Ok(body) = handle.await {
-            if body["data"]["list"].is_array() {
-                success_count += 1;
-            }
+        if let Ok(body) = handle.await
+            && body["data"]["list"].is_array()
+        {
+            success_count += 1;
         }
     }
 
@@ -1229,9 +1226,11 @@ async fn test_42_special_characters_in_data() {
     )
     .await;
 
-    // Should handle special chars without crash
-    assert!(true, "Special characters should not crash the server");
-    let _ = id; // suppress warning
+    // Should handle special chars without crash (empty string means failure)
+    assert!(
+        !id.is_empty(),
+        "Special characters should not crash the server"
+    );
 }
 
 #[tokio::test]
@@ -1254,9 +1253,8 @@ async fn test_43_large_document() {
     )
     .await;
 
-    // Should handle without error
-    let _ = id;
-    assert!(true, "Large documents should be handled");
+    // Should handle without error (empty string means failure)
+    assert!(!id.is_empty(), "Large documents should be handled");
 }
 
 #[tokio::test]
@@ -1268,13 +1266,16 @@ async fn test_44_empty_data_operations() {
 
     // Create with empty data
     let id = create_doc(&client, &token, &col, &json!({})).await;
-    let _ = id;
+    assert!(!id.is_empty(), "Empty data create should not crash");
 
     // List with no results
     let query = format!(r#"{{ list(collection: "{col}", limit: 0) }}"#);
     let body = graphql(&client, &token, &query).await;
-    let _ = body;
-    assert!(true, "Empty data operations should not crash");
+    assert!(
+        body.get("errors").is_none(),
+        "Empty data list should not crash: {:?}",
+        body.get("errors")
+    );
 }
 
 #[tokio::test]
@@ -1326,7 +1327,7 @@ async fn test_46_ecommerce_product_lifecycle() {
     .await;
 
     if !id.is_empty() {
-        let clean_id = id.split(':').last().unwrap_or(&id);
+        let clean_id = id.split(':').next_back().unwrap_or(&id);
 
         // 2. Update price (like price change in origna_gta)
         let data = json!({"price": 129.99});
@@ -1394,7 +1395,7 @@ async fn test_47_ecommerce_order_flow() {
     .await;
 
     if !order_id.is_empty() {
-        let clean_id = order_id.split(':').last().unwrap_or(&order_id);
+        let clean_id = order_id.split(':').next_back().unwrap_or(&order_id);
 
         // Update status to confirmed (like origna_gta order state machine)
         let data = json!({
@@ -1489,7 +1490,7 @@ async fn test_49_ecommerce_seller_metrics_batch() {
         )
         .await;
         if !id.is_empty() {
-            ids.push(id.split(':').last().unwrap_or(&id).to_string());
+            ids.push(id.split(':').next_back().unwrap_or(&id).to_string());
         }
     }
 
@@ -2021,10 +2022,10 @@ async fn test_68_high_throughput_concurrent_writes() {
 
     let mut success = 0;
     for handle in handles {
-        if let Ok(id) = handle.await {
-            if !id.is_empty() {
-                success += 1;
-            }
+        if let Ok(id) = handle.await
+            && !id.is_empty()
+        {
+            success += 1;
         }
     }
 
@@ -2071,7 +2072,7 @@ async fn test_69_rapid_sequential_crud_cycle() {
             continue;
         }
 
-        let clean_id = id.split(':').last().unwrap_or(&id).to_string();
+        let clean_id = id.split(':').next_back().unwrap_or(&id).to_string();
 
         // Read
         let query = format!(r#"{{ get(collection: "{col}", id: "{clean_id}") }}"#);
@@ -2135,7 +2136,7 @@ async fn test_70_ecommerce_coupon_workflow() {
     .await;
 
     if !coupon_id.is_empty() {
-        let clean_id = coupon_id.split(':').last().unwrap_or(&coupon_id);
+        let clean_id = coupon_id.split(':').next_back().unwrap_or(&coupon_id);
 
         // Increment usage (FieldValue)
         let data = json!({"uses": {"_increment": 1}});
@@ -2216,7 +2217,7 @@ async fn test_72_ecommerce_return_request_flow() {
     .await;
 
     if !return_id.is_empty() {
-        let clean_id = return_id.split(':').last().unwrap_or(&return_id);
+        let clean_id = return_id.split(':').next_back().unwrap_or(&return_id);
         let data = json!({
             "status": "approved",
             "approved_at": {"_serverTimestamp": true}
@@ -2313,7 +2314,7 @@ async fn test_74_ecommerce_multi_collection_workflow() {
 
     // 3. Update product stock (FieldValue increment -1)
     if !product_id.is_empty() {
-        let clean_pid = product_id.split(':').last().unwrap_or(&product_id);
+        let clean_pid = product_id.split(':').next_back().unwrap_or(&product_id);
         let data = json!({"stock": {"_increment": -1}});
         let data_str = serde_json::to_string(&data).unwrap();
         let escaped = serde_json::to_string(&data_str).unwrap();
@@ -2325,7 +2326,7 @@ async fn test_74_ecommerce_multi_collection_workflow() {
 
     // 4. Confirm order
     if !order_id.is_empty() {
-        let clean_oid = order_id.split(':').last().unwrap_or(&order_id);
+        let clean_oid = order_id.split(':').next_back().unwrap_or(&order_id);
         let data = json!({
             "status": "confirmed",
             "confirmed_at": {"_serverTimestamp": true}
@@ -2666,10 +2667,10 @@ async fn test_80_throughput_500_concurrent_writes() {
 
     let mut success = 0usize;
     for handle in handles {
-        if let Ok(id) = handle.await {
-            if !id.is_empty() {
-                success += 1;
-            }
+        if let Ok(id) = handle.await
+            && !id.is_empty()
+        {
+            success += 1;
         }
     }
 
@@ -4289,7 +4290,7 @@ async fn test_109_orignagta_cart_transaction() {
     );
     let body = graphql(&client, &token, &query).await;
     assert!(
-        body["errors"].is_null() || body["errors"].as_array().map_or(true, |a| a.is_empty()),
+        body["errors"].is_null() || body["errors"].as_array().is_none_or(|a| a.is_empty()),
         "Stock decrement should succeed: {body}"
     );
 
@@ -4359,7 +4360,7 @@ async fn test_110_orignagta_order_state_machine() {
         );
         let body = graphql(&client, &token, &query).await;
         assert!(
-            body["errors"].is_null() || body["errors"].as_array().map_or(true, |a| a.is_empty()),
+            body["errors"].is_null() || body["errors"].as_array().is_none_or(|a| a.is_empty()),
             "Transition to {status} should succeed: {body}"
         );
     }
@@ -4398,7 +4399,7 @@ async fn test_111_orignagta_batch_notification_fanout() {
     let query = format!(r#"mutation {{ batchCreate(collection: "{col}", docs: [{escaped}]) }}"#);
     let body = graphql(&client, &token, &query).await;
     assert!(
-        body["errors"].is_null() || body["errors"].as_array().map_or(true, |a| a.is_empty()),
+        body["errors"].is_null() || body["errors"].as_array().is_none_or(|a| a.is_empty()),
         "Batch notification creation should succeed"
     );
 
@@ -4514,7 +4515,7 @@ async fn test_113_orignagta_ratings_aggregate() {
     );
     let body = graphql(&client, &token, &query).await;
     assert!(
-        body["errors"].is_null() || body["errors"].as_array().map_or(true, |a| a.is_empty()),
+        body["errors"].is_null() || body["errors"].as_array().is_none_or(|a| a.is_empty()),
         "Seller rating update should succeed"
     );
 }
@@ -4556,7 +4557,7 @@ async fn test_114_orignagta_subscription_flow() {
         format!(r#"mutation {{ update(collection: "{col}", id: "{clean_id}", data: {escaped}) }}"#);
     let body = graphql(&client, &token, &query).await;
     assert!(
-        body["errors"].is_null() || body["errors"].as_array().map_or(true, |a| a.is_empty()),
+        body["errors"].is_null() || body["errors"].as_array().is_none_or(|a| a.is_empty()),
         "Subscription cancel should succeed"
     );
 }
@@ -4638,7 +4639,7 @@ async fn test_116_orignagta_coupon_verification() {
     );
     let body = graphql(&client, &token, &query).await;
     assert!(
-        body["errors"].is_null() || body["errors"].as_array().map_or(true, |a| a.is_empty()),
+        body["errors"].is_null() || body["errors"].as_array().is_none_or(|a| a.is_empty()),
         "Coupon usage increment should succeed"
     );
 }
@@ -4685,7 +4686,7 @@ async fn test_117_concurrent_checkout_race() {
                 r#"mutation {{ updateWithFieldValues(collection: "{col}", id: "{pid}", data: {escaped}) }}"#
             );
             let body = graphql(&c, &t, &query).await;
-            body["errors"].is_null() || body["errors"].as_array().map_or(true, |a| a.is_empty())
+            body["errors"].is_null() || body["errors"].as_array().is_none_or(|a| a.is_empty())
         }));
     }
 
@@ -4755,7 +4756,7 @@ async fn test_118_orignagta_return_request() {
     );
     let body = graphql(&client, &token, &query).await;
     assert!(
-        body["errors"].is_null() || body["errors"].as_array().map_or(true, |a| a.is_empty()),
+        body["errors"].is_null() || body["errors"].as_array().is_none_or(|a| a.is_empty()),
         "Return approval should succeed"
     );
 }
@@ -5070,7 +5071,7 @@ async fn test_125_field_value_edge_cases() {
     );
     let body = graphql(&client, &token, &query).await;
     assert!(
-        body["errors"].is_null() || body["errors"].as_array().map_or(true, |a| a.is_empty()),
+        body["errors"].is_null() || body["errors"].as_array().is_none_or(|a| a.is_empty()),
         "Multiple FieldValue ops should succeed: {body}"
     );
 

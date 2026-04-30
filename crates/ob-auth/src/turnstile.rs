@@ -67,10 +67,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_turnstile_skip_in_test_mode() {
-        unsafe { std::env::set_var("OB_TEST_MODE", "1"); }
+        unsafe {
+            std::env::set_var("OB_TEST_MODE", "1");
+        }
         let result = validate_turnstile_token("test_token", "test_secret").await;
         assert!(result.is_ok());
-        unsafe { std::env::remove_var("OB_TEST_MODE"); }
+        unsafe {
+            std::env::remove_var("OB_TEST_MODE");
+        }
     }
 
     #[tokio::test]

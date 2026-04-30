@@ -7,11 +7,11 @@ use std::collections::HashMap;
 /// Extracted JWT claims from Authorization header
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpClaims {
-    pub sub: String,           // user ID in format "users:xxx"
-    pub uid: String,           // short user ID "xxx"
-    pub role: Option<String>,  // "admin", "seller", "buyer"
-    pub iat: i64,              // issued at
-    pub exp: i64,              // expiration
+    pub sub: String,          // user ID in format "users:xxx"
+    pub uid: String,          // short user ID "xxx"
+    pub role: Option<String>, // "admin", "seller", "buyer"
+    pub iat: i64,             // issued at
+    pub exp: i64,             // expiration
 }
 
 impl McpClaims {

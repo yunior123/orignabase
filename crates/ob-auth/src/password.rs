@@ -167,11 +167,11 @@ fn test_timing_dummy_verify_similar_to_real() {
     let hash = hash_password(password).unwrap();
 
     let start_dummy = Instant::now();
-    dummy_verify(&password);
+    dummy_verify(password);
     let dummy_time = start_dummy.elapsed();
 
     let start_real = Instant::now();
-    let _ = verify_password(&password, &hash);
+    let _ = verify_password(password, &hash);
     let real_time = start_real.elapsed();
 
     // Dummy and real should be in similar ballpark (within 2x)

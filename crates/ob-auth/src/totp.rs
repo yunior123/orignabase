@@ -318,7 +318,6 @@ fn test_recovery_codes_non_empty() {
     let codes = generate_recovery_codes();
     for code in &codes {
         assert!(!code.is_empty());
-        assert!(code.len() > 0);
     }
 }
 

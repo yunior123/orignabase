@@ -1,14 +1,16 @@
 //! Shopping tools — cart management
 
-use crate::errors::{McpError, McpResult};
 use crate::McpState;
-use serde_json::{json, Value};
+use crate::errors::{McpError, McpResult};
+use serde_json::{Value, json};
 
 /// Get user's cart
 pub async fn get_cart(_state: McpState, user_id: &str, _params: &Value) -> McpResult<Value> {
     // Verify user ID format
     if !user_id.contains(':') {
-        return Err(McpError::ValidationError("Invalid user ID format".to_string()));
+        return Err(McpError::ValidationError(
+            "Invalid user ID format".to_string(),
+        ));
     }
 
     // Fetch user document and extract cart field
@@ -23,11 +25,7 @@ pub async fn get_cart(_state: McpState, user_id: &str, _params: &Value) -> McpRe
 }
 
 /// Add item to cart
-pub async fn add_to_cart(
-    _state: McpState,
-    user_id: &str,
-    params: &Value,
-) -> McpResult<Value> {
+pub async fn add_to_cart(_state: McpState, user_id: &str, params: &Value) -> McpResult<Value> {
     let product_id = params
         .get("product_id")
         .and_then(|v| v.as_str())
@@ -39,7 +37,9 @@ pub async fn add_to_cart(
         .ok_or_else(|| McpError::InvalidParams("Missing 'quantity'".to_string()))?;
 
     if quantity == 0 {
-        return Err(McpError::ValidationError("Quantity must be > 0".to_string()));
+        return Err(McpError::ValidationError(
+            "Quantity must be > 0".to_string(),
+        ));
     }
 
     // Check idempotency key if provided
@@ -59,11 +59,7 @@ pub async fn add_to_cart(
 }
 
 /// Remove item from cart
-pub async fn remove_from_cart(
-    _state: McpState,
-    user_id: &str,
-    params: &Value,
-) -> McpResult<Value> {
+pub async fn remove_from_cart(_state: McpState, user_id: &str, params: &Value) -> McpResult<Value> {
     let product_id = params
         .get("product_id")
         .and_then(|v| v.as_str())
@@ -79,11 +75,7 @@ pub async fn remove_from_cart(
 }
 
 /// Apply coupon to cart
-pub async fn apply_coupon(
-    _state: McpState,
-    user_id: &str,
-    params: &Value,
-) -> McpResult<Value> {
+pub async fn apply_coupon(_state: McpState, user_id: &str, params: &Value) -> McpResult<Value> {
     let code = params
         .get("code")
         .and_then(|v| v.as_str())

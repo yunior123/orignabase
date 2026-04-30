@@ -42,17 +42,16 @@ pub fn extract_client_ip(
     let peer_ip = socket_addr.ip();
 
     // Only trust X-Forwarded-For from Caddy reverse proxy (127.0.0.1)
-    if peer_ip.to_string() == TRUSTED_PROXY_IP {
-        if let Some(xff) = headers.get("x-forwarded-for") {
-            if let Ok(xff_str) = xff.to_str() {
-                // Take first IP if multiple (CSV format)
-                if let Some(first_ip) = xff_str.split(',').next() {
-                    let ip = first_ip.trim();
-                    // Validate it's a valid IP address
-                    if ip.parse::<std::net::IpAddr>().is_ok() {
-                        return ip.to_string();
-                    }
-                }
+    if peer_ip.to_string() == TRUSTED_PROXY_IP
+        && let Some(xff) = headers.get("x-forwarded-for")
+        && let Ok(xff_str) = xff.to_str()
+    {
+        // Take first IP if multiple (CSV format)
+        if let Some(first_ip) = xff_str.split(',').next() {
+            let ip = first_ip.trim();
+            // Validate it's a valid IP address
+            if ip.parse::<std::net::IpAddr>().is_ok() {
+                return ip.to_string();
             }
         }
     }

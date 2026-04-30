@@ -1,15 +1,15 @@
 //! Transport layer — HTTP/SSE + stdio for MCP communication
 
 use crate::auth::McpContext;
-use crate::server::{JsonRpcRequest, JsonRpcResponse};
 use crate::safeguards::{IdempotencyTracker, SpendLimit};
+use crate::server::JsonRpcRequest;
 use crate::{McpState, OrignaGtaMcp};
 use axum::{
-    extract::{State, Json},
+    Router,
+    extract::{Json, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
-    Router,
 };
 use serde_json::Value;
 use std::sync::Arc;
@@ -22,7 +22,7 @@ pub type McpRouter = Router;
 pub fn create_mcp_router(state: McpState) -> Router {
     let idempotency = IdempotencyTracker::new();
     let spend_limit = SpendLimit::new(
-        100_000_000, // $1,000,000 CAD per request
+        100_000_000,   // $1,000,000 CAD per request
         1_000_000_000, // $10,000,000 CAD per 24h per user
     );
 
@@ -51,7 +51,7 @@ async fn handle_rpc(
 }
 
 /// List available tools
-async fn list_tools(State(mcp): State<Arc<OrignaGtaMcp>>) -> impl IntoResponse {
+async fn list_tools(State(_mcp): State<Arc<OrignaGtaMcp>>) -> impl IntoResponse {
     let tools = serde_json::json!({
         "tools": [
             {
@@ -145,7 +145,7 @@ impl StdioTransport {
                     stdout.write_all(b"\n").await?;
                     stdout.flush().await?;
                 }
-                Err(e) => {
+                Err(_e) => {
                     let error_response = serde_json::json!({
                         "jsonrpc": "2.0",
                         "error": {

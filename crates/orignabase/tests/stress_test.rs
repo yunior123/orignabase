@@ -318,7 +318,7 @@ async fn test_08_five_parallel_updates_same_document() {
     .await;
     let clean_id = doc_id
         .split(':')
-        .last()
+        .next_back()
         .unwrap_or(doc_id.as_str())
         .to_string();
 

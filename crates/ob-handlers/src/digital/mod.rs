@@ -916,7 +916,7 @@ mod tests {
     #[test]
     fn test_idempotent_reactivation_logic() {
         // Simulate: device_id already in activations list
-        let activations = vec![
+        let activations = [
             serde_json::json!({"deviceId": "dev_1", "platform": "macos"}),
             serde_json::json!({"deviceId": "dev_2", "platform": "windows"}),
         ];
@@ -1424,10 +1424,7 @@ mod tests {
 
         assert!(resp.download_url.starts_with("/sdl?t=tok_"));
         let tokens = db
-            .query_bind_value(
-                "SELECT * FROM software_access_tokens",
-                json!({})
-            )
+            .query_bind_value("SELECT * FROM software_access_tokens", json!({}))
             .await
             .unwrap();
         assert_eq!(tokens.len(), 1);

@@ -195,14 +195,13 @@ async fn approve_shipping_cost(
         .map_err(|_| ob_core::Error::NotFound("Order not found".into()))?;
 
     // Check if payment authorization has expired
-    if let Some(expires_at) = order.get("expiresAt").and_then(|v| v.as_str()) {
-        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(expires_at) {
-            if dt < Utc::now() {
-                return Err(ob_core::Error::Validation(
-                    "Payment authorization has expired".into(),
-                ));
-            }
-        }
+    if let Some(expires_at) = order.get("expiresAt").and_then(|v| v.as_str())
+        && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(expires_at)
+        && dt < Utc::now()
+    {
+        return Err(ob_core::Error::Validation(
+            "Payment authorization has expired".into(),
+        ));
     }
 
     // Only buyer can approve/reject

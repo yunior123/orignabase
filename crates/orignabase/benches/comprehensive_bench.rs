@@ -327,11 +327,11 @@ fn bench_batch_update(c: &mut Criterion) {
                 b.iter(|| {
                     rt.block_on(async {
                         let mut handles = Vec::with_capacity(size as usize);
-                        for i in 0..size as usize {
+                        for (i, doc_id) in doc_ids.iter().take(size as usize).enumerate() {
                             let client = client.clone();
                             let token = token.clone();
                             let col = col.clone();
-                            let doc_id = doc_ids[i].clone();
+                            let doc_id = doc_id.clone();
                             handles.push(tokio::spawn(async move {
                                 update_doc(
                                     &client,
@@ -909,7 +909,7 @@ fn bench_write_contention(c: &mut Criterion) {
                 }
                 let mut ok = 0;
                 for h in handles {
-                    if let Ok(true) = h.await.map(|v| v) {
+                    if let Ok(true) = h.await {
                         ok += 1;
                     }
                 }
@@ -974,7 +974,7 @@ fn bench_sustained_mixed_60s(c: &mut Criterion) {
                 let start = Instant::now();
                 let mut count = 0u64;
                 while start.elapsed().as_secs() < 60 {
-                    if count % 3 == 0 {
+                    if count.is_multiple_of(3) {
                         let _ = create_doc(
                             &client,
                             &token,

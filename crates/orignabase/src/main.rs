@@ -35,7 +35,6 @@ use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::key_extractor::PeerIpKeyExtractor;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::compression::CompressionLayer;
-use tower_http::cors::CorsLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
@@ -479,7 +478,6 @@ match /users/{userId} {
         Commands::Schema { action } => {
             let db = DatabaseClient::connect(&config.database).await?;
             match action {
-
                 SchemaAction::Inspect => {
                     let tables = db.query_raw("INFO FOR DB").await?;
                     println!("{}", serde_json::to_string_pretty(&tables)?);
@@ -564,7 +562,9 @@ fn build_cors_layer(is_test_mode: bool) -> tower_http::cors::CorsLayer {
         "https://orignagta.ca".parse::<HeaderValue>().unwrap(),
         "https://www.orignagta.ca".parse::<HeaderValue>().unwrap(),
         "https://dev.orignagta.ca".parse::<HeaderValue>().unwrap(),
-        "https://staging.orignagta.ca".parse::<HeaderValue>().unwrap(),
+        "https://staging.orignagta.ca"
+            .parse::<HeaderValue>()
+            .unwrap(),
     ];
 
     // Allow localhost ONLY in test mode (for local development)
@@ -573,15 +573,13 @@ fn build_cors_layer(is_test_mode: bool) -> tower_http::cors::CorsLayer {
         allowed_origins.push("http://localhost:5173".parse::<HeaderValue>().unwrap());
     }
 
-    let mut cors = tower_http::cors::CorsLayer::new()
-        .allow_credentials(true);
+    let mut cors = tower_http::cors::CorsLayer::new().allow_credentials(true);
 
     for origin in allowed_origins {
         cors = cors.allow_origin(origin);
     }
 
-    cors
-        .allow_methods(tower_http::cors::Any)
+    cors.allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any)
 }
 
@@ -595,10 +593,7 @@ fn validate_config_warnings(config: &Config) -> Result<()> {
 
     if config.auth.jwt_secret == "CHANGE_ME_IN_PRODUCTION" {
         let msg = "JWT secret is the default value (INSECURE). Set OB_AUTH__JWT_SECRET or auth.jwt_secret in orignabase.toml.";
-        warnings.push((
-            "critical",
-            msg,
-        ));
+        warnings.push(("critical", msg));
 
         // CRITICAL FIX: Panic in production, warn in test mode
         if !is_test_mode {
@@ -1195,9 +1190,7 @@ async fn serve(config: Config) -> Result<()> {
             Duration::from_secs(30),
         ))
         .layer(TraceLayer::new_for_http())
-        .layer(
-            build_cors_layer(is_test_mode),
-        )
+        .layer(build_cors_layer(is_test_mode))
         .layer(axum::middleware::from_fn(
             ob_auth::middleware::auth_extractor,
         ))
@@ -1678,28 +1671,28 @@ async fn codegen_dart(url: &str, output_dir: &str) -> Result<()> {
             continue;
         }
 
-        if kind == "OBJECT" {
-            if let Some(fields) = typ["fields"].as_array() {
-                if fields.is_empty() {
-                    continue;
-                }
-
-                models.push_str(&format!("@freezed\nclass {name} with _${name} {{\n"));
-                models.push_str(&format!("  const factory {name}({{\n"));
-
-                for field in fields {
-                    let field_name = field["name"].as_str().unwrap_or("unknown");
-                    let dart_type = graphql_type_to_dart(&field["type"]);
-                    models.push_str(&format!("    {dart_type}? {field_name},\n"));
-                }
-
-                models.push_str(&format!("  }}) = _{name};\n\n"));
-                models.push_str(&format!(
-                    "  factory {name}.fromJson(Map<String, dynamic> json) => _${name}FromJson(json);\n"
-                ));
-                models.push_str("}\n\n");
-                count += 1;
+        if kind == "OBJECT"
+            && let Some(fields) = typ["fields"].as_array()
+        {
+            if fields.is_empty() {
+                continue;
             }
+
+            models.push_str(&format!("@freezed\nclass {name} with _${name} {{\n"));
+            models.push_str(&format!("  const factory {name}({{\n"));
+
+            for field in fields {
+                let field_name = field["name"].as_str().unwrap_or("unknown");
+                let dart_type = graphql_type_to_dart(&field["type"]);
+                models.push_str(&format!("    {dart_type}? {field_name},\n"));
+            }
+
+            models.push_str(&format!("  }}) = _{name};\n\n"));
+            models.push_str(&format!(
+                "  factory {name}.fromJson(Map<String, dynamic> json) => _${name}FromJson(json);\n"
+            ));
+            models.push_str("}\n\n");
+            count += 1;
         }
     }
 

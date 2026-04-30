@@ -204,7 +204,7 @@ pub(crate) async fn stripe_refund(
             .header("Authorization", format!("Bearer {stripe_key}"))
             .header("Idempotency-Key", idempotency_key)
             .form(&params)
-            .send()
+            .send(),
     )
     .await
     .map_err(|_| ob_core::Error::Internal("Stripe refund request timeout".into()))?
@@ -446,7 +446,7 @@ async fn refund_order_item(
         state
             .db
             .query_bind(
-                &format!("UPDATE type::thing($table, $product_id) SET stockQuantity += $quantity, updatedAt = $updatedAt"),
+                "UPDATE type::thing($table, $product_id) SET stockQuantity += $quantity, updatedAt = $updatedAt",
                 json!({
                     "table": collections::PRODUCTS,
                     "product_id": product_id,
@@ -675,7 +675,7 @@ async fn cancel_order(
                 state
                     .db
                     .query_bind(
-                        &format!("UPDATE type::thing($table, $product_id) SET stockQuantity += $quantity, updatedAt = $updatedAt"),
+                        "UPDATE type::thing($table, $product_id) SET stockQuantity += $quantity, updatedAt = $updatedAt",
                         json!({
                             "table": collections::PRODUCTS,
                             "product_id": pid,
@@ -996,7 +996,7 @@ mod tests {
 
         let refund = calculate_refund_amount_cents(&order, &item).unwrap();
         // item = 3000, proportion = 1.0, shipping = 0, tax = 390
-        assert_eq!(refund, 3000 + 0 + 390);
+        assert_eq!(refund, 3000 + 390);
     }
 
     #[test]
@@ -1013,7 +1013,7 @@ mod tests {
 
         let refund = calculate_refund_amount_cents(&order, &item).unwrap();
         // proportion = 2500/5000 = 0.5, shipping = 500, tax = 0
-        assert_eq!(refund, 2500 + 500 + 0);
+        assert_eq!(refund, (2500 + 500));
     }
 
     #[test]
@@ -1579,7 +1579,7 @@ mod tests {
             .db
             .query_bind_value(
                 "SELECT * FROM order_events WHERE orderId = $orderId AND eventType = $eventType",
-                json!({"orderId": "order_1", "eventType": "item_refunded"})
+                json!({"orderId": "order_1", "eventType": "item_refunded"}),
             )
             .await
             .unwrap();
@@ -1676,7 +1676,7 @@ mod tests {
             .db
             .query_bind_value(
                 "SELECT * FROM licenses WHERE orderId = $orderId AND productId = $productId",
-                json!({"orderId": "order_digital", "productId": "ebook_1"})
+                json!({"orderId": "order_digital", "productId": "ebook_1"}),
             )
             .await
             .unwrap();
@@ -1809,7 +1809,7 @@ mod tests {
             .db
             .query_bind_value(
                 "SELECT * FROM order_events WHERE orderId = $orderId AND eventType = $eventType",
-                json!({"orderId": "order_cancel", "eventType": "order_cancelled"})
+                json!({"orderId": "order_cancel", "eventType": "order_cancelled"}),
             )
             .await
             .unwrap();

@@ -651,7 +651,7 @@ async fn approve_return_request(
                 state
                     .db
                     .query_bind(
-                        &format!("UPDATE type::thing($table, $product_id) SET stockQuantity += $quantity, updatedAt = $updatedAt"),
+                        "UPDATE type::thing($table, $product_id) SET stockQuantity += $quantity, updatedAt = $updatedAt",
                         json!({
                             "table": collections::PRODUCTS,
                             "product_id": product_id,

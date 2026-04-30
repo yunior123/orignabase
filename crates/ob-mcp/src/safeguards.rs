@@ -68,16 +68,17 @@ impl SpendLimit {
     /// Check if user can spend amount_cents
     pub async fn check(&self, user_id: &str, amount_cents: u64) -> McpResult<()> {
         if amount_cents > self.max_amount_cents {
-            return Err(McpError::ValidationError(
-                format!("Amount exceeds per-request limit of ${}", self.max_amount_cents / 100),
-            ));
+            return Err(McpError::ValidationError(format!(
+                "Amount exceeds per-request limit of ${}",
+                self.max_amount_cents / 100
+            )));
         }
 
         let spend = self.user_spend.read().await;
         let current = spend.get(user_id).copied().unwrap_or(0);
         if current + amount_cents > self.max_per_24h_cents {
             return Err(McpError::ValidationError(
-                format!("Amount exceeds 24h spend limit"),
+                "Amount exceeds 24h spend limit".to_string(),
             ));
         }
 
@@ -117,7 +118,9 @@ impl ConfirmationToken {
             return Err(McpError::ValidationError("Token expired".to_string()));
         }
         if self.token != provided_token {
-            return Err(McpError::ValidationError("Invalid confirmation token".to_string()));
+            return Err(McpError::ValidationError(
+                "Invalid confirmation token".to_string(),
+            ));
         }
         Ok(())
     }

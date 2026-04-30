@@ -51,19 +51,6 @@ async fn api_post(client: &Client, path: &str, token: &str, body: Value) -> (u16
     (status, b)
 }
 
-async fn api_get(client: &Client, path: &str, token: &str) -> (u16, Value) {
-    let resp = client
-        .get(format!("{}{}", base_url(), path))
-        .header("Authorization", format!("Bearer {}", token))
-        .send()
-        .await
-        .expect("request failed");
-
-    let status = resp.status().as_u16();
-    let b: Value = resp.json().await.unwrap_or(json!({}));
-    (status, b)
-}
-
 #[tokio::test]
 #[ignore]
 async fn test_create_return_for_delivered_order() {
@@ -136,7 +123,7 @@ async fn test_create_return_for_delivered_order() {
         );
     } else {
         // Expected if order is not in delivered state
-        assert!(status >= 400 && status < 500, "Should be a client error");
+        assert!((400..500).contains(&status), "Should be a client error");
     }
 }
 

@@ -1,21 +1,19 @@
 //! Order tools — list, get, return requests, checkout
 
-use crate::errors::{McpError, McpResult};
 use crate::McpState;
-use serde_json::{json, Value};
+use crate::errors::{McpError, McpResult};
+use serde_json::{Value, json};
 
 /// List orders for user
-pub async fn list_orders(
-    _state: McpState,
-    user_id: &str,
-    params: &Value,
-) -> McpResult<Value> {
-    let status = params.get("status").and_then(|v| v.as_str());
+pub async fn list_orders(_state: McpState, user_id: &str, params: &Value) -> McpResult<Value> {
+    let _status = params.get("status").and_then(|v| v.as_str());
     let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20);
     let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
 
     if limit > 100 {
-        return Err(McpError::ValidationError("Limit must be <= 100".to_string()));
+        return Err(McpError::ValidationError(
+            "Limit must be <= 100".to_string(),
+        ));
     }
 
     // Query orders where buyerId = user_id
@@ -33,18 +31,16 @@ pub async fn list_orders(
 }
 
 /// Get order details
-pub async fn get_order(
-    _state: McpState,
-    user_id: &str,
-    params: &Value,
-) -> McpResult<Value> {
+pub async fn get_order(_state: McpState, user_id: &str, params: &Value) -> McpResult<Value> {
     let order_id = params
         .get("order_id")
         .and_then(|v| v.as_str())
         .ok_or_else(|| McpError::InvalidParams("Missing 'order_id'".to_string()))?;
 
     if !order_id.contains(':') {
-        return Err(McpError::ValidationError("Invalid order ID format".to_string()));
+        return Err(McpError::ValidationError(
+            "Invalid order ID format".to_string(),
+        ));
     }
 
     // Fetch order
@@ -62,11 +58,7 @@ pub async fn get_order(
 }
 
 /// Request a return for an order
-pub async fn request_return(
-    _state: McpState,
-    user_id: &str,
-    params: &Value,
-) -> McpResult<Value> {
+pub async fn request_return(_state: McpState, user_id: &str, params: &Value) -> McpResult<Value> {
     let order_id = params
         .get("order_id")
         .and_then(|v| v.as_str())
@@ -78,7 +70,9 @@ pub async fn request_return(
         .ok_or_else(|| McpError::InvalidParams("Missing 'reason'".to_string()))?;
 
     if !order_id.contains(':') {
-        return Err(McpError::ValidationError("Invalid order ID format".to_string()));
+        return Err(McpError::ValidationError(
+            "Invalid order ID format".to_string(),
+        ));
     }
 
     // Fetch order and verify ownership
@@ -97,25 +91,23 @@ pub async fn request_return(
 }
 
 /// Create checkout session
-pub async fn create_checkout(
-    _state: McpState,
-    user_id: &str,
-    params: &Value,
-) -> McpResult<Value> {
+pub async fn create_checkout(_state: McpState, user_id: &str, params: &Value) -> McpResult<Value> {
     let items = params
         .get("items")
         .and_then(|v| v.as_array())
         .ok_or_else(|| McpError::InvalidParams("Missing 'items' array".to_string()))?;
 
     if items.is_empty() {
-        return Err(McpError::ValidationError("Items array cannot be empty".to_string()));
+        return Err(McpError::ValidationError(
+            "Items array cannot be empty".to_string(),
+        ));
     }
 
-    let shipping_address = params
+    let _shipping_address = params
         .get("shipping_address")
         .ok_or_else(|| McpError::InvalidParams("Missing 'shipping_address'".to_string()))?;
 
-    let idempotency_key = params.get("idempotency_key").and_then(|v| v.as_str());
+    let _idempotency_key = params.get("idempotency_key").and_then(|v| v.as_str());
 
     // Validate each item: { product_id, quantity }
     for item in items {

@@ -402,7 +402,8 @@ async fn review_vote(
         ob_core::escape_surreal_string(&req.review_id),
         ob_core::escape_surreal_string(&user_id)
     );
-    let existing: Vec<serde_json::Value> = state.db.query_raw(&find_query).await.unwrap_or_default();
+    let existing: Vec<serde_json::Value> =
+        state.db.query_raw(&find_query).await.unwrap_or_default();
 
     if let Some(record) = existing.first() {
         let old_vote = record.get("vote").and_then(|v| v.as_str()).unwrap_or("");
@@ -415,10 +416,12 @@ async fn review_vote(
         }
 
         let record_id = record.get("id").and_then(|v| v.as_str()).unwrap_or("");
-        
+
         let update_vote_query = format!(
             "UPDATE {} SET vote = '{}', {} = time::now()",
-            record_id, vote_str, fields::UPDATED_AT
+            record_id,
+            vote_str,
+            fields::UPDATED_AT
         );
         state.db.query_raw(&update_vote_query).await?;
 
