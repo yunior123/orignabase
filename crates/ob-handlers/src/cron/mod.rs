@@ -6039,7 +6039,8 @@ mod tests {
             "client_id": "123",
             "auth_uri": &format!("{}/o/oauth2/auth", server.uri()),
             "token_uri": &format!("{}/token", server.uri()),
-        }).to_string();
+        })
+        .to_string();
 
         unsafe {
             std::env::set_var("OB_FCM_PROJECT_ID", "test-project");

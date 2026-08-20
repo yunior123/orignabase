@@ -657,7 +657,8 @@ mod tests {
     #[test]
     fn test_malformed_token_missing_signature() {
         let keys = test_keys();
-        let malformed = "REDACTED_SECRET.eyJzdWIiOiJ1c2VyMTIzIiwiaWF0IjoxNjk4NTAwMDAwLCJleHAiOjE2OTg1MDM2MDB9";
+        let malformed =
+            "REDACTED_SECRET.eyJzdWIiOiJ1c2VyMTIzIiwiaWF0IjoxNjk4NTAwMDAwLCJleHAiOjE2OTg1MDM2MDB9";
         let result = verify_token(malformed, &keys);
         assert!(result.is_err());
     }

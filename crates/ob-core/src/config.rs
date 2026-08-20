@@ -508,10 +508,7 @@ mod tests {
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.host, "127.0.0.1");
         assert_eq!(config.port, 9090);
-        assert_eq!(
-            config.database.url,
-            "REDACTED_SECRET/testdb"
-        );
+        assert_eq!(config.database.url, "REDACTED_SECRET/testdb");
         assert_eq!(config.auth.jwt_secret, "supersecret");
     }
 

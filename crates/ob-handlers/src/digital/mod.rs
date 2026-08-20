@@ -870,8 +870,7 @@ mod tests {
 
     #[test]
     fn test_deactivate_request_deser() {
-        let json =
-            r#"{"licenseKey": "REDACTED_SECRET", "deviceId": "dev_1", "userId": "user_1"}"#;
+        let json = r#"{"licenseKey": "REDACTED_SECRET", "deviceId": "dev_1", "userId": "user_1"}"#;
         let req: DeactivateLicenseRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.license_key, "REDACTED_SECRET");
         assert_eq!(req.device_id, "dev_1");
