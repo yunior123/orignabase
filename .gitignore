@@ -3,8 +3,10 @@
 *.swp
 *.swo
 .env
+docker/.env.dev
 docker/.env.staging
 docker/.env.prod
+data/keys/
 .DS_Store
 orignabase.toml
 secrets-staging.json
