@@ -1,5 +1,6 @@
 ---
 source: crates/ob-handlers/tests/snapshot_tests.rs
+assertion_line: 65
 expression: output
 ---
-Titlebad()Safe textEnd
+TitleSafe textEnd

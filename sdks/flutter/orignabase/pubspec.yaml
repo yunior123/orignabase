@@ -8,12 +8,16 @@ environment:
   sdk: ">=3.0.0 <4.0.0"
 
 dependencies:
+  flutter:
+    sdk: flutter
   http: ^1.2.0
   meta: ^1.11.0
   web_socket_channel: ^3.0.0
   json_annotation: ^4.9.0
 
 dev_dependencies:
+  flutter_test:
+    sdk: flutter
   test: ^1.25.0
   build_runner: ^2.4.0
   json_serializable: ^6.8.0

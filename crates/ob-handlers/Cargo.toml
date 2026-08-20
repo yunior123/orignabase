@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+integration = []
+
 [dependencies]
 # Workspace crates
 ob-core = { workspace = true }
@@ -21,12 +25,13 @@ tower-http = { workspace = true }
 
 # Async runtime
 tokio = { workspace = true }
+sqlx = { workspace = true }
 
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-# HTTP client (Stripe, Mailjet, Geoapify, Turnstile, FCM)
+# HTTP client (Stripe, Postal, Geoapify, Turnstile, FCM)
 reqwest = { workspace = true }
 
 # Time & IDs
@@ -48,7 +53,7 @@ totp-rs = { workspace = true }
 # Stripe
 async-stripe = { version = "0.41", default-features = false, features = ["runtime-tokio-hyper-rustls", "checkout", "connect", "billing", "webhook-events"] }
 
-# Email (SMTP via lettre, or REST via reqwest for Mailjet)
+# Email (SMTP via lettre, or REST via reqwest for Postal)
 lettre = { workspace = true }
 
 # PDF generation
@@ -59,6 +64,7 @@ hmac = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 base64 = { workspace = true }
+jsonwebtoken = { workspace = true }
 
 # Lightweight regex (no proc macro overhead)
 regex-lite = "0.1"
@@ -72,3 +78,4 @@ rstest = { workspace = true }
 ob-security = { workspace = true }
 insta = { version = "1", features = ["json", "yaml"] }
 wiremock = "0.6.5"
+serial_test = "3"

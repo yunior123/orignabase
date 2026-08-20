@@ -3,22 +3,23 @@
 // Notes:
 // - OrignaBase currently uses `rules <collection> { ... }`, not `collection "name" { ... }`.
 // - Firestore subcollections are represented here as standalone collections: `cart`,
+//   `users__cart`,
 //   `warehouses`, `review_votes`, `chat_conversations`, and `chat_messages`.
 // - The current DSL cannot express Firestore-style cross-document lookups or array-contains
 //   checks, so seller/order rules rely on denormalized per-document fields where available.
 
 rules users {
     read: isAuthenticated() && (isOwner(resource.uid) || hasRole("admin"));
-    create: isAuthenticated() && auth.uid == incoming.uid;
-    update: isAuthenticated() && (isOwner(resource.uid) || hasRole("admin"));
+    create: isAuthenticated() && fieldEqualsAuth("uid");
+    update: isAuthenticated() && (hasRole("admin") || (isOwner(resource.uid) && fieldUnchanged("uid")));
     delete: false;
     list: hasRole("admin");
 }
 
 rules products {
     read: true;
-    create: isAuthenticated() && ((hasRole("seller") && auth.uid == incoming.sellerId) || hasRole("admin"));
-    update: isAuthenticated() && (hasRole("admin") || (hasRole("seller") && isOwner(resource.sellerId)));
+    create: isAuthenticated() && ((hasRole("seller") && fieldEqualsAuth("sellerId")) || hasRole("admin"));
+    update: isAuthenticated() && (hasRole("admin") || (hasRole("seller") && isOwner(resource.sellerId) && fieldUnchanged("sellerId")));
     delete: isAuthenticated() && (hasRole("admin") || (hasRole("seller") && isOwner(resource.sellerId)));
     list: true;
 }
@@ -31,7 +32,12 @@ rules orders {
         isOwner(resource.sellerId) ||
         isOwner(resource.seller_id)
     );
-    create: hasRole("admin") || isAuthenticated();
+    create: hasRole("admin") || (
+        isAuthenticated() &&
+        (fieldEqualsAuth("userId") || fieldEqualsAuth("buyerId")) &&
+        fieldAbsentOrEqualsAuth("userId") &&
+        fieldAbsentOrEqualsAuth("buyerId")
+    );
     update: hasRole("admin");
     delete: false;
     list: isAuthenticated();
@@ -52,15 +58,18 @@ rules cart {
         isOwner(resource.uid)
     );
     create: isAuthenticated() && (
-        auth.uid == incoming.userId ||
-        auth.uid == incoming.ownerId ||
-        auth.uid == incoming.uid
+        (fieldEqualsAuth("userId") ||
+            fieldEqualsAuth("ownerId") ||
+            fieldEqualsAuth("uid")) &&
+        fieldAbsentOrEqualsAuth("userId") &&
+        fieldAbsentOrEqualsAuth("ownerId") &&
+        fieldAbsentOrEqualsAuth("uid")
     );
     update: isAuthenticated() && (
         isOwner(resource.userId) ||
         isOwner(resource.ownerId) ||
         isOwner(resource.uid)
-    );
+    ) && fieldUnchanged("userId") && fieldUnchanged("ownerId") && fieldUnchanged("uid");
     delete: isAuthenticated() && (
         isOwner(resource.userId) ||
         isOwner(resource.ownerId) ||
@@ -73,26 +82,25 @@ rules users__cart {
     read: isAuthenticated() && (
         isOwner(resource.userId) ||
         isOwner(resource.ownerId) ||
-        isOwner(resource.uid) ||
-        isOwner(resource.parent_id)
+        isOwner(resource.uid)
     );
     create: isAuthenticated() && (
-        isOwner(incoming.userId) ||
-        isOwner(incoming.ownerId) ||
-        isOwner(incoming.uid) ||
-        isOwner(incoming.parent_id)
+        (fieldEqualsAuth("userId") ||
+            fieldEqualsAuth("ownerId") ||
+            fieldEqualsAuth("uid")) &&
+        fieldAbsentOrEqualsAuth("userId") &&
+        fieldAbsentOrEqualsAuth("ownerId") &&
+        fieldAbsentOrEqualsAuth("uid")
     );
     update: isAuthenticated() && (
         isOwner(resource.userId) ||
         isOwner(resource.ownerId) ||
-        isOwner(resource.uid) ||
-        isOwner(resource.parent_id)
-    );
+        isOwner(resource.uid)
+    ) && fieldUnchanged("userId") && fieldUnchanged("ownerId") && fieldUnchanged("uid");
     delete: isAuthenticated() && (
         isOwner(resource.userId) ||
         isOwner(resource.ownerId) ||
-        isOwner(resource.uid) ||
-        isOwner(resource.parent_id)
+        isOwner(resource.uid)
     );
     list: isAuthenticated();
 }
@@ -144,10 +152,10 @@ rules security_alerts {
 }
 
 rules error_events {
-    read: hasRole("admin");
-    create: isAuthenticated() && auth.uid == incoming.userId;
+    read: isAuthenticated() && (hasRole("admin") || isOwner(resource.userId));
+    create: isAuthenticated() && fieldEqualsAuth("userId");
     update: hasRole("admin");
-    delete: hasRole("admin");
+    delete: false;
     list: hasRole("admin");
 }
 
@@ -225,17 +233,54 @@ rules stock_notifications {
     list: isAuthenticated();
 }
 
+rules subscriptions {
+    read: isAuthenticated() && (
+        hasRole("admin") ||
+        isOwner(resource.userId) ||
+        isOwner(resource.uid) ||
+        isOwner(resource.ownerId)
+    );
+    create: hasRole("admin");
+    update: hasRole("admin");
+    delete: hasRole("admin");
+    list: hasRole("admin");
+}
+
 rules chat_conversations {
     read: isAuthenticated() && (
         hasRole("admin") ||
         isOwner(resource.buyerId) ||
         isOwner(resource.sellerId)
     );
-    create: isAuthenticated();
+    create: isAuthenticated() && (
+        fieldEqualsAuth("buyerId") ||
+        (hasRole("seller") && fieldEqualsAuth("sellerId"))
+    );
     update: isAuthenticated() && (
+        hasRole("admin") ||
+        ((isOwner(resource.buyerId) || isOwner(resource.sellerId)) &&
+            fieldUnchanged("buyerId") &&
+            fieldUnchanged("sellerId"))
+    );
+    delete: false;
+    list: isAuthenticated();
+}
+
+rules chats {
+    read: isAuthenticated() && (
         hasRole("admin") ||
         isOwner(resource.buyerId) ||
         isOwner(resource.sellerId)
+    );
+    create: isAuthenticated() && (
+        fieldEqualsAuth("buyerId") ||
+        (hasRole("seller") && fieldEqualsAuth("sellerId"))
+    );
+    update: isAuthenticated() && (
+        hasRole("admin") ||
+        ((isOwner(resource.buyerId) || isOwner(resource.sellerId)) &&
+            fieldUnchanged("buyerId") &&
+            fieldUnchanged("sellerId"))
     );
     delete: false;
     list: isAuthenticated();
@@ -248,8 +293,39 @@ rules chat_messages {
         isOwner(resource.sellerId) ||
         isOwner(resource.senderId)
     );
-    create: isAuthenticated();
-    update: isAuthenticated() && (hasRole("admin") || isOwner(resource.senderId));
+    create: isAuthenticated() && fieldEqualsAuth("senderId") && (
+        fieldEqualsAuth("buyerId") ||
+        (hasRole("seller") && fieldEqualsAuth("sellerId"))
+    );
+    update: isAuthenticated() && (
+        hasRole("admin") ||
+        (isOwner(resource.senderId) &&
+            fieldUnchanged("senderId") &&
+            fieldUnchanged("buyerId") &&
+            fieldUnchanged("sellerId"))
+    );
+    delete: false;
+    list: isAuthenticated();
+}
+
+rules chats__messages {
+    read: isAuthenticated() && (
+        hasRole("admin") ||
+        isOwner(resource.buyerId) ||
+        isOwner(resource.sellerId) ||
+        isOwner(resource.senderId)
+    );
+    create: isAuthenticated() && fieldEqualsAuth("senderId") && (
+        fieldEqualsAuth("buyerId") ||
+        (hasRole("seller") && fieldEqualsAuth("sellerId"))
+    );
+    update: isAuthenticated() && (
+        hasRole("admin") ||
+        (isOwner(resource.senderId) &&
+            fieldUnchanged("senderId") &&
+            fieldUnchanged("buyerId") &&
+            fieldUnchanged("sellerId"))
+    );
     delete: false;
     list: isAuthenticated();
 }
@@ -261,15 +337,18 @@ rules favorites {
         isOwner(resource.uid)
     );
     create: isAuthenticated() && (
-        auth.uid == incoming.userId ||
-        auth.uid == incoming.ownerId ||
-        auth.uid == incoming.uid
+        (fieldEqualsAuth("userId") ||
+            fieldEqualsAuth("ownerId") ||
+            fieldEqualsAuth("uid")) &&
+        fieldAbsentOrEqualsAuth("userId") &&
+        fieldAbsentOrEqualsAuth("ownerId") &&
+        fieldAbsentOrEqualsAuth("uid")
     );
     update: isAuthenticated() && (
         isOwner(resource.userId) ||
         isOwner(resource.ownerId) ||
         isOwner(resource.uid)
-    );
+    ) && fieldUnchanged("userId") && fieldUnchanged("ownerId") && fieldUnchanged("uid");
     delete: isAuthenticated() && (
         isOwner(resource.userId) ||
         isOwner(resource.ownerId) ||
@@ -285,15 +364,18 @@ rules addresses {
         isOwner(resource.uid)
     );
     create: isAuthenticated() && (
-        auth.uid == incoming.userId ||
-        auth.uid == incoming.ownerId ||
-        auth.uid == incoming.uid
+        (fieldEqualsAuth("userId") ||
+            fieldEqualsAuth("ownerId") ||
+            fieldEqualsAuth("uid")) &&
+        fieldAbsentOrEqualsAuth("userId") &&
+        fieldAbsentOrEqualsAuth("ownerId") &&
+        fieldAbsentOrEqualsAuth("uid")
     );
     update: isAuthenticated() && (
         isOwner(resource.userId) ||
         isOwner(resource.ownerId) ||
         isOwner(resource.uid)
-    );
+    ) && fieldUnchanged("userId") && fieldUnchanged("ownerId") && fieldUnchanged("uid");
     delete: isAuthenticated() && (
         isOwner(resource.userId) ||
         isOwner(resource.ownerId) ||
@@ -309,15 +391,45 @@ rules notifications {
         isOwner(resource.uid)
     );
     create: isAuthenticated() && (
-        auth.uid == incoming.userId ||
-        auth.uid == incoming.ownerId ||
-        auth.uid == incoming.uid
+        (fieldEqualsAuth("userId") ||
+            fieldEqualsAuth("ownerId") ||
+            fieldEqualsAuth("uid")) &&
+        fieldAbsentOrEqualsAuth("userId") &&
+        fieldAbsentOrEqualsAuth("ownerId") &&
+        fieldAbsentOrEqualsAuth("uid")
     );
     update: isAuthenticated() && (
         isOwner(resource.userId) ||
         isOwner(resource.ownerId) ||
         isOwner(resource.uid)
+    ) && fieldUnchanged("userId") && fieldUnchanged("ownerId") && fieldUnchanged("uid");
+    delete: isAuthenticated() && (
+        isOwner(resource.userId) ||
+        isOwner(resource.ownerId) ||
+        isOwner(resource.uid)
     );
+    list: isAuthenticated();
+}
+
+rules users__notifications {
+    read: isAuthenticated() && (
+        isOwner(resource.userId) ||
+        isOwner(resource.ownerId) ||
+        isOwner(resource.uid)
+    );
+    create: isAuthenticated() && (
+        (fieldEqualsAuth("userId") ||
+            fieldEqualsAuth("ownerId") ||
+            fieldEqualsAuth("uid")) &&
+        fieldAbsentOrEqualsAuth("userId") &&
+        fieldAbsentOrEqualsAuth("ownerId") &&
+        fieldAbsentOrEqualsAuth("uid")
+    );
+    update: isAuthenticated() && (
+        isOwner(resource.userId) ||
+        isOwner(resource.ownerId) ||
+        isOwner(resource.uid)
+    ) && fieldUnchanged("userId") && fieldUnchanged("ownerId") && fieldUnchanged("uid");
     delete: isAuthenticated() && (
         isOwner(resource.userId) ||
         isOwner(resource.ownerId) ||
@@ -328,16 +440,25 @@ rules notifications {
 
 rules seller_profiles {
     read: true;
-    create: isAuthenticated() && auth.uid == incoming.uid;
-    update: isAuthenticated() && isOwner(resource.uid);
+    create: isAuthenticated() && fieldEqualsAuth("uid");
+    update: isAuthenticated() && isOwner(resource.uid) && fieldUnchanged("uid");
     delete: false;
     list: true;
 }
 
 rules product_questions {
     read: true;
-    create: isAuthenticated();
-    update: isAuthenticated() && (hasRole("admin") || isOwner(resource.userId) || isOwner(resource.uid));
+    create: isAuthenticated() && (
+        (fieldEqualsAuth("userId") || fieldEqualsAuth("uid")) &&
+        fieldAbsentOrEqualsAuth("userId") &&
+        fieldAbsentOrEqualsAuth("uid")
+    );
+    update: isAuthenticated() && (
+        hasRole("admin") ||
+        ((isOwner(resource.userId) || isOwner(resource.uid)) &&
+            fieldUnchanged("userId") &&
+            fieldUnchanged("uid"))
+    );
     delete: hasRole("admin");
     list: true;
 }

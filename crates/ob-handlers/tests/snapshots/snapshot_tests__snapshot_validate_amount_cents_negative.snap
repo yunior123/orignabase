@@ -1,5 +1,6 @@
 ---
 source: crates/ob-handlers/tests/snapshot_tests.rs
+assertion_line: 248
 expression: err_msg
 ---
-Validation error: price cannot be negative
+Validation error: price must be greater than zero

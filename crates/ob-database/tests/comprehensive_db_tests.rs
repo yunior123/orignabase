@@ -1,4 +1,4 @@
-use ob_core::{escape_surreal_string, validate_document_id, validate_identifier};
+use ob_core::{escape_sql_string, validate_document_id, validate_identifier};
 use serde_json::json;
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -318,7 +318,7 @@ mod validation_tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // escape_surreal_string: SQL injection prevention
+    // escape_sql_string: SQL injection prevention
     // ─────────────────────────────────────────────────────────────────────────
 
     struct EscapeCase {
@@ -328,7 +328,7 @@ mod validation_tests {
     }
 
     #[test]
-    fn test_escape_surreal_string_table_driven() {
+    fn test_escape_sql_string_table_driven() {
         let cases = vec![
             EscapeCase {
                 input: "hello",
@@ -398,7 +398,7 @@ mod validation_tests {
         ];
 
         for case in cases {
-            let result = escape_surreal_string(case.input);
+            let result = escape_sql_string(case.input);
             assert_eq!(
                 result, case.expected,
                 "Escape failed for {} ({}): expected '{}', got '{}'",
@@ -408,7 +408,7 @@ mod validation_tests {
     }
 
     #[test]
-    fn test_escape_surreal_string_injection_patterns() {
+    fn test_escape_sql_string_injection_patterns() {
         // These patterns remain data inside a quoted literal once single quotes are escaped.
         let patterns = vec![
             "; DROP TABLE users;",
@@ -424,7 +424,7 @@ mod validation_tests {
         ];
 
         for pattern in patterns {
-            let escaped = escape_surreal_string(pattern);
+            let escaped = escape_sql_string(pattern);
             let quoted_literal = format!("'{}'", escaped);
 
             // Any single quote inside the final literal should be escaped.
@@ -461,7 +461,7 @@ mod validation_tests {
         let inputs = vec!["hello", "it's", "a\\b", "'; DROP TABLE--"];
 
         for input in inputs {
-            let escaped = escape_surreal_string(input);
+            let escaped = escape_sql_string(input);
             // Escape can only add characters (\ before ' or \)
             assert!(
                 escaped.len() >= input.len(),
@@ -497,42 +497,42 @@ mod query_builder_tests {
         let cases = vec![
             FilterCase {
                 filters: json!({"status": {"_eq": "active"}}),
-                expected_clause: "WHERE status = 'active'",
+                expected_clause: "WHERE data->>'status' = 'active'",
                 description: "simple equality",
             },
             FilterCase {
                 filters: json!({"age": {"_gt": 18}}),
-                expected_clause: "WHERE age > 18",
+                expected_clause: "WHERE NULLIF(data->>'age', '')::numeric > 18",
                 description: "greater than",
             },
             FilterCase {
                 filters: json!({"price": {"_lte": 99.99}}),
-                expected_clause: "WHERE price <= 99.99",
+                expected_clause: "WHERE NULLIF(data->>'price', '')::numeric <= 99.99",
                 description: "less than or equal",
             },
             FilterCase {
                 filters: json!({"deleted": {"_neq": true}}),
-                expected_clause: "WHERE deleted != true",
+                expected_clause: "WHERE NULLIF(data->>'deleted', '')::boolean != true",
                 description: "not equal boolean",
             },
             FilterCase {
                 filters: json!({"category": {"_in": ["electronics", "books"]}}),
-                expected_clause: "WHERE category IN ['electronics', 'books']",
+                expected_clause: "WHERE data->>'category' IN ('electronics', 'books')",
                 description: "in array",
             },
             FilterCase {
                 filters: json!({"name": {"_contains": "john"}}),
-                expected_clause: "WHERE name CONTAINS 'john'",
+                expected_clause: "WHERE ((jsonb_typeof(data->'name') = 'array' AND data->'name' ? 'john') OR COALESCE(data->>'name', '') ILIKE '%john%')",
                 description: "string contains",
             },
             FilterCase {
                 filters: json!({"email": {"_starts_with": "admin"}}),
-                expected_clause: "WHERE string::startsWith(email, 'admin')",
+                expected_clause: "WHERE COALESCE(data->>'email', '') ILIKE 'admin%'",
                 description: "starts with",
             },
             FilterCase {
                 filters: json!({"deleted_at": {"_eq": null}}),
-                expected_clause: "WHERE deleted_at = NONE",
+                expected_clause: "WHERE data->>'deleted_at' IS NULL",
                 description: "null equality",
             },
         ];
@@ -554,8 +554,8 @@ mod query_builder_tests {
             "status": {"_eq": "active"}
         });
         let result = QueryTranslator::filters_to_where(&filters);
-        assert!(result.contains("price > 100"));
-        assert!(result.contains("status = 'active'"));
+        assert!(result.contains("NULLIF(data->>'price', '')::numeric > 100"));
+        assert!(result.contains("data->>'status' = 'active'"));
         assert!(result.contains(" AND "));
     }
 
@@ -615,8 +615,8 @@ mod query_builder_tests {
                 offset: None,
                 expected_contains: vec![
                     "SELECT * FROM products",
-                    "WHERE status = 'active'",
-                    "ORDER BY price DESC",
+                    "WHERE data->>'status' = 'active'",
+                    "ORDER BY NULLIF(data->>'price', '')::numeric DESC",
                     "LIMIT 20",
                 ],
                 should_not_contain: vec!["START"],
@@ -633,7 +633,7 @@ mod query_builder_tests {
                     "SELECT * FROM orders",
                     "ORDER BY created_at ASC",
                     "LIMIT 10",
-                    "START 20",
+                    "OFFSET 20",
                 ],
                 should_not_contain: vec![],
                 description: "with offset (START)",
@@ -770,7 +770,7 @@ mod query_builder_tests {
             None,
             Some("order_99"),
         );
-        assert!(result.contains("status = 'active'"));
+        assert!(result.contains("data->>'status' = 'active'"));
         assert!(result.contains("AND"));
         assert!(result.contains("id >")); // ASC = >
     }
@@ -1192,11 +1192,9 @@ mod crud_tests {
     // CRUD query generation (simulated, without DB)
     // ─────────────────────────────────────────────────────────────────────────
 
-    #[allow(dead_code)]
     struct CrudQueryCase {
         collection: &'static str,
         id: &'static str,
-        operation: &'static str,
         valid: bool,
         description: &'static str,
     }
@@ -1207,42 +1205,36 @@ mod crud_tests {
             CrudQueryCase {
                 collection: "users",
                 id: "abc123",
-                operation: "get",
                 valid: true,
                 description: "get valid user",
             },
             CrudQueryCase {
                 collection: "products",
                 id: "prod-uuid-123",
-                operation: "update",
                 valid: true,
                 description: "update product with hyphenated id",
             },
             CrudQueryCase {
                 collection: "products",
                 id: "prod.v2.latest",
-                operation: "delete",
                 valid: true,
                 description: "delete product with dotted id",
             },
             CrudQueryCase {
                 collection: "bad;table",
                 id: "doc1",
-                operation: "get",
                 valid: false,
                 description: "invalid collection name",
             },
             CrudQueryCase {
                 collection: "users",
                 id: "'; DROP TABLE--",
-                operation: "get",
                 valid: false,
                 description: "SQL injection attempt in id",
             },
             CrudQueryCase {
                 collection: "orders",
                 id: "order' OR 1=1",
-                operation: "update",
                 valid: false,
                 description: "OR injection attempt in id",
             },
@@ -1269,13 +1261,13 @@ mod crud_tests {
     fn test_crud_escape_string_values_in_updates() {
         // When building update queries with string values
         let value = "O'Reilly";
-        let escaped = escape_surreal_string(value);
-        // The escaped value should be safe to use in SurrealQL string literals
+        let escaped = escape_sql_string(value);
+        // The escaped value should be safe to use in SQL string literals
         assert_eq!(escaped, "O\\'Reilly");
 
         // SQL injection attempt
         let injection = "'; DELETE FROM users;--";
-        let escaped_injection = escape_surreal_string(injection);
+        let escaped_injection = escape_sql_string(injection);
         assert!(escaped_injection.starts_with("\\'"));
         assert_eq!(escaped_injection.matches("\\'").count(), 1);
     }
@@ -1350,7 +1342,7 @@ mod edge_case_tests {
         ];
 
         for s in special_chars {
-            let escaped = escape_surreal_string(s);
+            let escaped = escape_sql_string(s);
             // Should not panic, should produce output
             assert!(!escaped.is_empty() || s.is_empty());
         }
@@ -1359,7 +1351,7 @@ mod edge_case_tests {
     #[test]
     fn test_very_long_strings() {
         let long_string = "a".repeat(10_000);
-        let escaped = escape_surreal_string(&long_string);
+        let escaped = escape_sql_string(&long_string);
         assert_eq!(escaped, long_string); // No special chars, should be unchanged
     }
 
@@ -1386,7 +1378,7 @@ mod edge_case_tests {
         let strings = vec!["'''''", "\\\\\\\\", "';'';'", "\\'\\'\\'"];
 
         for s in strings {
-            let escaped = escape_surreal_string(s);
+            let escaped = escape_sql_string(s);
             // Should handle gracefully
             assert!(!escaped.is_empty());
         }
@@ -1402,7 +1394,7 @@ mod edge_case_tests {
         ];
 
         for pattern in patterns {
-            let escaped = escape_surreal_string(pattern);
+            let escaped = escape_sql_string(pattern);
             // All single quotes should be escaped
             for (i, c) in escaped.chars().enumerate() {
                 if c == '\'' {
@@ -1457,7 +1449,7 @@ mod edge_case_tests {
     fn test_injection_across_all_operators() {
         // Test that injection attempts don't work for any operator
         let injection_value = "test' OR 1=1--";
-        let escaped = escape_surreal_string(injection_value);
+        let escaped = escape_sql_string(injection_value);
 
         // Ensure no unescaped single quotes
         for (i, c) in escaped.chars().enumerate() {

@@ -275,10 +275,10 @@ impl Default for SubscriptionRegistry {
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    #[allow(dead_code)]
     fn make_sub(
         id: &str,
         collection: &str,
@@ -374,7 +374,6 @@ mod tests {
 
     // ── Document-level subscription tests ─────────────────────────
 
-    #[allow(dead_code)]
     fn make_doc_sub(
         id: &str,
         collection: &str,

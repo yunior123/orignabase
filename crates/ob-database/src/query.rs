@@ -1,7 +1,7 @@
-use ob_core::{escape_surreal_string, validate_identifier};
+use ob_core::{escape_sql_string, validate_identifier};
 use serde_json::Value;
 
-/// Translates GraphQL-style filter operators into SurrealQL WHERE clauses.
+/// Translates GraphQL-style filter operators into SQL WHERE clauses.
 ///
 /// Supported operators:
 /// - `_eq`: equals
@@ -13,7 +13,80 @@ use serde_json::Value;
 pub struct QueryTranslator;
 
 impl QueryTranslator {
-    /// Convert a filter map `{ field: { _op: value } }` to a SurrealQL WHERE clause.
+    fn is_probably_numeric_field(field: &str) -> bool {
+        matches!(
+            field,
+            "age"
+                | "price"
+                | "priceCents"
+                | "categoryId"
+                | "rating"
+                | "fraudScore"
+                | "avgResponseTimeHours"
+                | "avgShipDays"
+                | "positiveRatePct"
+                | "totalReviews"
+        ) || field.ends_with("Cents")
+            || field.ends_with("Count")
+            || field.ends_with("Quantity")
+            || field.ends_with("Pct")
+            || field.ends_with("Hours")
+            || field.ends_with("Days")
+    }
+
+    fn sql_field_expr(field: &str) -> Option<String> {
+        if validate_identifier(field).is_err() {
+            tracing::warn!("Rejected invalid field name in query builder: {field}");
+            return None;
+        }
+
+        Some(match field {
+            "id" => "id".to_string(),
+            "createdAt" | "created_at" => "created_at".to_string(),
+            "updatedAt" | "updated_at" => "updated_at".to_string(),
+            _ if Self::is_probably_numeric_field(field) => {
+                format!("NULLIF(data->>'{field}', '')::numeric")
+            }
+            _ => format!("data->>'{field}'"),
+        })
+    }
+
+    fn sql_json_value_expr(field: &str) -> Option<String> {
+        if validate_identifier(field).is_err() {
+            tracing::warn!("Rejected invalid field name in query builder: {field}");
+            return None;
+        }
+
+        Some(match field {
+            "id" => "to_jsonb(id)".to_string(),
+            "createdAt" | "created_at" => "to_jsonb(created_at)".to_string(),
+            "updatedAt" | "updated_at" => "to_jsonb(updated_at)".to_string(),
+            _ => format!("data->'{field}'"),
+        })
+    }
+
+    fn sql_typed_field_expr(field: &str, value: &Value) -> Option<String> {
+        if validate_identifier(field).is_err() {
+            tracing::warn!("Rejected invalid field name in query builder: {field}");
+            return None;
+        }
+
+        match value {
+            Value::Number(_) => Some(match field {
+                "createdAt" | "created_at" => "EXTRACT(EPOCH FROM created_at)".to_string(),
+                "updatedAt" | "updated_at" => "EXTRACT(EPOCH FROM updated_at)".to_string(),
+                "id" => "id".to_string(),
+                _ => format!("NULLIF(data->>'{field}', '')::numeric"),
+            }),
+            Value::Bool(_) => Some(match field {
+                "id" => "id".to_string(),
+                _ => format!("NULLIF(data->>'{field}', '')::boolean"),
+            }),
+            _ => Self::sql_field_expr(field),
+        }
+    }
+
+    /// Convert a filter map to a SQL WHERE clause.
     pub fn filters_to_where(filters: &Value) -> String {
         let Some(obj) = filters.as_object() else {
             return String::new();
@@ -39,34 +112,79 @@ impl QueryTranslator {
     }
 
     fn translate_op(field: &str, op: &str, value: &Value) -> Option<String> {
-        // Validate field name to prevent SurrealQL injection
+        // Validate field name to prevent SQL injection
         if validate_identifier(field).is_err() {
             tracing::warn!("Rejected invalid field name in filter: {field}");
             return None;
         }
-        let val_str = Self::value_to_surreal(value);
         match op {
-            "_eq" => Some(format!("{field} = {val_str}")),
-            "_neq" => Some(format!("{field} != {val_str}")),
-            "_gt" => Some(format!("{field} > {val_str}")),
-            "_gte" => Some(format!("{field} >= {val_str}")),
-            "_lt" => Some(format!("{field} < {val_str}")),
-            "_lte" => Some(format!("{field} <= {val_str}")),
+            "_eq" => {
+                let field_expr = Self::sql_typed_field_expr(field, value)?;
+                let val_str = Self::format_sql_literal(value);
+                if value.is_null() {
+                    Some(format!("{field_expr} IS NULL"))
+                } else {
+                    Some(format!("{field_expr} = {val_str}"))
+                }
+            }
+            "_neq" => {
+                let field_expr = Self::sql_typed_field_expr(field, value)?;
+                let val_str = Self::format_sql_literal(value);
+                if value.is_null() {
+                    Some(format!("{field_expr} IS NOT NULL"))
+                } else {
+                    Some(format!("{field_expr} != {val_str}"))
+                }
+            }
+            "_gt" => {
+                let field_expr = Self::sql_typed_field_expr(field, value)?;
+                let val_str = Self::format_sql_literal(value);
+                Some(format!("{field_expr} > {val_str}"))
+            }
+            "_gte" => {
+                let field_expr = Self::sql_typed_field_expr(field, value)?;
+                let val_str = Self::format_sql_literal(value);
+                Some(format!("{field_expr} >= {val_str}"))
+            }
+            "_lt" => {
+                let field_expr = Self::sql_typed_field_expr(field, value)?;
+                let val_str = Self::format_sql_literal(value);
+                Some(format!("{field_expr} < {val_str}"))
+            }
+            "_lte" => {
+                let field_expr = Self::sql_typed_field_expr(field, value)?;
+                let val_str = Self::format_sql_literal(value);
+                Some(format!("{field_expr} <= {val_str}"))
+            }
             "_in" => {
                 if let Some(arr) = value.as_array() {
-                    let items: Vec<String> = arr.iter().map(Self::value_to_surreal).collect();
-                    Some(format!("{field} IN [{}]", items.join(", ")))
+                    let expr_hint = arr.first().unwrap_or(&Value::Null);
+                    let field_expr = Self::sql_typed_field_expr(field, expr_hint)?;
+                    let items: Vec<String> = arr.iter().map(Self::format_sql_literal).collect();
+                    Some(format!("{field_expr} IN ({})", items.join(", ")))
                 } else {
                     None
                 }
             }
-            "_contains" => Some(format!("{field} CONTAINS {val_str}")),
-            "_starts_with" => value.as_str().map(|s| {
+            "_contains" => value.as_str().map(|s| {
+                let escaped = escape_sql_string(s);
+                let json_expr = Self::sql_json_value_expr(field)
+                    .unwrap_or_else(|| format!("data->'{field}'"));
+                let text_expr = Self::sql_field_expr(field)
+                    .unwrap_or_else(|| format!("data->>'{field}'"));
                 format!(
-                    "string::startsWith({field}, '{}')",
-                    escape_surreal_string(s)
+                    "((jsonb_typeof({json_expr}) = 'array' AND {json_expr} ? '{escaped}') OR COALESCE({text_expr}, '') ILIKE '%{escaped}%')"
                 )
             }),
+            "_starts_with" => {
+                let field_expr = Self::sql_field_expr(field)?;
+                value.as_str().map(|s| {
+                    format!(
+                        "COALESCE({field_expr}, '') ILIKE '{}%'",
+                        escape_sql_string(s)
+                    )
+                })
+            }
             _ => {
                 tracing::warn!("Unknown filter operator: {op}");
                 None
@@ -74,13 +192,19 @@ impl QueryTranslator {
         }
     }
 
-    fn value_to_surreal(value: &Value) -> String {
+    fn format_sql_literal(value: &Value) -> String {
         match value {
-            Value::String(s) => format!("'{}'", escape_surreal_string(s)),
+            Value::String(s) => format!("'{}'", escape_sql_string(s)),
             Value::Number(n) => n.to_string(),
-            Value::Bool(b) => b.to_string(),
-            Value::Null => "NONE".to_string(),
-            _ => value.to_string(),
+            Value::Bool(b) => {
+                if *b {
+                    "true".to_string()
+                } else {
+                    "false".to_string()
+                }
+            }
+            Value::Null => "NULL".to_string(),
+            _ => format!("'{}'", escape_sql_string(&value.to_string())),
         }
     }
 
@@ -113,6 +237,11 @@ impl QueryTranslator {
         fields: Option<&[&str]>,
         start_after: Option<&str>,
     ) -> String {
+        if validate_identifier(collection).is_err() {
+            tracing::warn!("Rejected invalid collection name in query builder: {collection}");
+            return "SELECT * FROM _invalid_collection WHERE false".to_string();
+        }
+
         // Field projection
         let select_fields = match fields {
             Some(f) if !f.is_empty() => {
@@ -152,14 +281,17 @@ impl QueryTranslator {
 
         // Cursor-based pagination: startAfter
         if let Some(cursor_id) = start_after {
-            let safe_cursor = escape_surreal_string(cursor_id);
+            let safe_cursor = escape_sql_string(cursor_id);
             let order_field = order_by.unwrap_or("id");
-            // Validate the order field used in cursor comparison
-            if validate_identifier(order_field).is_ok() {
+            if let Some(order_expr) = Self::sql_field_expr(order_field) {
                 let op = if descending { "<" } else { ">" };
-                where_parts.push(format!(
-                    "{order_field} {op} type::thing('{collection}', '{safe_cursor}').{order_field}"
-                ));
+                if order_field == "id" {
+                    where_parts.push(format!("id {op} '{safe_cursor}'"));
+                } else {
+                    where_parts.push(format!(
+                        "{order_expr} {op} (SELECT {order_expr} FROM {collection} WHERE id = '{safe_cursor}')"
+                    ));
+                }
             } else {
                 tracing::warn!("Rejected invalid cursor order field: {order_field}");
             }
@@ -170,10 +302,9 @@ impl QueryTranslator {
         }
 
         if let Some(field) = order_by {
-            // Validate order_by field to prevent SurrealQL injection
-            if validate_identifier(field).is_ok() {
+            if let Some(order_expr) = Self::sql_field_expr(field) {
                 let dir = if descending { "DESC" } else { "ASC" };
-                query.push_str(&format!(" ORDER BY {field} {dir}"));
+                query.push_str(&format!(" ORDER BY {order_expr} {dir}"));
             } else {
                 tracing::warn!("Rejected invalid order_by field: {field}");
             }
@@ -184,7 +315,7 @@ impl QueryTranslator {
         }
 
         if let Some(n) = offset {
-            query.push_str(&format!(" START {n}"));
+            query.push_str(&format!(" OFFSET {n}"));
         }
 
         query
@@ -202,7 +333,7 @@ mod tests {
             "status": { "_eq": "active" }
         });
         let result = QueryTranslator::filters_to_where(&filters);
-        assert_eq!(result, "WHERE status = 'active'");
+        assert_eq!(result, "WHERE data->>'status' = 'active'");
     }
 
     #[test]
@@ -212,8 +343,8 @@ mod tests {
             "status": { "_eq": "active" }
         });
         let result = QueryTranslator::filters_to_where(&filters);
-        assert!(result.contains("price > 100"));
-        assert!(result.contains("status = 'active'"));
+        assert!(result.contains("NULLIF(data->>'price', '')::numeric > 100"));
+        assert!(result.contains("data->>'status' = 'active'"));
         assert!(result.contains(" AND "));
     }
 
@@ -223,7 +354,10 @@ mod tests {
             "category": { "_in": ["electronics", "books"] }
         });
         let result = QueryTranslator::filters_to_where(&filters);
-        assert_eq!(result, "WHERE category IN ['electronics', 'books']");
+        assert_eq!(
+            result,
+            "WHERE data->>'category' IN ('electronics', 'books')"
+        );
     }
 
     #[test]
@@ -239,7 +373,7 @@ mod tests {
         );
         assert_eq!(
             query,
-            "SELECT * FROM products WHERE status = 'active' ORDER BY created_at DESC LIMIT 20"
+            "SELECT * FROM products WHERE data->>'status' = 'active' ORDER BY created_at DESC LIMIT 20"
         );
     }
 
@@ -253,42 +387,45 @@ mod tests {
     fn test_neq_filter() {
         let filters = json!({ "status": { "_neq": "deleted" } });
         let result = QueryTranslator::filters_to_where(&filters);
-        assert_eq!(result, "WHERE status != 'deleted'");
+        assert_eq!(result, "WHERE data->>'status' != 'deleted'");
     }
 
     #[test]
     fn test_gte_filter() {
         let filters = json!({ "age": { "_gte": 18 } });
         let result = QueryTranslator::filters_to_where(&filters);
-        assert_eq!(result, "WHERE age >= 18");
+        assert_eq!(result, "WHERE NULLIF(data->>'age', '')::numeric >= 18");
     }
 
     #[test]
     fn test_lte_filter() {
         let filters = json!({ "price": { "_lte": 99.99 } });
         let result = QueryTranslator::filters_to_where(&filters);
-        assert_eq!(result, "WHERE price <= 99.99");
+        assert_eq!(result, "WHERE NULLIF(data->>'price', '')::numeric <= 99.99");
     }
 
     #[test]
     fn test_lt_filter() {
         let filters = json!({ "count": { "_lt": 5 } });
         let result = QueryTranslator::filters_to_where(&filters);
-        assert_eq!(result, "WHERE count < 5");
+        assert_eq!(result, "WHERE NULLIF(data->>'count', '')::numeric < 5");
     }
 
     #[test]
     fn test_contains_filter() {
         let filters = json!({ "name": { "_contains": "test" } });
         let result = QueryTranslator::filters_to_where(&filters);
-        assert_eq!(result, "WHERE name CONTAINS 'test'");
+        assert_eq!(
+            result,
+            "WHERE ((jsonb_typeof(data->'name') = 'array' AND data->'name' ? 'test') OR COALESCE(data->>'name', '') ILIKE '%test%')"
+        );
     }
 
     #[test]
     fn test_starts_with_filter() {
         let filters = json!({ "email": { "_starts_with": "admin" } });
         let result = QueryTranslator::filters_to_where(&filters);
-        assert_eq!(result, "WHERE string::startsWith(email, 'admin')");
+        assert_eq!(result, "WHERE COALESCE(data->>'email', '') ILIKE 'admin%'");
     }
 
     #[test]
@@ -314,26 +451,57 @@ mod tests {
     }
 
     #[test]
-    fn test_value_to_surreal_bool() {
+    fn test_format_sql_literal_bool() {
         let filters = json!({ "active": { "_eq": true } });
         let result = QueryTranslator::filters_to_where(&filters);
-        assert_eq!(result, "WHERE active = true");
+        assert_eq!(result, "WHERE NULLIF(data->>'active', '')::boolean = true");
     }
 
     #[test]
-    fn test_value_to_surreal_null() {
+    fn test_bool_false_filter_does_not_match_missing_values() {
+        let filters = json!({ "active": { "_eq": false } });
+        let result = QueryTranslator::filters_to_where(&filters);
+        assert_eq!(result, "WHERE NULLIF(data->>'active', '')::boolean = false");
+    }
+
+    #[test]
+    fn test_bool_not_true_filter_does_not_treat_missing_as_false() {
+        let filters = json!({ "deleted": { "_neq": true } });
+        let result = QueryTranslator::filters_to_where(&filters);
+        assert_eq!(
+            result,
+            "WHERE NULLIF(data->>'deleted', '')::boolean != true"
+        );
+    }
+
+    #[test]
+    fn test_numeric_eq_filter_uses_numeric_cast() {
+        let filters = json!({ "categoryId": { "_eq": 1 } });
+        let result = QueryTranslator::filters_to_where(&filters);
+        assert_eq!(result, "WHERE NULLIF(data->>'categoryId', '')::numeric = 1");
+    }
+
+    #[test]
+    fn test_format_sql_literal_null() {
         let filters = json!({ "deleted_at": { "_eq": null } });
         let result = QueryTranslator::filters_to_where(&filters);
-        assert_eq!(result, "WHERE deleted_at = NONE");
+        assert_eq!(result, "WHERE data->>'deleted_at' IS NULL");
     }
 
     #[test]
-    fn test_value_to_surreal_non_primitive() {
+    fn test_format_sql_literal_non_primitive() {
         // An object value gets serialized via serde_json::to_string
         let filters = json!({ "meta": { "_eq": {"key": "val"} } });
         let result = QueryTranslator::filters_to_where(&filters);
-        assert!(result.contains("meta = "));
+        assert!(result.contains("data->>'meta' = "));
         assert!(result.contains("key"));
+    }
+
+    #[test]
+    fn test_filters_use_id_column_directly() {
+        let filters = json!({ "id": { "_eq": "abc123" } });
+        let result = QueryTranslator::filters_to_where(&filters);
+        assert_eq!(result, "WHERE id = 'abc123'");
     }
 
     #[test]
@@ -348,7 +516,7 @@ mod tests {
         );
         assert_eq!(
             query,
-            "SELECT * FROM products ORDER BY created_at DESC LIMIT 10 START 20"
+            "SELECT * FROM products ORDER BY created_at DESC LIMIT 10 OFFSET 20"
         );
     }
 
@@ -356,7 +524,10 @@ mod tests {
     fn test_build_select_ascending_order() {
         let query =
             QueryTranslator::build_select("events", None, Some("timestamp"), false, None, None);
-        assert_eq!(query, "SELECT * FROM events ORDER BY timestamp ASC");
+        assert_eq!(
+            query,
+            "SELECT * FROM events ORDER BY data->>'timestamp' ASC"
+        );
     }
 
     #[test]
@@ -426,7 +597,7 @@ mod tests {
         let query = QueryTranslator::build_select_ext(
             "products",
             None,
-            Some("created_at"),
+            Some("createdAt"),
             true,
             Some(20),
             None,
@@ -436,6 +607,7 @@ mod tests {
         assert!(query.contains("WHERE"));
         assert!(query.contains("created_at <"));
         assert!(query.contains("ORDER BY created_at DESC"));
+        assert!(query.contains("SELECT created_at FROM products WHERE id = 'abc123'"));
         assert!(query.contains("LIMIT 20"));
     }
 
@@ -452,9 +624,24 @@ mod tests {
             None,
             Some("order_99"),
         );
-        assert!(query.contains("status = 'active'"));
+        assert!(query.contains("data->>'status' = 'active'"));
         assert!(query.contains("AND"));
         assert!(query.contains("id >"));
+    }
+
+    #[test]
+    fn test_build_select_ext_orders_json_field_via_data_extraction() {
+        let query = QueryTranslator::build_select_ext(
+            "products",
+            None,
+            Some("priceCents"),
+            true,
+            Some(5),
+            None,
+            None,
+            None,
+        );
+        assert!(query.contains("ORDER BY NULLIF(data->>'priceCents', '')::numeric DESC"));
     }
 
     #[test]

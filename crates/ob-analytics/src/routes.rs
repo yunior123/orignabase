@@ -55,7 +55,7 @@ pub async fn ingest_event(
         browser: request.browser,
     };
 
-    // Persist to SurrealDB
+    // Persist to PostgreSQL
     let event_json =
         serde_json::to_value(&event).map_err(|e| ob_core::Error::Internal(e.to_string()))?;
     state
@@ -76,7 +76,7 @@ pub async fn ingest_event(
 pub async fn get_stats() -> Result<Json<serde_json::Value>> {
     // Placeholder — would query _analytics_rollup table
     Ok(Json(serde_json::json!({
-        "message": "Analytics stats endpoint. Connect SurrealDB for data."
+        "message": "Analytics stats endpoint. Connect PostgreSQL for data."
     })))
 }
 

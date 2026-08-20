@@ -6,11 +6,8 @@ Config {
     host: "0.0.0.0",
     port: 8080,
     database: DatabaseConfig {
-        endpoint: "localhost:8000",
-        namespace: "orignabase",
-        name: "main",
-        username: None,
-        password: None,
+        url: "postgres://orignabase:orignabase_dev@localhost:5432/orignabase",
+        max_connections: 20,
     },
     auth: AuthConfig {
         jwt_secret: "CHANGE_ME_IN_PRODUCTION",
@@ -33,6 +30,14 @@ Config {
         header_name: "X-Tenant-ID",
     },
     search: None,
+    cors: CorsConfig {
+        allowed_origins: [
+            "https://orignagta.ca",
+            "https://www.orignagta.ca",
+            "https://dev.orignagta.ca",
+            "https://staging.orignagta.ca",
+        ],
+    },
     secrets: SecretsConfig {
         values: {},
     },

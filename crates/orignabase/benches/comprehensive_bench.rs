@@ -4,6 +4,7 @@
 //! Run with: `cargo bench --bench comprehensive_bench`
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use ob_database::fields;
 use serde_json::{Value, json};
 use std::time::Instant;
 
@@ -56,7 +57,7 @@ async fn create_doc(
     let query = format!(r#"mutation {{ create(collection: "{collection}", data: {escaped}) }}"#);
     let body = graphql_req(client, token, &query).await;
     let result = &body["data"]["create"];
-    result["id"]
+    result[fields::ID]
         .as_str()
         .or_else(|| result["_id"].as_str())
         .unwrap_or("")
@@ -327,11 +328,10 @@ fn bench_batch_update(c: &mut Criterion) {
                 b.iter(|| {
                     rt.block_on(async {
                         let mut handles = Vec::with_capacity(size as usize);
-                        for (i, doc_id) in doc_ids.iter().take(size as usize).enumerate() {
+                        for (i, doc_id) in doc_ids.iter().take(size as usize).cloned().enumerate() {
                             let client = client.clone();
                             let token = token.clone();
                             let col = col.clone();
-                            let doc_id = doc_id.clone();
                             handles.push(tokio::spawn(async move {
                                 update_doc(
                                     &client,

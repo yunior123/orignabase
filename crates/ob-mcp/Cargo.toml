@@ -17,6 +17,8 @@ ob-handlers = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
+tower_governor = { workspace = true }
+governor = { workspace = true }
 
 # Async runtime
 tokio = { workspace = true }
@@ -42,3 +44,4 @@ chrono = { workspace = true }
 tokio-test = { workspace = true }
 rstest = { workspace = true }
 proptest = { workspace = true }
+serial_test = "3"

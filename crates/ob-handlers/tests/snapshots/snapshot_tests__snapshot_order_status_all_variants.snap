@@ -3,12 +3,12 @@ source: crates/ob-handlers/tests/snapshot_tests.rs
 expression: json
 ---
 [
-  "PENDING_PAYMENT",
-  "PAYMENT_AUTHORIZED",
-  "AWAITING_SHIPPING_APPROVAL",
-  "PROCESSING",
-  "SHIPPED",
-  "DELIVERED",
-  "CANCELLED",
-  "REFUNDED"
+  "pending",
+  "confirmed",
+  "awaiting_shipping_approval",
+  "processing",
+  "shipped",
+  "delivered",
+  "cancelled",
+  "refunded"
 ]

@@ -137,11 +137,22 @@ class OrignaBase {
   static const _initialBackoff = Duration(seconds: 1);
   static const _maxBackoff = Duration(seconds: 60);
 
+  /// Single-flight completer for token refresh.
+  /// Prevents parallel refresh storms when multiple requests get 401 simultaneously.
+  Completer<bool>? _refreshCompleter;
+
+  /// Auth paths that should never trigger a 401 refresh-and-retry cycle.
+  static const _authPaths = {'/auth/login', '/auth/register', '/auth/refresh'};
+
   /// Execute a raw HTTP request against the OrignaBase server.
   ///
   /// Automatically retries with exponential backoff on 429 (rate limit) responses.
   /// Starts at 1s, doubles each attempt (1s -> 2s -> 4s), max 3 retries, capped at 60s.
   /// Respects `Retry-After` header from the server when present.
+  ///
+  /// On 401 (expired token), attempts a single token refresh and retries the
+  /// original request. Uses a single-flight pattern to prevent parallel refresh
+  /// storms when multiple requests receive 401 simultaneously.
   Future<Map<String, dynamic>> request(
     String method,
     String path, {
@@ -149,11 +160,45 @@ class OrignaBase {
     Map<String, String>? headers,
   }) async {
     for (int attempt = 0; attempt <= _maxRetries; attempt++) {
-      final response = await _executeHttp(method, path, body: body, headers: headers);
+      final response =
+          await _executeHttp(method, path, body: body, headers: headers);
 
       if (response.statusCode >= 200 && response.statusCode < 300) {
         if (response.body.isEmpty) return {};
-        return jsonDecode(response.body) as Map<String, dynamic>;
+        try {
+          return jsonDecode(response.body) as Map<String, dynamic>;
+        } on FormatException {
+          throw OrignaBaseException(
+            'Invalid JSON in response body',
+            statusCode: response.statusCode,
+          );
+        }
+      }
+
+      // On 401, attempt a single token refresh and retry (skip for auth paths).
+      if (response.statusCode == 401 && !_authPaths.contains(path)) {
+        final refreshed = await _refreshTokenOnce();
+        if (refreshed) {
+          // Retry the original request with the new token.
+          final retryResponse =
+              await _executeHttp(method, path, body: body, headers: headers);
+          if (retryResponse.statusCode >= 200 &&
+              retryResponse.statusCode < 300) {
+            if (retryResponse.body.isEmpty) return {};
+            try {
+              return jsonDecode(retryResponse.body) as Map<String, dynamic>;
+            } on FormatException {
+              throw OrignaBaseException(
+                'Invalid JSON in response body',
+                statusCode: retryResponse.statusCode,
+              );
+            }
+          }
+          // Retry also failed — throw based on retry response.
+          _throwForStatus(retryResponse);
+        }
+        // Refresh failed — throw the original 401 error.
+        _throwForStatus(response);
       }
 
       // On 429, retry with exponential backoff (unless we've exhausted retries).
@@ -178,6 +223,29 @@ class OrignaBase {
 
     // Should never reach here, but satisfy the type system.
     throw OrignaBaseException('Request failed after $_maxRetries retries');
+  }
+
+  /// Attempt to refresh the access token exactly once.
+  /// Returns true if refresh succeeded, false otherwise.
+  /// Uses a [Completer]-based single-flight pattern so concurrent callers
+  /// all wait on the same refresh operation.
+  Future<bool> _refreshTokenOnce() async {
+    // If a refresh is already in progress, wait for it.
+    if (_refreshCompleter != null) {
+      return _refreshCompleter!.future;
+    }
+
+    _refreshCompleter = Completer<bool>();
+    try {
+      await auth.refreshToken();
+      _refreshCompleter!.complete(true);
+      return true;
+    } catch (_) {
+      _refreshCompleter!.complete(false);
+      return false;
+    } finally {
+      _refreshCompleter = null;
+    }
   }
 
   /// Calculate exponential backoff duration for the given attempt.
@@ -208,26 +276,32 @@ class OrignaBase {
     try {
       switch (method.toUpperCase()) {
         case 'GET':
-          return await _httpClient.get(uri, headers: requestHeaders)
+          return await _httpClient
+              .get(uri, headers: requestHeaders)
               .timeout(const Duration(seconds: 30));
         case 'POST':
-          return await _httpClient.post(
-            uri,
-            headers: requestHeaders,
-            body: body != null ? jsonEncode(body) : null,
-          ).timeout(const Duration(seconds: 30));
+          return await _httpClient
+              .post(
+                uri,
+                headers: requestHeaders,
+                body: body != null ? jsonEncode(body) : null,
+              )
+              .timeout(const Duration(seconds: 30));
         case 'PUT':
-          return await _httpClient.put(
-            uri,
-            headers: requestHeaders,
-            body: body != null ? jsonEncode(body) : null,
-          ).timeout(const Duration(seconds: 30));
+          return await _httpClient
+              .put(
+                uri,
+                headers: requestHeaders,
+                body: body != null ? jsonEncode(body) : null,
+              )
+              .timeout(const Duration(seconds: 30));
         case 'DELETE':
           // Use Request directly to support body in DELETE (needed by push, config)
           final deleteRequest = http.Request('DELETE', uri);
           deleteRequest.headers.addAll(requestHeaders);
           if (body != null) deleteRequest.body = jsonEncode(body);
-          final streamedResponse = await _httpClient.send(deleteRequest)
+          final streamedResponse = await _httpClient
+              .send(deleteRequest)
               .timeout(const Duration(seconds: 30));
           return await http.Response.fromStream(streamedResponse);
         default:

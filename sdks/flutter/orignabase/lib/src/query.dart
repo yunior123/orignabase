@@ -11,7 +11,9 @@ class QueryFilter {
   QueryFilter(this.field, this.operator, this.value);
 
   Map<String, dynamic> toGraphQL() {
-    return {field: {'_$operator': value}};
+    return {
+      field: {'_$operator': value}
+    };
   }
 }
 
@@ -49,7 +51,8 @@ class Query {
         _limitCount = other._limitCount,
         _offsetCount = other._offsetCount,
         _startAfter = other._startAfter,
-        _selectFields = other._selectFields != null ? List.of(other._selectFields!) : null;
+        _selectFields =
+            other._selectFields != null ? List.of(other._selectFields!) : null;
 
   /// Add a filter condition. Returns a new Query (immutable pattern).
   Query where(
@@ -66,14 +69,21 @@ class Query {
   }) {
     final q = Query._copy(this);
     if (isEqualTo != null) q._filters.add(QueryFilter(field, 'eq', isEqualTo));
-    if (isNotEqualTo != null) q._filters.add(QueryFilter(field, 'ne', isNotEqualTo));
-    if (isGreaterThan != null) q._filters.add(QueryFilter(field, 'gt', isGreaterThan));
-    if (isGreaterThanOrEqualTo != null) q._filters.add(QueryFilter(field, 'gte', isGreaterThanOrEqualTo));
-    if (isLessThan != null) q._filters.add(QueryFilter(field, 'lt', isLessThan));
-    if (isLessThanOrEqualTo != null) q._filters.add(QueryFilter(field, 'lte', isLessThanOrEqualTo));
+    if (isNotEqualTo != null)
+      q._filters.add(QueryFilter(field, 'ne', isNotEqualTo));
+    if (isGreaterThan != null)
+      q._filters.add(QueryFilter(field, 'gt', isGreaterThan));
+    if (isGreaterThanOrEqualTo != null)
+      q._filters.add(QueryFilter(field, 'gte', isGreaterThanOrEqualTo));
+    if (isLessThan != null)
+      q._filters.add(QueryFilter(field, 'lt', isLessThan));
+    if (isLessThanOrEqualTo != null)
+      q._filters.add(QueryFilter(field, 'lte', isLessThanOrEqualTo));
     if (whereIn != null) q._filters.add(QueryFilter(field, 'in', whereIn));
-    if (contains != null) q._filters.add(QueryFilter(field, 'contains', contains));
-    if (startsWith != null) q._filters.add(QueryFilter(field, 'starts_with', startsWith));
+    if (contains != null)
+      q._filters.add(QueryFilter(field, 'contains', contains));
+    if (startsWith != null)
+      q._filters.add(QueryFilter(field, 'starts_with', startsWith));
     return q;
   }
 
@@ -129,7 +139,12 @@ class Query {
     if (_orderByField != null) args.add('orderBy: "$_orderByField"');
     if (_descending) args.add('descending: true');
     if (_limitCount != null) args.add('limit: $_limitCount');
-    if (_offsetCount != null) args.add('offset: $_offsetCount');
+    // Some backends reject `offset: 0` on otherwise-empty result sets even
+    // though it is semantically a no-op. Omit zero so first-page queries
+    // remain stable across server implementations.
+    if (_offsetCount != null && _offsetCount! > 0) {
+      args.add('offset: $_offsetCount');
+    }
     if (_startAfter != null) args.add('startAfter: "$_startAfter"');
     if (_selectFields != null && _selectFields!.isNotEmpty) {
       args.add('select: ${toGraphQLValue(_selectFields)}');
@@ -172,7 +187,9 @@ class Query {
     for (final f in _filters) {
       final m = f.toGraphQL();
       for (final entry in m.entries) {
-        if (merged.containsKey(entry.key) && merged[entry.key] is Map && entry.value is Map) {
+        if (merged.containsKey(entry.key) &&
+            merged[entry.key] is Map &&
+            entry.value is Map) {
           (merged[entry.key] as Map).addAll(entry.value as Map);
         } else {
           merged[entry.key] = entry.value;

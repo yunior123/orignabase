@@ -22,12 +22,14 @@ class _SubEntry {
   final String id;
   final String collection;
   final String? documentId;
+  final String? filter;
   final StreamController<DocumentChange> controller;
 
   _SubEntry({
     required this.id,
     required this.collection,
     this.documentId,
+    this.filter,
     required this.controller,
   });
 }
@@ -44,6 +46,10 @@ class RealtimeClient {
 
   /// All active subscriptions keyed by subscription ID.
   final _subs = <String, _SubEntry>{};
+
+  /// Monotonic counter to guarantee unique subscription IDs even within
+  /// the same millisecond.
+  int _subCounter = 0;
 
   bool _disconnecting = false;
   Timer? _reconnectTimer;
@@ -77,12 +83,17 @@ class RealtimeClient {
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
 
+    // P1-23: Cancel the previous listener before creating a new one to prevent
+    // leaked StreamSubscriptions accumulating on every reconnect.
+    _listener?.cancel();
+    _listener = null;
+
     final baseUri = Uri.parse(_client.url);
     final wsScheme = baseUri.scheme == 'https' ? 'wss' : 'ws';
     // Explicit port to avoid Dart URI defaulting wss to port 0.
-    final port = baseUri.hasPort
-        ? baseUri.port
-        : (baseUri.scheme == 'https' ? 443 : 80);
+    final port =
+        baseUri.hasPort ? baseUri.port : (baseUri.scheme == 'https' ? 443 : 80);
+    // Use query param auth (server expects ?token=<jwt>, not Authorization header)
     final wsUri = Uri(
       scheme: wsScheme,
       host: baseUri.host,
@@ -93,19 +104,28 @@ class RealtimeClient {
           : null,
     );
 
-    _channel = WebSocketChannel.connect(wsUri);
-    _listener = _channel!.stream.listen(
-      _handleMessage,
-      onDone: _scheduleReconnect,
-      onError: (_) => _scheduleReconnect(),
-    );
+    try {
+      _channel = WebSocketChannel.connect(wsUri);
+      _listener = _channel!.stream.listen(
+        _handleMessage,
+        onDone: _scheduleReconnect,
+        onError: (_) => _scheduleReconnect(),
+      );
 
-    // Re-register all active subscriptions after (re)connect.
-    for (final sub in _subs.values) {
-      _sendSubscribe(sub);
+      // Catch the WebSocket ready future so DNS/connection errors don't leak
+      // into the current zone as unhandled async exceptions.
+      _channel!.ready.catchError((_) => _scheduleReconnect());
+
+      // Re-register all active subscriptions after (re)connect.
+      for (final sub in _subs.values) {
+        _sendSubscribe(sub);
+      }
+
+      _reconnectAttempts = 0;
+    } catch (_) {
+      // Connection setup failed synchronously — schedule retry.
+      _scheduleReconnect();
     }
-
-    _reconnectAttempts = 0;
   }
 
   void _scheduleReconnect() {
@@ -148,7 +168,7 @@ class RealtimeClient {
   Stream<DocumentChange> subscribeDocument(
       String collection, String documentId) {
     final subId =
-        '${collection}_${documentId}_${DateTime.now().millisecondsSinceEpoch}';
+        '${collection}_${documentId}_${DateTime.now().millisecondsSinceEpoch}_${_subCounter++}';
     final entry = _SubEntry(
       id: subId,
       collection: collection,
@@ -164,10 +184,12 @@ class RealtimeClient {
 
   /// Subscribe to changes on a collection.
   Stream<DocumentChange> subscribe(String collection, {String? filter}) {
-    final subId = '${collection}_${DateTime.now().millisecondsSinceEpoch}';
+    final subId =
+        '${collection}_${DateTime.now().millisecondsSinceEpoch}_${_subCounter++}';
     final entry = _SubEntry(
       id: subId,
       collection: collection,
+      filter: filter,
       controller: StreamController<DocumentChange>.broadcast(
         onCancel: () => _unsubscribe(subId),
       ),
@@ -183,6 +205,7 @@ class RealtimeClient {
       'id': sub.id,
       'collection': sub.collection,
       if (sub.documentId != null) 'document_id': sub.documentId,
+      if (sub.filter != null) 'filter': sub.filter,
     };
     try {
       _channel?.sink.add(jsonEncode(msg));

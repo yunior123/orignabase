@@ -1,4 +1,4 @@
 pub mod resolvers;
 pub mod schema;
 
-pub use schema::build_schema;
+pub use schema::{GraphQlLimits, build_schema, build_schema_with_limits};

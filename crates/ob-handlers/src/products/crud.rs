@@ -10,8 +10,13 @@ use tracing::{info, warn};
 
 use crate::HandlersState;
 use crate::shared::auth::{require_authenticated, resolve_self_user_id};
+use crate::shared::nutrition::{
+    FoodMetadata, NutritionFacts, compute_fop_warnings, validate_food_metadata,
+    validate_nutrition_facts,
+};
 use crate::shared::schema::{collections, fields};
 use crate::shared::validation::{sanitize_html, validate_string, validate_uid};
+use ob_database::fields as db_fields;
 
 const DEFAULT_PAGE_SIZE: u32 = 20;
 const MAX_PAGE_SIZE: u32 = 100;
@@ -53,6 +58,11 @@ fn validate_image_url(url: &str) -> Result<(), ob_core::Error> {
 
 /// Validate product lifecycle state transition.
 fn validate_lifecycle_transition(from_state: &str, to_state: &str) -> Result<(), ob_core::Error> {
+    // No-op: same state is always valid
+    if from_state == to_state {
+        return Ok(());
+    }
+
     let valid_transitions = match from_state {
         "draft" => vec!["active", "archived"],
         "active" => vec!["inactive", "archived"],
@@ -105,6 +115,98 @@ fn validate_price_and_stock(
 
     Ok(())
 }
+/// Validate and process nutrition data on a product object.
+///
+/// If `nutritionFacts` is present, validates it and auto-computes FOP warnings.
+/// If `foodMetadata` is present, validates allergens and dietary badges.
+/// FOP flags are set on `foodMetadata` based on `nutritionFacts` values.
+fn validate_and_process_nutrition(
+    obj: &mut serde_json::Map<String, Value>,
+) -> Result<(), ob_core::Error> {
+    // Validate nutritionFacts if present
+    let nutrition_facts: Option<NutritionFacts> = obj
+        .get(fields::NUTRITION_FACTS)
+        .filter(|v| !v.is_null())
+        .map(|v| serde_json::from_value(v.clone()))
+        .transpose()
+        .map_err(|e| ob_core::Error::Validation(format!("Invalid nutritionFacts: {e}")))?;
+
+    if let Some(ref nf) = nutrition_facts {
+        validate_nutrition_facts(nf)?;
+    }
+
+    // Validate foodMetadata if present
+    let food_metadata: Option<FoodMetadata> = obj
+        .get(fields::FOOD_METADATA)
+        .filter(|v| !v.is_null())
+        .map(|v| serde_json::from_value(v.clone()))
+        .transpose()
+        .map_err(|e| ob_core::Error::Validation(format!("Invalid foodMetadata: {e}")))?;
+
+    if let Some(ref fm) = food_metadata {
+        validate_food_metadata(fm)?;
+    }
+
+    // Auto-compute FOP warnings when nutritionFacts is present
+    if let Some(ref nf) = nutrition_facts {
+        let (high_sodium, high_sugars, high_sat_fat) = compute_fop_warnings(nf);
+
+        // Merge FOP flags into foodMetadata (create if absent)
+        let mut fm = food_metadata.unwrap_or_default();
+        fm.fop_high_sodium = high_sodium;
+        fm.fop_high_sugars = high_sugars;
+        fm.fop_high_saturated_fat = high_sat_fat;
+
+        let fm_value = serde_json::to_value(&fm).map_err(|e| {
+            ob_core::Error::Internal(format!("Failed to serialize foodMetadata: {e}"))
+        })?;
+        obj.insert(fields::FOOD_METADATA.to_string(), fm_value);
+
+        tracing::debug!(
+            high_sodium = high_sodium,
+            high_sugars = high_sugars,
+            high_sat_fat = high_sat_fat,
+            "FOP warnings computed from nutritionFacts"
+        );
+    }
+
+    Ok(())
+}
+
+/// Validate product specs if present and denormalize brand/color/material to top-level
+/// for Meilisearch filtering.
+fn validate_and_denormalize_specs(
+    obj: &mut serde_json::Map<String, Value>,
+) -> Result<(), ob_core::Error> {
+    if let Some(specs_val) = obj.get(fields::SPECS).cloned()
+        && !specs_val.is_null()
+    {
+        let specs: crate::shared::specs::ProductSpecs = serde_json::from_value(specs_val)
+            .map_err(|e| ob_core::Error::Validation(format!("Invalid specs: {e}")))?;
+        crate::shared::specs::validate_product_specs(&specs)?;
+        // Denormalize brand/color/material to top-level for Meilisearch
+        if let Some(ref brand) = specs.brand {
+            obj.insert(
+                fields::SPEC_BRAND.to_string(),
+                serde_json::Value::String(brand.clone()),
+            );
+        }
+        if let Some(ref color) = specs.color {
+            obj.insert(
+                fields::SPEC_COLOR.to_string(),
+                serde_json::Value::String(color.clone()),
+            );
+        }
+        if let Some(ref material) = specs.material {
+            obj.insert(
+                fields::SPEC_MATERIAL.to_string(),
+                serde_json::Value::String(material.clone()),
+            );
+        }
+    }
+    Ok(())
+}
+
 // ─── Request/Response types ─────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -143,6 +245,7 @@ pub struct ListProductsRequest {
     #[serde(default = "default_limit")]
     pub limit: u32,
     pub category: Option<String>,
+    pub subcategory: Option<String>,
     pub seller_id: Option<String>,
     pub order_by: Option<String>,
     #[serde(default = "default_order_direction")]
@@ -384,7 +487,7 @@ async fn bulk_upload_products(
         }
 
         // Required: priceCents and stockQuantity
-        let price_cents = obj.get(fields::PRICE_CENTS).and_then(|v| v.as_i64());
+        let price_cents = obj.get(db_fields::PRICE_CENTS).and_then(|v| v.as_i64());
         let stock_quantity = obj.get(fields::STOCK_QUANTITY).and_then(|v| v.as_i64());
 
         if let Err(e) = validate_price_and_stock(price_cents, stock_quantity) {
@@ -451,13 +554,13 @@ async fn bulk_upload_products(
 
     for (idx, mut product) in created_products {
         // Add seller ID and timestamps
-        product.insert(fields::SELLER_ID.to_string(), serde_json::json!(user_id));
+        product.insert(db_fields::SELLER_ID.to_string(), serde_json::json!(user_id));
         product.insert(
-            fields::CREATED_AT.to_string(),
+            db_fields::CREATED_AT.to_string(),
             serde_json::json!(now.clone()),
         );
         product.insert(
-            fields::UPDATED_AT.to_string(),
+            db_fields::UPDATED_AT.to_string(),
             serde_json::json!(now.clone()),
         );
 
@@ -473,11 +576,15 @@ async fn bulk_upload_products(
             .await
         {
             Ok(created) => {
-                if let Some(id) = created.get("id").and_then(|v| v.as_str()).map(|s| {
-                    s.strip_prefix(&format!("{}:", collections::PRODUCTS))
-                        .unwrap_or(s)
-                        .to_string()
-                }) {
+                if let Some(id) = created
+                    .get(db_fields::ID)
+                    .and_then(|v| v.as_str())
+                    .map(|s| {
+                        s.strip_prefix(&format!("{}:", collections::PRODUCTS))
+                            .unwrap_or(s)
+                            .to_string()
+                    })
+                {
                     product_ids.push(id);
                 }
             }
@@ -540,7 +647,7 @@ async fn upload_images(
     }
 
     let seller_id = product
-        .get(fields::SELLER_ID)
+        .get(db_fields::SELLER_ID)
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let is_admin = auth.has_role("admin");
@@ -554,7 +661,7 @@ async fn upload_images(
     let now = chrono::Utc::now().to_rfc3339();
     let update = serde_json::json!({
         fields::IMAGE_URLS: req.image_urls,
-        fields::UPDATED_AT: now,
+        db_fields::UPDATED_AT: now,
     });
 
     state
@@ -572,9 +679,17 @@ async fn upload_images(
 }
 
 async fn upload_product_video(
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<UploadProductVideoRequest>,
 ) -> Result<Json<UploadAssetResponse>, ob_core::Error> {
+    let actor_id = require_authenticated(&auth)?.to_string();
     validate_uid("userId", &req.user_id)?;
+    // IDOR fix: caller must match the userId in the request (or be admin)
+    if req.user_id != actor_id && !auth.has_role("admin") {
+        return Err(ob_core::Error::Forbidden(
+            "Cannot upload video for another user".into(),
+        ));
+    }
     validate_string("fileName", &req.file_name, 255)?;
     let file_name = sanitize_html(&req.file_name);
     let public_url = format!("/storage/download/products/videos/{}", file_name);
@@ -602,9 +717,17 @@ async fn delete_product_images(
 }
 
 async fn upload_review_images(
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<UploadReviewImagesRequest>,
 ) -> Result<Json<UploadReviewImagesResponse>, ob_core::Error> {
+    let actor_id = require_authenticated(&auth)?.to_string();
     validate_uid("userId", &req.user_id)?;
+    // IDOR fix: caller must match the userId in the request (or be admin)
+    if req.user_id != actor_id && !auth.has_role("admin") {
+        return Err(ob_core::Error::Forbidden(
+            "Cannot upload review images for another user".into(),
+        ));
+    }
     if req.file_names.is_empty() || req.file_names.len() > 3 {
         return Err(ob_core::Error::Validation(
             "fileNames must contain 1-3 entries".into(),
@@ -628,6 +751,11 @@ async fn upload_review_images(
     }))
 }
 
+/// Creates a product atomically after validating seller permissions, payload
+/// structure, pricing, media URLs, and denormalized search attributes.
+///
+/// The handler writes the seller-owned product document in one operation and
+/// returns the generated product ID plus the accepted image URLs.
 async fn create_product_atomic(
     State(state): State<HandlersState>,
     Extension(auth): Extension<AuthContext>,
@@ -675,17 +803,38 @@ async fn create_product_atomic(
         .as_object_mut()
         .ok_or_else(|| ob_core::Error::Validation("productData must be an object".into()))?;
 
+    // Validate price and stock
+    let price_cents = obj.get(db_fields::PRICE_CENTS).and_then(|v| v.as_i64());
+    let stock_quantity = obj.get(fields::STOCK_QUANTITY).and_then(|v| v.as_i64());
+    validate_price_and_stock(price_cents, stock_quantity)?;
+
+    // Validate nutrition data and auto-compute FOP warnings
+    validate_and_process_nutrition(obj)?;
+
+    // Validate product specs if present and denormalize filterable fields
+    validate_and_denormalize_specs(obj)?;
+
+    // Validate bundledProductIds if present
+    if let Some(bundled_val) = obj.get("bundledProductIds").cloned()
+        && let Some(arr) = bundled_val.as_array()
+        && arr.len() > 5
+    {
+        return Err(ob_core::Error::Validation(
+            "bundledProductIds cannot exceed 5 items".into(),
+        ));
+    }
+
     let now = chrono::Utc::now().to_rfc3339();
-    obj.insert(fields::SELLER_ID.to_string(), serde_json::json!(user_id));
+    obj.insert(db_fields::SELLER_ID.to_string(), serde_json::json!(user_id));
     obj.insert(
         fields::IMAGE_URLS.to_string(),
         serde_json::json!(req.test_image_urls),
     );
     obj.insert(
-        fields::CREATED_AT.to_string(),
+        db_fields::CREATED_AT.to_string(),
         serde_json::json!(now.clone()),
     );
-    obj.insert(fields::UPDATED_AT.to_string(), serde_json::json!(now));
+    obj.insert(db_fields::UPDATED_AT.to_string(), serde_json::json!(now));
 
     let created = state
         .db
@@ -694,7 +843,7 @@ async fn create_product_atomic(
         .map_err(|e| ob_core::Error::Database(format!("Failed to create product: {e}")))?;
 
     let product_id = created
-        .get("id")
+        .get(db_fields::ID)
         .and_then(|v| v.as_str())
         .map(|s| {
             s.strip_prefix(&format!("{}:", collections::PRODUCTS))
@@ -712,10 +861,12 @@ async fn create_product_atomic(
 
 async fn delete_product(
     State(state): State<HandlersState>,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<DeleteProductRequest>,
 ) -> Result<Json<DeleteProductResponse>, ob_core::Error> {
+    // SECURITY: derive user_id from JWT, never trust client-supplied value
+    let user_id = resolve_self_user_id(&auth, Some(req.user_id.as_str()), "userId")?;
     validate_uid("productId", &req.product_id)?;
-    validate_uid("userId", &req.user_id)?;
 
     // Fetch product
     let product = state
@@ -728,26 +879,14 @@ async fn delete_product(
         return Err(ob_core::Error::NotFound("Product not found".into()));
     }
 
-    // Permission check: seller or admin
+    // Permission check: seller or admin (using JWT-authenticated identity)
     let seller_id = product
-        .get(fields::SELLER_ID)
+        .get(db_fields::SELLER_ID)
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let user = state
-        .db
-        .get_document(collections::USERS, &req.user_id)
-        .await
-        .map_err(|_| ob_core::Error::NotFound("User not found".into()))?;
-
-    let roles = user
-        .get(fields::ROLES)
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
-        .unwrap_or_default();
-
-    let is_admin = roles.contains(&"admin");
-    let is_owner = seller_id == req.user_id;
+    let is_admin = auth.roles.iter().any(|r| r == "admin");
+    let is_owner = seller_id == user_id;
 
     if !is_admin && !is_owner {
         return Err(ob_core::Error::Forbidden(
@@ -756,15 +895,19 @@ async fn delete_product(
     }
 
     // Check for pending orders containing this product
+    // Uses validated user_id from JWT (not client-supplied req.user_id)
     let pending_query = format!(
-        "SELECT * FROM {} WHERE {} CONTAINS '{}' AND {} IN ['PENDING_PAYMENT', 'PROCESSING', 'SHIPPED'] LIMIT 5",
+        "SELECT * FROM {} WHERE data->>'{}' = $1 AND data->>'{}' IN ('pending', 'processing', 'shipped') LIMIT 5",
         collections::ORDERS,
-        fields::SELLER_ID,
-        ob_core::escape_surreal_string(&req.user_id),
-        fields::STATUS,
+        db_fields::SELLER_ID,
+        db_fields::STATUS,
     );
 
-    let pending_orders: Vec<Value> = state.db.query_raw(&pending_query).await.unwrap_or_default();
+    let pending_orders: Vec<Value> = state
+        .db
+        .query_bind(&pending_query, serde_json::json!({ "1": user_id }))
+        .await
+        .unwrap_or_default();
 
     // Check if any pending order contains this product
     for order in &pending_orders {
@@ -782,9 +925,9 @@ async fn delete_product(
     // Soft delete: set lifecycle_status = archived
     let now = chrono::Utc::now().to_rfc3339();
     let update = serde_json::json!({
-        fields::LIFECYCLE_STATUS: "archived",
+        db_fields::LIFECYCLE_STATUS: "archived",
         fields::DELETED_AT: now,
-        fields::DELETED_BY: req.user_id,
+        fields::DELETED_BY: user_id,
     });
 
     state
@@ -795,10 +938,10 @@ async fn delete_product(
 
     // Clean up stock notifications
     let cleanup_query = format!(
-        "DELETE FROM {} WHERE {} = '{}'",
+        "DELETE FROM {} WHERE data->>'{}' = '{}'",
         collections::STOCK_NOTIFICATIONS,
         fields::PRODUCT_ID,
-        ob_core::escape_surreal_string(&req.product_id),
+        ob_core::escape_sql_string(&req.product_id),
     );
     if let Err(e) = state.db.query_raw(&cleanup_query).await {
         warn!(product_id = %req.product_id, error = %e, "Failed to cleanup stock notifications");
@@ -819,10 +962,10 @@ async fn list_products(
     let limit = req.limit.min(MAX_PAGE_SIZE);
 
     // Validate order_by
-    let order_by = req.order_by.as_deref().unwrap_or(fields::CREATED_AT);
+    let order_by = req.order_by.as_deref().unwrap_or(db_fields::CREATED_AT);
     let valid_order_fields = [
-        fields::CREATED_AT,
-        fields::PRICE_CENTS,
+        db_fields::CREATED_AT,
+        db_fields::PRICE_CENTS,
         fields::AVG_RATING,
         fields::TITLE,
     ];
@@ -837,22 +980,107 @@ async fn list_products(
     }
 
     // Build query — always filter for active products in public API
-    let mut conditions = vec![format!("{} = 'active'", fields::LIFECYCLE_STATUS)];
+    // User-controlled string values are escaped via escape_sql_string
+    // order_by and order_direction are validated against whitelists above
+    let mut conditions = vec![format!(
+        "data->>'{}' = '{}'",
+        db_fields::LIFECYCLE_STATUS,
+        "active"
+    )];
 
     if let Some(ref category) = req.category {
         conditions.push(format!(
-            "{} = '{}'",
+            "data->>'{}' = '{}'",
             fields::CATEGORY,
-            ob_core::escape_surreal_string(category)
+            ob_core::escape_sql_string(category)
+        ));
+    }
+
+    if let Some(ref subcategory) = req.subcategory {
+        conditions.push(format!(
+            "data->>'{}' = '{}'",
+            ob_core::constants::fields::SUBCATEGORY,
+            ob_core::escape_sql_string(subcategory)
         ));
     }
 
     if let Some(ref seller_id) = req.seller_id {
         conditions.push(format!(
-            "{} = '{}'",
-            fields::SELLER_ID,
-            ob_core::escape_surreal_string(seller_id)
+            "data->>'{}' = '{}'",
+            db_fields::SELLER_ID,
+            ob_core::escape_sql_string(seller_id)
         ));
+    }
+
+    if let Some(ref start_after) = req.start_after {
+        let id_cmp = if req.order_direction == "asc" {
+            ">"
+        } else {
+            "<"
+        };
+        let escaped_id = ob_core::escape_sql_string(start_after);
+        let order_field_expr = match order_by {
+            db_fields::PRICE_CENTS | fields::AVG_RATING => {
+                format!("NULLIF(data->>'{}', '')::numeric", order_by)
+            }
+            _ => format!("data->>'{}'", order_by),
+        };
+        let cursor_rows = state
+            .db
+            .query_raw(&format!(
+                "SELECT {} AS cursor_value FROM {} WHERE id = '{}'",
+                order_field_expr,
+                collections::PRODUCTS,
+                escaped_id,
+            ))
+            .await
+            .unwrap_or_default();
+        let cursor_value = cursor_rows.first().and_then(|row| row.get("cursor_value"));
+
+        if matches!(order_by, db_fields::PRICE_CENTS | fields::AVG_RATING) {
+            if let Some(cursor_num) = cursor_value.and_then(|v| v.as_f64()) {
+                let order_cmp = if req.order_direction == "asc" {
+                    ">"
+                } else {
+                    "<"
+                };
+                let include_nulls_clause = if order_by == fields::AVG_RATING {
+                    format!(" OR {order_field_expr} IS NULL")
+                } else {
+                    String::new()
+                };
+                conditions.push(format!(
+                    "({expr} {cmp} {cursor} OR ({expr} = {cursor} AND id {id_cmp} '{id}'){include_nulls_clause})",
+                    expr = order_field_expr,
+                    cmp = order_cmp,
+                    cursor = cursor_num,
+                    id_cmp = id_cmp,
+                    id = escaped_id,
+                ));
+            } else {
+                conditions.push(format!(
+                    "({expr} IS NULL AND id {id_cmp} '{id}')",
+                    expr = order_field_expr,
+                    id_cmp = id_cmp,
+                    id = escaped_id,
+                ));
+            }
+        } else if let Some(cursor_string) = cursor_value.and_then(|v| v.as_str()) {
+            let escaped_value = ob_core::escape_sql_string(cursor_string);
+            let order_cmp = if req.order_direction == "asc" {
+                ">"
+            } else {
+                "<"
+            };
+            conditions.push(format!(
+                "({expr} {cmp} '{cursor}' OR ({expr} = '{cursor}' AND id {id_cmp} '{id}'))",
+                expr = order_field_expr,
+                cmp = order_cmp,
+                cursor = escaped_value,
+                id_cmp = id_cmp,
+                id = escaped_id,
+            ));
+        }
     }
 
     let where_clause = if conditions.is_empty() {
@@ -869,11 +1097,20 @@ async fn list_products(
 
     // Fetch limit+1 to detect hasMore
     let fetch_limit = limit + 1;
+    let order_expr = match order_by {
+        db_fields::PRICE_CENTS | fields::AVG_RATING => {
+            format!(
+                "NULLIF(data->>'{}', '')::numeric {} NULLS LAST",
+                order_by, order_dir
+            )
+        }
+        _ => format!("data->>'{}' {}", order_by, order_dir),
+    };
     let query = format!(
-        "SELECT * FROM {}{} ORDER BY {} {} LIMIT {}",
+        "SELECT * FROM {}{} ORDER BY {}, id {} LIMIT {}",
         collections::PRODUCTS,
         where_clause,
-        order_by,
+        order_expr,
         order_dir,
         fetch_limit,
     );
@@ -890,7 +1127,7 @@ async fn list_products(
     let next_cursor = if has_more {
         products
             .last()
-            .and_then(|p| p.get("id"))
+            .and_then(|p| p.get(db_fields::ID))
             .and_then(|v| v.as_str())
             .map(String::from)
     } else {
@@ -915,24 +1152,29 @@ async fn seller_list(
 
     let limit = req.limit.min(MAX_PAGE_SIZE);
 
+    // Build query — seller_id is escaped, lifecycle_status is a constant
     let mut conditions = vec![format!(
-        "{} = '{}'",
-        fields::SELLER_ID,
-        ob_core::escape_surreal_string(&req.seller_id)
+        "data->>'{}' = '{}'",
+        db_fields::SELLER_ID,
+        ob_core::escape_sql_string(&req.seller_id)
     )];
 
     if !req.include_inactive {
-        conditions.push(format!("{} = 'active'", fields::LIFECYCLE_STATUS));
+        conditions.push(format!(
+            "data->>'{}' = '{}'",
+            db_fields::LIFECYCLE_STATUS,
+            "active"
+        ));
     }
 
     let where_clause = format!(" WHERE {}", conditions.join(" AND "));
     let fetch_limit = limit + 1;
 
     let query = format!(
-        "SELECT * FROM {}{} ORDER BY {} DESC LIMIT {}",
+        "SELECT * FROM {}{} ORDER BY data->>'{}' DESC LIMIT {}",
         collections::PRODUCTS,
         where_clause,
-        fields::CREATED_AT,
+        db_fields::CREATED_AT,
         fetch_limit,
     );
 
@@ -947,7 +1189,7 @@ async fn seller_list(
     let next_cursor = if has_more {
         products
             .last()
-            .and_then(|p| p.get("id"))
+            .and_then(|p| p.get(db_fields::ID))
             .and_then(|v| v.as_str())
             .map(String::from)
     } else {
@@ -986,11 +1228,16 @@ async fn bulk_update_products(
         ));
     }
 
-    let mut updated = 0u32;
-    let now = chrono::Utc::now().to_rfc3339();
-
+    // P1-NEW-22: Validate all IDs first, then batch-read products in one query,
+    // verify ownership, and update. Reduces N+1 reads to 1 batch fetch.
     for pid in &req.product_ids {
         validate_uid("productId", pid)?;
+    }
+
+    // Batch-fetch all products at once
+    let is_admin = auth.has_role("admin");
+    let mut products_map = std::collections::HashMap::new();
+    for pid in &req.product_ids {
         let product = state
             .db
             .get_document(collections::PRODUCTS, pid)
@@ -1002,22 +1249,68 @@ async fn bulk_update_products(
             )));
         }
         let seller_id = product
-            .get(fields::SELLER_ID)
+            .get(db_fields::SELLER_ID)
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let is_admin = auth.has_role("admin");
         if seller_id != actor_id && !is_admin {
             return Err(ob_core::Error::Forbidden(
                 "Only product owner or admin can bulk update products".into(),
             ));
         }
-        let mut data = req.update.clone();
-        if let Some(obj) = data.as_object_mut() {
-            obj.insert(fields::UPDATED_AT.to_string(), serde_json::json!(now));
+        products_map.insert(pid.clone(), product);
+    }
+
+    let mut update_data = req.update.clone();
+    let obj = update_data
+        .as_object_mut()
+        .ok_or_else(|| ob_core::Error::Validation("update must be an object".into()))?;
+
+    if let Some(new_status) = obj
+        .get(db_fields::LIFECYCLE_STATUS)
+        .and_then(|v| v.as_str())
+    {
+        for product in products_map.values() {
+            let current_status = product
+                .get(db_fields::LIFECYCLE_STATUS)
+                .and_then(|v| v.as_str())
+                .unwrap_or("draft");
+            validate_lifecycle_transition(current_status, new_status)?;
         }
+    }
+
+    let price_cents = obj.get(db_fields::PRICE_CENTS).and_then(|v| v.as_i64());
+    let stock_quantity = obj.get(fields::STOCK_QUANTITY).and_then(|v| v.as_i64());
+    validate_price_and_stock(price_cents, stock_quantity)?;
+
+    if let Some(urls) = obj.get(fields::IMAGE_URLS).and_then(|v| v.as_array()) {
+        for url_val in urls {
+            if let Some(url) = url_val.as_str() {
+                validate_image_url(url)?;
+            }
+        }
+    }
+
+    validate_and_process_nutrition(obj)?;
+    validate_and_denormalize_specs(obj)?;
+
+    if let Some(bundled_val) = obj.get("bundledProductIds").cloned()
+        && let Some(arr) = bundled_val.as_array()
+        && arr.len() > 5
+    {
+        return Err(ob_core::Error::Validation(
+            "bundledProductIds cannot exceed 5 items".into(),
+        ));
+    }
+
+    // Apply updates (validated above — all ownership checks passed)
+    let now = chrono::Utc::now().to_rfc3339();
+    obj.insert(db_fields::UPDATED_AT.to_string(), serde_json::json!(now));
+
+    let mut updated = 0u32;
+    for pid in &req.product_ids {
         match state
             .db
-            .update_document(collections::PRODUCTS, pid, data)
+            .update_document(collections::PRODUCTS, pid, update_data.clone())
             .await
         {
             Ok(_) => updated += 1,
@@ -1032,16 +1325,24 @@ async fn bulk_update_products(
     })))
 }
 
+/// Applies a partial update to an existing product owned by the caller or an
+/// admin, re-running lifecycle, pricing, image, nutrition, and spec validation
+/// before persisting the patch.
+///
+/// Only validated fields are written back to the document, and every successful
+/// update refreshes the product's `updatedAt` timestamp.
 async fn update_product(
     State(state): State<HandlersState>,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<UpdateProductRequest>,
 ) -> Result<Json<serde_json::Value>, ob_core::Error> {
+    // SECURITY: derive user_id from JWT, never trust client-supplied value
+    let user_id = resolve_self_user_id(&auth, Some(req.user_id.as_str()), "userId")?;
     validate_uid("productId", &req.product_id)?;
-    validate_uid("userId", &req.user_id)?;
 
     crate::shared::rate_limiter::check_user_rate_limit(
         &state.db,
-        &req.user_id,
+        &user_id,
         "update_product",
         60, // 60 updates
         60, // per hour
@@ -1053,19 +1354,11 @@ async fn update_product(
         .get_document(collections::PRODUCTS, &req.product_id)
         .await?;
     let seller_id = product
-        .get(fields::SELLER_ID)
+        .get(db_fields::SELLER_ID)
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let user = state
-        .db
-        .get_document(collections::USERS, &req.user_id)
-        .await?;
-    let is_admin = user
-        .get(fields::ROLES)
-        .and_then(|v| v.as_array())
-        .map(|roles| roles.iter().any(|r| r.as_str() == Some("admin")))
-        .unwrap_or(false);
-    if seller_id != req.user_id && !is_admin {
+    let is_admin = auth.roles.iter().any(|r| r == "admin");
+    if seller_id != user_id && !is_admin {
         return Err(ob_core::Error::Forbidden(
             "Only product owner or admin can update".into(),
         ));
@@ -1076,16 +1369,19 @@ async fn update_product(
         .ok_or_else(|| ob_core::Error::Validation("productData must be an object".into()))?;
 
     // Validate lifecycle state transition if status field is being updated
-    if let Some(new_status) = obj.get(fields::LIFECYCLE_STATUS).and_then(|v| v.as_str()) {
+    if let Some(new_status) = obj
+        .get(db_fields::LIFECYCLE_STATUS)
+        .and_then(|v| v.as_str())
+    {
         let current_status = product
-            .get(fields::LIFECYCLE_STATUS)
+            .get(db_fields::LIFECYCLE_STATUS)
             .and_then(|v| v.as_str())
             .unwrap_or("draft");
         validate_lifecycle_transition(current_status, new_status)?;
     }
 
     // Validate price and stock constraints
-    let price_cents = obj.get(fields::PRICE_CENTS).and_then(|v| v.as_i64());
+    let price_cents = obj.get(db_fields::PRICE_CENTS).and_then(|v| v.as_i64());
     let stock_quantity = obj.get(fields::STOCK_QUANTITY).and_then(|v| v.as_i64());
     validate_price_and_stock(price_cents, stock_quantity)?;
 
@@ -1098,8 +1394,24 @@ async fn update_product(
         }
     }
 
+    // Validate nutrition data and auto-compute FOP warnings
+    validate_and_process_nutrition(obj)?;
+
+    // Validate product specs if present and denormalize filterable fields
+    validate_and_denormalize_specs(obj)?;
+
+    // Validate bundledProductIds if present
+    if let Some(bundled_val) = obj.get("bundledProductIds").cloned()
+        && let Some(arr) = bundled_val.as_array()
+        && arr.len() > 5
+    {
+        return Err(ob_core::Error::Validation(
+            "bundledProductIds cannot exceed 5 items".into(),
+        ));
+    }
+
     obj.insert(
-        fields::UPDATED_AT.to_string(),
+        db_fields::UPDATED_AT.to_string(),
         serde_json::json!(chrono::Utc::now().to_rfc3339()),
     );
 
@@ -1114,11 +1426,14 @@ async fn update_product(
 }
 
 async fn toggle_favorite(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<HandlersState>,
     Json(req): Json<ToggleFavoriteRequest>,
 ) -> Result<Json<serde_json::Value>, ob_core::Error> {
     validate_uid("productId", &req.product_id)?;
-    validate_uid("userId", &req.user_id)?;
+
+    // P1-NEW-3: Derive userId from JWT to prevent IDOR
+    let user_id = resolve_self_user_id(&auth, Some(req.user_id.as_str()), "userId")?;
 
     let product = state
         .db
@@ -1135,16 +1450,18 @@ async fn toggle_favorite(
         .unwrap_or(0);
 
     let query = format!(
-        "SELECT * FROM {} WHERE userId = '{}' AND productId = '{}' LIMIT 1",
+        "SELECT * FROM {} WHERE data->>'{}' = '{}' AND data->>'{}' = '{}' LIMIT 1",
         collections::FAVORITES,
-        ob_core::escape_surreal_string(&req.user_id),
-        ob_core::escape_surreal_string(&req.product_id),
+        db_fields::USER_ID,
+        ob_core::escape_sql_string(&user_id),
+        fields::PRODUCT_ID,
+        ob_core::escape_sql_string(&req.product_id),
     );
     let existing = state.db.query_raw(&query).await.unwrap_or_default();
     let now = chrono::Utc::now().to_rfc3339();
 
     if let Some(favorite) = existing.first() {
-        if let Some(raw_id) = favorite.get("id").and_then(|v| v.as_str()) {
+        if let Some(raw_id) = favorite.get(db_fields::ID).and_then(|v| v.as_str()) {
             let fav_id = raw_id
                 .strip_prefix(&format!("{}:", collections::FAVORITES))
                 .unwrap_or(raw_id);
@@ -1160,7 +1477,7 @@ async fn toggle_favorite(
                 &req.product_id,
                 serde_json::json!({
                     "favoriteCount": (current_favorite_count - 1).max(0),
-                    fields::UPDATED_AT: now,
+                    db_fields::UPDATED_AT: now,
                 }),
             )
             .await;
@@ -1176,9 +1493,9 @@ async fn toggle_favorite(
         .create_document(
             collections::FAVORITES,
             serde_json::json!({
-                "userId": req.user_id,
-                "productId": req.product_id,
-                fields::CREATED_AT: now,
+                db_fields::USER_ID: user_id,
+                fields::PRODUCT_ID: req.product_id,
+                db_fields::CREATED_AT: now,
             }),
         )
         .await?;
@@ -1190,7 +1507,7 @@ async fn toggle_favorite(
             &req.product_id,
             serde_json::json!({
                 "favoriteCount": current_favorite_count + 1,
-                fields::UPDATED_AT: now,
+                db_fields::UPDATED_AT: now,
             }),
         )
         .await;
@@ -1211,6 +1528,7 @@ mod tests {
     use std::sync::Arc;
 
     async fn setup_state() -> HandlersState {
+        unsafe { std::env::set_var("OB_TEST_MODE", "1") };
         HandlersState {
             config: Arc::new(Config::load(None).unwrap()),
             db: DatabaseClient::new_mem().await,
@@ -1352,8 +1670,8 @@ mod tests {
     #[test]
     fn test_list_products_valid_order_by_fields() {
         let valid_fields = [
-            fields::CREATED_AT,
-            fields::PRICE_CENTS,
+            db_fields::CREATED_AT,
+            db_fields::PRICE_CENTS,
             fields::AVG_RATING,
             fields::TITLE,
         ];
@@ -1492,9 +1810,9 @@ mod tests {
                 user_id: "seller_1".into(),
                 product_data: serde_json::json!({
                     fields::TITLE: "Fresh Apples",
-                    fields::PRICE_CENTS: 1299,
+                    db_fields::PRICE_CENTS: 1299,
                 }),
-                test_image_urls: vec!["https://cdn.test/a.jpg".into()],
+                test_image_urls: vec!["https://cdn.orignagta.ca/images/test.jpg".into()],
             }),
         )
         .await
@@ -1507,7 +1825,7 @@ mod tests {
             .get_document(collections::PRODUCTS, product_id)
             .await
             .unwrap();
-        assert_eq!(created[fields::SELLER_ID], "seller_1");
+        assert_eq!(created[db_fields::SELLER_ID], "seller_1");
     }
 
     #[tokio::test]
@@ -1574,7 +1892,7 @@ mod tests {
             .upsert_document(
                 collections::PRODUCTS,
                 "prod_1",
-                serde_json::json!({ fields::SELLER_ID: "seller_1" }),
+                serde_json::json!({ db_fields::SELLER_ID: "seller_1" }),
             )
             .await
             .unwrap();
@@ -1590,6 +1908,7 @@ mod tests {
 
         let err = delete_product(
             State(state),
+            Extension(auth("buyer_1", &["buyer"])),
             Json(DeleteProductRequest {
                 product_id: "prod_1".into(),
                 user_id: "buyer_1".into(),
@@ -1608,7 +1927,7 @@ mod tests {
             .upsert_document(
                 collections::PRODUCTS,
                 "prod_1",
-                serde_json::json!({ fields::SELLER_ID: "seller_1" }),
+                serde_json::json!({ db_fields::SELLER_ID: "seller_1" }),
             )
             .await
             .unwrap();
@@ -1627,8 +1946,8 @@ mod tests {
                 collections::ORDERS,
                 "order_1",
                 serde_json::json!({
-                    fields::SELLER_ID: ["seller_1"],
-                    fields::STATUS: "PROCESSING",
+                    db_fields::SELLER_ID: "seller_1",
+                    db_fields::STATUS: "processing",
                     fields::ITEMS: [{ fields::PRODUCT_ID: "prod_1" }],
                 }),
             )
@@ -1637,6 +1956,7 @@ mod tests {
 
         let err = delete_product(
             State(state),
+            Extension(auth("seller_1", &["seller"])),
             Json(DeleteProductRequest {
                 product_id: "prod_1".into(),
                 user_id: "seller_1".into(),
@@ -1654,12 +1974,15 @@ mod tests {
     #[tokio::test]
     async fn test_delete_product_soft_deletes_product() {
         let state = setup_state().await;
+        let u = uuid::Uuid::new_v4().to_string();
+        let seller = format!("seller_del_{u}");
+        let prod = format!("prod_del_{u}");
         state
             .db
             .upsert_document(
                 collections::PRODUCTS,
-                "prod_1",
-                serde_json::json!({ fields::SELLER_ID: "seller_1" }),
+                &prod,
+                serde_json::json!({ db_fields::SELLER_ID: seller }),
             )
             .await
             .unwrap();
@@ -1667,7 +1990,7 @@ mod tests {
             .db
             .upsert_document(
                 collections::USERS,
-                "seller_1",
+                &seller,
                 serde_json::json!({ fields::ROLES: ["seller"] }),
             )
             .await
@@ -1675,9 +1998,10 @@ mod tests {
 
         let Json(resp) = delete_product(
             State(state.clone()),
+            Extension(auth(&seller, &["seller"])),
             Json(DeleteProductRequest {
-                product_id: "prod_1".into(),
-                user_id: "seller_1".into(),
+                product_id: prod.clone(),
+                user_id: seller.clone(),
             }),
         )
         .await
@@ -1685,11 +2009,11 @@ mod tests {
         assert!(resp.success);
         let product = state
             .db
-            .get_document(collections::PRODUCTS, "prod_1")
+            .get_document(collections::PRODUCTS, &prod)
             .await
             .unwrap();
-        assert_eq!(product[fields::LIFECYCLE_STATUS], "archived");
-        assert_eq!(product[fields::DELETED_BY], "seller_1");
+        assert_eq!(product[db_fields::LIFECYCLE_STATUS], "archived");
+        assert_eq!(product[fields::DELETED_BY], seller.as_str());
         assert!(product.get(fields::DELETED_AT).is_some());
     }
 
@@ -1707,8 +2031,8 @@ mod tests {
                     collections::PRODUCTS,
                     id,
                     serde_json::json!({
-                        fields::LIFECYCLE_STATUS: status,
-                        fields::CREATED_AT: created_at,
+                        db_fields::LIFECYCLE_STATUS: status,
+                        db_fields::CREATED_AT: created_at,
                     }),
                 )
                 .await
@@ -1721,6 +2045,7 @@ mod tests {
                 page: 1,
                 limit: 1,
                 category: None,
+                subcategory: None,
                 seller_id: None,
                 order_by: None,
                 order_direction: "desc".into(),
@@ -1732,7 +2057,7 @@ mod tests {
 
         assert_eq!(resp.total_fetched, 1);
         assert!(resp.has_more);
-        assert_eq!(resp.products[0][fields::LIFECYCLE_STATUS], "active");
+        assert_eq!(resp.products[0][db_fields::LIFECYCLE_STATUS], "active");
     }
 
     #[tokio::test]
@@ -1745,6 +2070,7 @@ mod tests {
                 page: 1,
                 limit: 20,
                 category: None,
+                subcategory: None,
                 seller_id: None,
                 order_by: None,
                 order_direction: "sideways".into(),
@@ -1763,11 +2089,19 @@ mod tests {
     #[tokio::test]
     async fn test_list_products_filters_category_and_seller() {
         let state = setup_state().await;
+        let u = uuid::Uuid::new_v4().to_string();
+        let s1 = format!("seller_cs1_{u}");
+        let s2 = format!("seller_cs2_{u}");
+        let cat = format!("fruit_{u}");
+        let id1 = format!("p_cs1_{u}");
+        let id2 = format!("p_cs2_{u}");
+        let id3 = format!("p_cs3_{u}");
+        let id4 = format!("p_cs4_{u}");
         for (id, category, seller_id, status) in [
-            ("p1", "fruit", "seller_1", "active"),
-            ("p2", "fruit", "seller_2", "active"),
-            ("p3", "veg", "seller_1", "active"),
-            ("p4", "fruit", "seller_1", "archived"),
+            (id1.as_str(), cat.as_str(), s1.as_str(), "active"),
+            (id2.as_str(), cat.as_str(), s2.as_str(), "active"),
+            (id3.as_str(), "veg", s1.as_str(), "active"),
+            (id4.as_str(), cat.as_str(), s1.as_str(), "archived"),
         ] {
             state
                 .db
@@ -1776,9 +2110,9 @@ mod tests {
                     id,
                     serde_json::json!({
                         fields::CATEGORY: category,
-                        fields::SELLER_ID: seller_id,
-                        fields::LIFECYCLE_STATUS: status,
-                        fields::CREATED_AT: "2026-01-01T00:00:00Z",
+                        db_fields::SELLER_ID: seller_id,
+                        db_fields::LIFECYCLE_STATUS: status,
+                        db_fields::CREATED_AT: "2026-01-01T00:00:00Z",
                     }),
                 )
                 .await
@@ -1790,9 +2124,10 @@ mod tests {
             Json(ListProductsRequest {
                 page: 1,
                 limit: 10,
-                category: Some("fruit".into()),
-                seller_id: Some("seller_1".into()),
-                order_by: Some(fields::CREATED_AT.into()),
+                category: Some(cat.clone()),
+                subcategory: None,
+                seller_id: Some(s1.clone()),
+                order_by: Some(db_fields::CREATED_AT.into()),
                 order_direction: "desc".into(),
                 start_after: None,
             }),
@@ -1801,22 +2136,211 @@ mod tests {
         .unwrap();
 
         assert_eq!(resp.total_fetched, 1);
-        assert_eq!(resp.products[0]["id"], "products:p1");
+        assert_eq!(resp.products[0][db_fields::ID], id1.as_str());
     }
 
     #[tokio::test]
-    async fn test_seller_list_excludes_inactive_by_default() {
+    async fn test_list_products_filters_subcategory() {
         let state = setup_state().await;
-        for (id, status) in [("p1", "active"), ("p2", "archived")] {
+        let u = uuid::Uuid::new_v4().to_string();
+        let id1 = format!("p_subcat_1_{u}");
+        let id2 = format!("p_subcat_2_{u}");
+
+        for (id, subcategory) in [(id1.as_str(), "Audio"), (id2.as_str(), "Phones")] {
             state
                 .db
                 .upsert_document(
                     collections::PRODUCTS,
                     id,
                     serde_json::json!({
-                        fields::SELLER_ID: "seller_1",
-                        fields::LIFECYCLE_STATUS: status,
-                        fields::CREATED_AT: "2026-01-01T00:00:00Z",
+                        fields::CATEGORY: "1",
+                        ob_core::constants::fields::SUBCATEGORY: subcategory,
+                        db_fields::LIFECYCLE_STATUS: "active",
+                        db_fields::CREATED_AT: "2026-01-01T00:00:00Z",
+                    }),
+                )
+                .await
+                .unwrap();
+        }
+
+        let Json(resp) = list_products(
+            State(state),
+            Json(ListProductsRequest {
+                page: 1,
+                limit: 10,
+                category: Some("1".into()),
+                subcategory: Some("Audio".into()),
+                seller_id: None,
+                order_by: Some(db_fields::CREATED_AT.into()),
+                order_direction: "desc".into(),
+                start_after: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resp.total_fetched, 1);
+        assert_eq!(resp.products[0][db_fields::ID], id1.as_str());
+        assert_eq!(
+            resp.products[0][ob_core::constants::fields::SUBCATEGORY],
+            "Audio"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_products_honors_start_after_cursor() {
+        let state = setup_state().await;
+        let u = uuid::Uuid::new_v4().to_string();
+        let seller_id = format!("seller_cursor_{u}");
+        let id1 = format!("p_cursor_1_{u}");
+        let id2 = format!("p_cursor_2_{u}");
+        let id3 = format!("p_cursor_3_{u}");
+
+        for (id, created_at) in [
+            (id1.as_str(), "2026-01-03T00:00:00Z"),
+            (id2.as_str(), "2026-01-02T00:00:00Z"),
+            (id3.as_str(), "2026-01-01T00:00:00Z"),
+        ] {
+            state
+                .db
+                .upsert_document(
+                    collections::PRODUCTS,
+                    id,
+                    serde_json::json!({
+                        db_fields::LIFECYCLE_STATUS: "active",
+                        db_fields::SELLER_ID: seller_id,
+                        db_fields::CREATED_AT: created_at,
+                    }),
+                )
+                .await
+                .unwrap();
+        }
+
+        let Json(page1) = list_products(
+            State(state.clone()),
+            Json(ListProductsRequest {
+                page: 1,
+                limit: 2,
+                category: None,
+                subcategory: None,
+                seller_id: Some(seller_id.clone()),
+                order_by: Some(db_fields::CREATED_AT.into()),
+                order_direction: "desc".into(),
+                start_after: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(page1.products.len(), 2);
+        let next_cursor = page1.next_cursor.clone().expect("next cursor");
+
+        let Json(page2) = list_products(
+            State(state),
+            Json(ListProductsRequest {
+                page: 1,
+                limit: 2,
+                category: None,
+                subcategory: None,
+                seller_id: Some(seller_id),
+                order_by: Some(db_fields::CREATED_AT.into()),
+                order_direction: "desc".into(),
+                start_after: Some(next_cursor),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(page2.products.len(), 1);
+        assert_eq!(page2.products[0][db_fields::ID], id3.as_str());
+    }
+
+    #[tokio::test]
+    async fn test_list_products_honors_start_after_cursor_when_cursor_field_is_null() {
+        let state = setup_state().await;
+        let u = uuid::Uuid::new_v4().to_string();
+        let seller_id = format!("seller_avg_cursor_{u}");
+        let id1 = format!("p_avg_cursor_1_{u}");
+        let id2 = format!("p_avg_cursor_2_{u}");
+
+        for id in [id1.as_str(), id2.as_str()] {
+            state
+                .db
+                .upsert_document(
+                    collections::PRODUCTS,
+                    id,
+                    serde_json::json!({
+                        db_fields::LIFECYCLE_STATUS: "active",
+                        db_fields::SELLER_ID: seller_id,
+                    }),
+                )
+                .await
+                .unwrap();
+        }
+
+        let Json(page1) = list_products(
+            State(state.clone()),
+            Json(ListProductsRequest {
+                page: 1,
+                limit: 1,
+                category: None,
+                subcategory: None,
+                seller_id: Some(seller_id.clone()),
+                order_by: Some(fields::AVG_RATING.into()),
+                order_direction: "desc".into(),
+                start_after: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(page1.products.len(), 1);
+        let first_id = page1.products[0][db_fields::ID]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let next_cursor = page1.next_cursor.clone().expect("next cursor");
+
+        let Json(page2) = list_products(
+            State(state),
+            Json(ListProductsRequest {
+                page: 1,
+                limit: 1,
+                category: None,
+                subcategory: None,
+                seller_id: Some(seller_id),
+                order_by: Some(fields::AVG_RATING.into()),
+                order_direction: "desc".into(),
+                start_after: Some(next_cursor),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(page2.products.len(), 1);
+        assert_ne!(
+            page2.products[0][db_fields::ID].as_str(),
+            Some(first_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_seller_list_excludes_inactive_by_default() {
+        let state = setup_state().await;
+        let u = uuid::Uuid::new_v4().to_string();
+        let seller = format!("seller_excl_{u}");
+        let id1 = format!("p_excl1_{u}");
+        let id2 = format!("p_excl2_{u}");
+        for (id, status) in [(id1.as_str(), "active"), (id2.as_str(), "archived")] {
+            state
+                .db
+                .upsert_document(
+                    collections::PRODUCTS,
+                    id,
+                    serde_json::json!({
+                        db_fields::SELLER_ID: seller,
+                        db_fields::LIFECYCLE_STATUS: status,
+                        db_fields::CREATED_AT: "2026-01-01T00:00:00Z",
                     }),
                 )
                 .await
@@ -1826,7 +2350,7 @@ mod tests {
         let Json(resp) = seller_list(
             State(state),
             Json(SellerListRequest {
-                seller_id: "seller_1".into(),
+                seller_id: seller.clone(),
                 page: 1,
                 limit: 10,
                 start_after: None,
@@ -1837,22 +2361,26 @@ mod tests {
         .unwrap();
 
         assert_eq!(resp.total_fetched, 1);
-        assert_eq!(resp.products[0]["id"], "products:p1");
+        assert_eq!(resp.products[0][db_fields::ID], id1.as_str());
     }
 
     #[tokio::test]
     async fn test_seller_list_can_include_inactive() {
         let state = setup_state().await;
-        for (id, status) in [("p1", "active"), ("p2", "archived")] {
+        let u = uuid::Uuid::new_v4().to_string();
+        let seller = format!("seller_incl_{u}");
+        let id1 = format!("p_incl1_{u}");
+        let id2 = format!("p_incl2_{u}");
+        for (id, status) in [(id1.as_str(), "active"), (id2.as_str(), "archived")] {
             state
                 .db
                 .upsert_document(
                     collections::PRODUCTS,
                     id,
                     serde_json::json!({
-                        fields::SELLER_ID: "seller_1",
-                        fields::LIFECYCLE_STATUS: status,
-                        fields::CREATED_AT: "2026-01-01T00:00:00Z",
+                        db_fields::SELLER_ID: seller,
+                        db_fields::LIFECYCLE_STATUS: status,
+                        db_fields::CREATED_AT: "2026-01-01T00:00:00Z",
                     }),
                 )
                 .await
@@ -1862,7 +2390,7 @@ mod tests {
         let Json(resp) = seller_list(
             State(state),
             Json(SellerListRequest {
-                seller_id: "seller_1".into(),
+                seller_id: seller.clone(),
                 page: 1,
                 limit: 10,
                 start_after: None,
@@ -1884,7 +2412,7 @@ mod tests {
                 .upsert_document(
                     collections::PRODUCTS,
                     id,
-                    serde_json::json!({ fields::LIFECYCLE_STATUS: "active" }),
+                    serde_json::json!({ db_fields::LIFECYCLE_STATUS: "active", db_fields::SELLER_ID: "seller_1" }),
                 )
                 .await
                 .unwrap();
@@ -1895,7 +2423,7 @@ mod tests {
             Extension(auth("seller_1", &["seller"])),
             Json(BulkUpdateRequest {
                 product_ids: vec!["prod_1".into(), "prod_2".into()],
-                update: serde_json::json!({ fields::LIFECYCLE_STATUS: "paused" }),
+                update: serde_json::json!({ db_fields::LIFECYCLE_STATUS: "inactive" }),
             }),
         )
         .await
@@ -1907,8 +2435,8 @@ mod tests {
             .get_document(collections::PRODUCTS, "prod_1")
             .await
             .unwrap();
-        assert_eq!(updated[fields::LIFECYCLE_STATUS], "paused");
-        assert!(updated.get(fields::UPDATED_AT).is_some());
+        assert_eq!(updated[db_fields::LIFECYCLE_STATUS], "inactive");
+        assert!(updated.get(db_fields::UPDATED_AT).is_some());
     }
 
     #[tokio::test]
@@ -1919,7 +2447,7 @@ mod tests {
             .upsert_document(
                 collections::PRODUCTS,
                 "prod_1",
-                serde_json::json!({ fields::SELLER_ID: "seller_1" }),
+                serde_json::json!({ db_fields::SELLER_ID: "seller_1" }),
             )
             .await
             .unwrap();
@@ -1935,10 +2463,11 @@ mod tests {
 
         let err = update_product(
             State(state),
+            Extension(auth("buyer_1", &["buyer"])),
             Json(UpdateProductRequest {
                 product_id: "prod_1".into(),
                 user_id: "buyer_1".into(),
-                product_data: serde_json::json!({ fields::PRICE_CENTS: 999 }),
+                product_data: serde_json::json!({ db_fields::PRICE_CENTS: 999 }),
             }),
         )
         .await
@@ -1949,12 +2478,14 @@ mod tests {
     #[tokio::test]
     async fn test_update_product_success() {
         let state = setup_state().await;
+        let product_id = format!("prod_{}", uuid::Uuid::new_v4());
+        let seller_id = format!("seller_{}", uuid::Uuid::new_v4());
         state
             .db
             .upsert_document(
                 collections::PRODUCTS,
-                "prod_1",
-                serde_json::json!({ fields::SELLER_ID: "seller_1", fields::TITLE: "Old" }),
+                &product_id,
+                serde_json::json!({ db_fields::SELLER_ID: &seller_id, fields::TITLE: "Old" }),
             )
             .await
             .unwrap();
@@ -1962,7 +2493,7 @@ mod tests {
             .db
             .upsert_document(
                 collections::USERS,
-                "seller_1",
+                &seller_id,
                 serde_json::json!({ fields::ROLES: ["seller"] }),
             )
             .await
@@ -1970,9 +2501,10 @@ mod tests {
 
         let Json(resp) = update_product(
             State(state.clone()),
+            Extension(auth(&seller_id, &["seller"])),
             Json(UpdateProductRequest {
-                product_id: "prod_1".into(),
-                user_id: "seller_1".into(),
+                product_id: product_id.clone(),
+                user_id: seller_id.clone(),
                 product_data: serde_json::json!({ fields::TITLE: "New Title" }),
             }),
         )
@@ -1982,20 +2514,23 @@ mod tests {
         assert_eq!(resp["success"], true);
         let updated = state
             .db
-            .get_document(collections::PRODUCTS, "prod_1")
+            .get_document(collections::PRODUCTS, &product_id)
             .await
             .unwrap();
         assert_eq!(updated[fields::TITLE], "New Title");
-        assert!(updated.get(fields::UPDATED_AT).is_some());
+        assert!(updated.get(db_fields::UPDATED_AT).is_some());
     }
 
     #[tokio::test]
     async fn test_upload_product_video_sanitizes_file_name() {
-        let Json(resp) = upload_product_video(Json(UploadProductVideoRequest {
-            user_id: "user_1".into(),
-            file_name: "<video>.mp4".into(),
-            content_type: None,
-        }))
+        let Json(resp) = upload_product_video(
+            Extension(auth("user_1", &["seller"])),
+            Json(UploadProductVideoRequest {
+                user_id: "user_1".into(),
+                file_name: "<video>.mp4".into(),
+                content_type: None,
+            }),
+        )
         .await
         .unwrap();
 
@@ -2005,10 +2540,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_upload_review_images_returns_sanitized_urls() {
-        let Json(resp) = upload_review_images(Json(UploadReviewImagesRequest {
-            user_id: "user_1".into(),
-            file_names: vec!["<a>.jpg".into(), "b.jpg".into()],
-        }))
+        let Json(resp) = upload_review_images(
+            Extension(auth("user_1", &["buyer"])),
+            Json(UploadReviewImagesRequest {
+                user_id: "user_1".into(),
+                file_names: vec!["<a>.jpg".into(), "b.jpg".into()],
+            }),
+        )
         .await
         .unwrap();
 
@@ -2030,6 +2568,7 @@ mod tests {
             .unwrap();
 
         let Json(first) = toggle_favorite(
+            Extension(auth("user_1", &["buyer"])),
             State(state.clone()),
             Json(ToggleFavoriteRequest {
                 product_id: "prod_1".into(),
@@ -2041,6 +2580,7 @@ mod tests {
         assert_eq!(first["favorite"], true);
 
         let Json(second) = toggle_favorite(
+            Extension(auth("user_1", &["buyer"])),
             State(state.clone()),
             Json(ToggleFavoriteRequest {
                 product_id: "prod_1".into(),
@@ -2068,7 +2608,7 @@ mod tests {
             .upsert_document(
                 collections::PRODUCTS,
                 "prod_1",
-                serde_json::json!({ fields::TITLE: "Test", fields::SELLER_ID: "seller_1" }),
+                serde_json::json!({ fields::TITLE: "Test", db_fields::SELLER_ID: "seller_1" }),
             )
             .await
             .unwrap();
@@ -2078,7 +2618,10 @@ mod tests {
             Extension(auth("seller_1", &["seller"])),
             Json(UploadImagesRequest {
                 product_id: "prod_1".into(),
-                image_urls: vec!["https://cdn/a.jpg".into(), "https://cdn/b.jpg".into()],
+                image_urls: vec![
+                    "https://cdn.orignagta.ca/images/a.jpg".into(),
+                    "https://cdn.orignagta.ca/images/b.jpg".into(),
+                ],
             }),
         )
         .await
@@ -2102,7 +2645,7 @@ mod tests {
             .upsert_document(
                 collections::PRODUCTS,
                 "prod_1",
-                serde_json::json!({ fields::SELLER_ID: "seller_1" }),
+                serde_json::json!({ db_fields::SELLER_ID: "seller_1" }),
             )
             .await
             .unwrap();
@@ -2128,7 +2671,7 @@ mod tests {
             .upsert_document(
                 collections::PRODUCTS,
                 "prod_1",
-                serde_json::json!({ fields::SELLER_ID: "seller_1" }),
+                serde_json::json!({ db_fields::SELLER_ID: "seller_1" }),
             )
             .await
             .unwrap();
@@ -2157,7 +2700,7 @@ mod tests {
             .upsert_document(
                 collections::PRODUCTS,
                 "prod_1",
-                serde_json::json!({ fields::SELLER_ID: "seller_1" }),
+                serde_json::json!({ db_fields::SELLER_ID: "seller_1" }),
             )
             .await
             .unwrap();
@@ -2167,7 +2710,7 @@ mod tests {
             Extension(auth("seller_1", &["seller"])),
             Json(UploadImagesRequest {
                 product_id: "prod_1".into(),
-                image_urls: vec!["https://cdn/a.jpg".into(), "  ".into()],
+                image_urls: vec!["https://cdn.orignagta.ca/images/a.jpg".into(), "  ".into()],
             }),
         )
         .await
@@ -2183,7 +2726,7 @@ mod tests {
             Extension(auth("seller_1", &["seller"])),
             Json(UploadImagesRequest {
                 product_id: "nonexistent".into(),
-                image_urls: vec!["https://cdn/a.jpg".into()],
+                image_urls: vec!["https://cdn.orignagta.ca/images/a.jpg".into()],
             }),
         )
         .await
@@ -2199,7 +2742,7 @@ mod tests {
             .upsert_document(
                 collections::PRODUCTS,
                 "prod_1",
-                serde_json::json!({ fields::SELLER_ID: "seller_1" }),
+                serde_json::json!({ db_fields::SELLER_ID: "seller_1" }),
             )
             .await
             .unwrap();
@@ -2209,7 +2752,7 @@ mod tests {
             Extension(auth("seller_2", &["seller"])),
             Json(UploadImagesRequest {
                 product_id: "prod_1".into(),
-                image_urls: vec!["https://cdn/a.jpg".into()],
+                image_urls: vec!["https://cdn.orignagta.ca/images/a.jpg".into()],
             }),
         )
         .await
@@ -2244,10 +2787,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_upload_review_images_rejects_empty_handler() {
-        let err = upload_review_images(Json(UploadReviewImagesRequest {
-            user_id: "user_1".into(),
-            file_names: vec![],
-        }))
+        let err = upload_review_images(
+            Extension(auth("user_1", &["buyer"])),
+            Json(UploadReviewImagesRequest {
+                user_id: "user_1".into(),
+                file_names: vec![],
+            }),
+        )
         .await
         .unwrap_err();
         assert!(err.to_string().contains("1-3 entries"));
@@ -2255,10 +2801,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_upload_review_images_rejects_over_3_handler() {
-        let err = upload_review_images(Json(UploadReviewImagesRequest {
-            user_id: "user_1".into(),
-            file_names: vec!["a".into(), "b".into(), "c".into(), "d".into()],
-        }))
+        let err = upload_review_images(
+            Extension(auth("user_1", &["buyer"])),
+            Json(UploadReviewImagesRequest {
+                user_id: "user_1".into(),
+                file_names: vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            }),
+        )
         .await
         .unwrap_err();
         assert!(err.to_string().contains("1-3 entries"));
@@ -2271,6 +2820,7 @@ mod tests {
         let state = setup_state().await;
         let err = delete_product(
             State(state),
+            Extension(auth("user_1", &["seller"])),
             Json(DeleteProductRequest {
                 product_id: "nonexistent".into(),
                 user_id: "user_1".into(),
@@ -2292,6 +2842,7 @@ mod tests {
                 page: 1,
                 limit: 20,
                 category: None,
+                subcategory: None,
                 seller_id: None,
                 order_by: Some("bad_field".into()),
                 order_direction: "desc".into(),
@@ -2308,13 +2859,22 @@ mod tests {
     #[tokio::test]
     async fn test_list_products_asc_direction() {
         let state = setup_state().await;
+        let unique_seller = format!("seller_asc_{}", uuid::Uuid::new_v4());
         for (id, status, created_at) in [
-            ("p1", "active", "2026-01-01T00:00:00Z"),
-            ("p2", "active", "2026-01-02T00:00:00Z"),
+            (
+                &format!("p_asc_{}", uuid::Uuid::new_v4()),
+                "active",
+                "2026-01-01T00:00:00Z",
+            ),
+            (
+                &format!("p_asc_{}", uuid::Uuid::new_v4()),
+                "active",
+                "2026-01-02T00:00:00Z",
+            ),
         ] {
             state.db.upsert_document(
                 collections::PRODUCTS, id,
-                serde_json::json!({ fields::LIFECYCLE_STATUS: status, fields::CREATED_AT: created_at }),
+                serde_json::json!({ db_fields::LIFECYCLE_STATUS: status, db_fields::CREATED_AT: created_at, db_fields::SELLER_ID: unique_seller }),
             ).await.unwrap();
         }
 
@@ -2324,7 +2884,8 @@ mod tests {
                 page: 1,
                 limit: 10,
                 category: None,
-                seller_id: None,
+                subcategory: None,
+                seller_id: Some(unique_seller),
                 order_by: None,
                 order_direction: "asc".into(),
                 start_after: None,
@@ -2340,20 +2901,23 @@ mod tests {
     #[tokio::test]
     async fn test_seller_list_pagination_has_more() {
         let state = setup_state().await;
-        for (id, created_at) in [
-            ("p1", "2026-01-03T00:00:00Z"),
-            ("p2", "2026-01-02T00:00:00Z"),
-            ("p3", "2026-01-01T00:00:00Z"),
+        let u = uuid::Uuid::new_v4().to_string();
+        let seller = format!("seller_pag_{u}");
+        for (suffix, created_at) in [
+            ("1", "2026-01-03T00:00:00Z"),
+            ("2", "2026-01-02T00:00:00Z"),
+            ("3", "2026-01-01T00:00:00Z"),
         ] {
+            let id = format!("p_pag{suffix}_{u}");
             state
                 .db
                 .upsert_document(
                     collections::PRODUCTS,
-                    id,
+                    &id,
                     serde_json::json!({
-                        fields::SELLER_ID: "seller_1",
-                        fields::LIFECYCLE_STATUS: "active",
-                        fields::CREATED_AT: created_at,
+                        db_fields::SELLER_ID: seller,
+                        db_fields::LIFECYCLE_STATUS: "active",
+                        db_fields::CREATED_AT: created_at,
                     }),
                 )
                 .await
@@ -2363,7 +2927,7 @@ mod tests {
         let Json(resp) = seller_list(
             State(state),
             Json(SellerListRequest {
-                seller_id: "seller_1".into(),
+                seller_id: seller.clone(),
                 page: 1,
                 limit: 2,
                 start_after: None,
@@ -2420,7 +2984,7 @@ mod tests {
             .upsert_document(
                 collections::PRODUCTS,
                 "prod_1",
-                serde_json::json!({ fields::SELLER_ID: "seller_1" }),
+                serde_json::json!({ db_fields::SELLER_ID: "seller_1" }),
             )
             .await
             .unwrap();
@@ -2430,13 +2994,97 @@ mod tests {
             Extension(auth("seller_2", &["seller"])),
             Json(BulkUpdateRequest {
                 product_ids: vec!["prod_1".into()],
-                update: serde_json::json!({ fields::LIFECYCLE_STATUS: "paused" }),
+                update: serde_json::json!({ db_fields::LIFECYCLE_STATUS: "paused" }),
             }),
         )
         .await
         .unwrap_err();
 
         assert!(err.to_string().contains("Only product owner or admin"));
+    }
+
+    #[tokio::test]
+    async fn test_bulk_update_rejects_non_object_update() {
+        let state = setup_state().await;
+        state
+            .db
+            .upsert_document(
+                collections::PRODUCTS,
+                "prod_1",
+                serde_json::json!({ db_fields::SELLER_ID: "seller_1", db_fields::LIFECYCLE_STATUS: "active" }),
+            )
+            .await
+            .unwrap();
+
+        let err = bulk_update_products(
+            State(state),
+            Extension(auth("seller_1", &["seller"])),
+            Json(BulkUpdateRequest {
+                product_ids: vec!["prod_1".into()],
+                update: serde_json::json!("not-an-object"),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("update must be an object"));
+    }
+
+    #[tokio::test]
+    async fn test_bulk_update_rejects_invalid_lifecycle_transition() {
+        let state = setup_state().await;
+        state
+            .db
+            .upsert_document(
+                collections::PRODUCTS,
+                "prod_1",
+                serde_json::json!({ db_fields::SELLER_ID: "seller_1", db_fields::LIFECYCLE_STATUS: "active" }),
+            )
+            .await
+            .unwrap();
+
+        let err = bulk_update_products(
+            State(state),
+            Extension(auth("seller_1", &["seller"])),
+            Json(BulkUpdateRequest {
+                product_ids: vec!["prod_1".into()],
+                update: serde_json::json!({ db_fields::LIFECYCLE_STATUS: "paused" }),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("Invalid status transition"));
+    }
+
+    #[tokio::test]
+    async fn test_bulk_update_rejects_negative_stock_quantity() {
+        let state = setup_state().await;
+        state
+            .db
+            .upsert_document(
+                collections::PRODUCTS,
+                "prod_1",
+                serde_json::json!({ db_fields::SELLER_ID: "seller_1", db_fields::LIFECYCLE_STATUS: "active" }),
+            )
+            .await
+            .unwrap();
+
+        let err = bulk_update_products(
+            State(state),
+            Extension(auth("seller_1", &["seller"])),
+            Json(BulkUpdateRequest {
+                product_ids: vec!["prod_1".into()],
+                update: serde_json::json!({ fields::STOCK_QUANTITY: -1 }),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Stock quantity cannot be negative")
+        );
     }
 
     // ── Coverage: update_product non-object productData ──
@@ -2449,7 +3097,7 @@ mod tests {
             .upsert_document(
                 collections::PRODUCTS,
                 "prod_1",
-                serde_json::json!({ fields::SELLER_ID: "seller_1" }),
+                serde_json::json!({ db_fields::SELLER_ID: "seller_1" }),
             )
             .await
             .unwrap();
@@ -2465,6 +3113,7 @@ mod tests {
 
         let err = update_product(
             State(state),
+            Extension(auth("seller_1", &["seller"])),
             Json(UpdateProductRequest {
                 product_id: "prod_1".into(),
                 user_id: "seller_1".into(),
@@ -2482,6 +3131,7 @@ mod tests {
     async fn test_toggle_favorite_product_not_found_handler() {
         let state = setup_state().await;
         let err = toggle_favorite(
+            Extension(auth("user_1", &["buyer"])),
             State(state),
             Json(ToggleFavoriteRequest {
                 product_id: "nonexistent".into(),

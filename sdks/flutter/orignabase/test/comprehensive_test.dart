@@ -107,8 +107,7 @@ void main() {
             'challenge_token': 'chal_789',
           });
 
-      final state =
-          await ob.auth.signInWithEmail('user@test.com', 'Pass1234!');
+      final state = await ob.auth.signInWithEmail('user@test.com', 'Pass1234!');
       expect(state.isAuthenticated, false);
       expect(state.mfaRequired, true);
       expect(state.challengeToken, 'chal_789');
@@ -129,8 +128,7 @@ void main() {
         return {'mfa_required': true, 'challenge_token': 'chal'};
       });
 
-      final state =
-          await ob.auth.verifyMfaChallenge('chal_token', '123456');
+      final state = await ob.auth.verifyMfaChallenge('chal_token', '123456');
       expect(state.isAuthenticated, true);
       expect(ob.auth.accessToken, 'mfa_tok');
 
@@ -160,7 +158,7 @@ void main() {
 
       ob.auth.authStateChanges.listen(states.add);
       await ob.auth.register('test@test.com', 'Pass1234!');
-      ob.auth.signOut();
+      await ob.auth.signOut();
 
       expect(ob.auth.accessToken, isNull);
       expect(ob.auth.currentState.isAuthenticated, false);
@@ -252,8 +250,7 @@ void main() {
         httpClient: rec.client,
       );
 
-      await ob.auth.signInWithApple('apple_code_xyz',
-          displayName: 'Yunior R');
+      await ob.auth.signInWithApple('apple_code_xyz', displayName: 'Yunior R');
 
       final appleReq =
           rec.requests.firstWhere((r) => r.url.path.contains('apple'));
@@ -283,8 +280,9 @@ void main() {
         httpClient: rec.client,
       );
 
-      final doc =
-          await ob.collection('products').add({'title': 'Widget', 'price': 29.99});
+      final doc = await ob
+          .collection('products')
+          .add({'title': 'Widget', 'price': 29.99});
       expect(doc, isA<Document>());
 
       final graphqlReq =
@@ -467,10 +465,7 @@ void main() {
         httpClient: rec.client,
       );
 
-      await ob
-          .collection('products')
-          .select(['title', 'price'])
-          .get();
+      await ob.collection('products').select(['title', 'price']).get();
 
       final query = jsonDecode(rec.requests.last.body)['query'] as String;
       expect(query, contains('select'));
@@ -489,8 +484,7 @@ void main() {
 
       final results = await ob
           .collection('products')
-          .where('category', whereIn: ['electronics', 'gadgets'])
-          .get();
+          .where('category', whereIn: ['electronics', 'gadgets']).get();
 
       expect(results.size, 1);
 
@@ -501,15 +495,16 @@ void main() {
       final ob = mockOb((req) => {
             'data': {
               'list': [
-                {'id': 'p1', 'tags': ['sale']},
+                {
+                  'id': 'p1',
+                  'tags': ['sale']
+                },
               ],
             },
           });
 
-      final results = await ob
-          .collection('products')
-          .where('tags', contains: 'sale')
-          .get();
+      final results =
+          await ob.collection('products').where('tags', contains: 'sale').get();
 
       expect(results.size, 1);
 
@@ -565,11 +560,8 @@ void main() {
         };
       });
 
-      final results = await ob
-          .collection('products')
-          .orderBy('created_at')
-          .limit(20)
-          .get();
+      final results =
+          await ob.collection('products').orderBy('created_at').limit(20).get();
 
       expect(results.size, 20); // Returns limit, not limit+1
       expect(results.hasMore, true);
@@ -590,10 +582,7 @@ void main() {
         };
       });
 
-      final results = await ob
-          .collection('products')
-          .limit(20)
-          .get();
+      final results = await ob.collection('products').limit(20).get();
 
       expect(results.size, 15);
       expect(results.hasMore, false);
@@ -660,11 +649,7 @@ void main() {
         httpClient: rec.client,
       );
 
-      await ob
-          .collection('products')
-          .offset(40)
-          .limit(20)
-          .get();
+      await ob.collection('products').offset(40).limit(20).get();
 
       final query = jsonDecode(rec.requests.last.body)['query'] as String;
       expect(query, contains('offset: 40'));
@@ -731,19 +716,25 @@ void main() {
     test('serverTimestamp generates correct API map', () {
       final fv = FieldValue.serverTimestamp();
       final map = fv.toApiMap('created_at');
-      expect(map, {'created_at': {'_serverTimestamp': true}});
+      expect(map, {
+        'created_at': {'_serverTimestamp': true}
+      });
     });
 
     test('increment generates correct API map', () {
       final fv = FieldValue.increment(5);
       final map = fv.toApiMap('count');
-      expect(map, {'count': {'_increment': 5}});
+      expect(map, {
+        'count': {'_increment': 5}
+      });
     });
 
     test('negative increment (decrement)', () {
       final fv = FieldValue.increment(-1);
       final map = fv.toApiMap('stock');
-      expect(map, {'stock': {'_increment': -1}});
+      expect(map, {
+        'stock': {'_increment': -1}
+      });
     });
 
     test('arrayUnion generates correct API map', () {
@@ -769,7 +760,9 @@ void main() {
     test('delete generates correct API map', () {
       final fv = FieldValue.delete();
       final map = fv.toApiMap('deprecated');
-      expect(map, {'deprecated': {'_deleteField': true}});
+      expect(map, {
+        'deprecated': {'_deleteField': true}
+      });
     });
 
     test('updateWithFieldValues processes mixed data correctly', () async {
@@ -934,7 +927,8 @@ void main() {
               'urls': [
                 {
                   'path': 'images/test.png',
-                  'upload_url': 'http://test.local/storage/upload/images/test.png',
+                  'upload_url':
+                      'http://test.local/storage/upload/images/test.png',
                 }
               ]
             }),
@@ -1013,10 +1007,17 @@ void main() {
 
     test('download returns bytes', () async {
       final client = MockClient((req) async {
-        if (req.url.path.contains('download')) {
-          return http.Response.bytes([10, 20, 30], 200);
+        if (req.url.path.contains('presign')) {
+          return http.Response(
+            jsonEncode({
+              'urls': [
+                {'download_url': 'http://test.local/file'}
+              ]
+            }),
+            200,
+          );
         }
-        return http.Response('{}', 200);
+        return http.Response.bytes([10, 20, 30], 200);
       });
       final ob = OrignaBase.initialize(
         url: 'http://test.local',
@@ -1752,7 +1753,9 @@ void main() {
 
       await ob.graphql(
         'mutation { create(\$input: CreateInput!) }',
-        variables: {'input': {'title': 'Widget'}},
+        variables: {
+          'input': {'title': 'Widget'}
+        },
       );
 
       final body = jsonDecode(rec.requests.last.body);

@@ -36,7 +36,7 @@ proptest! {
 
 proptest! {
     #[test]
-    fn prop_valid_amounts_accepted(cents in 0i64..=100_000_000) {
+    fn prop_valid_amounts_accepted(cents in 0i64..=10_000_000) {
         prop_assert!(validation::validate_amount_cents("price", cents).is_ok());
     }
 
@@ -46,7 +46,7 @@ proptest! {
     }
 
     #[test]
-    fn prop_huge_amounts_rejected(cents in 100_000_001i64..=i64::MAX) {
+    fn prop_huge_amounts_rejected(cents in 10_000_001i64..=i64::MAX) {
         prop_assert!(validation::validate_amount_cents("price", cents).is_err());
     }
 }
@@ -153,7 +153,7 @@ proptest! {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// CORE VALIDATION (SurrealDB identifiers, document IDs)
+// CORE VALIDATION (SQL identifiers, document IDs)
 // ═══════════════════════════════════════════════════════════════════
 
 proptest! {
@@ -182,7 +182,7 @@ proptest! {
 proptest! {
     #[test]
     fn prop_escape_never_panics(s in "\\PC*") {
-        let _ = validate::escape_surreal_string(&s);
+        let _ = validate::escape_sql_string(&s);
     }
 
     #[test]
@@ -202,8 +202,8 @@ proptest! {
 
 proptest! {
     #[test]
-    fn prop_escaped_string_safe_for_surreal(s in ".*") {
-        let escaped = validate::escape_surreal_string(&s);
+    fn prop_escaped_string_safe_for_sql(s in ".*") {
+        let escaped = validate::escape_sql_string(&s);
         let chars: Vec<char> = escaped.chars().collect();
         for (i, &c) in chars.iter().enumerate() {
             if c == '\'' {
@@ -246,7 +246,7 @@ fn sanity_validate_string_basic() {
 fn sanity_validate_amount_basic() {
     assert!(validation::validate_amount_cents("price", 1000).is_ok());
     assert!(validation::validate_amount_cents("price", -1).is_err());
-    assert!(validation::validate_amount_cents("price", 100_000_001).is_err());
+    assert!(validation::validate_amount_cents("price", 10_000_001).is_err());
 }
 
 #[test]
@@ -293,8 +293,8 @@ fn sanity_validate_document_id_basic() {
 }
 
 #[test]
-fn sanity_escape_surreal_string_basic() {
-    assert_eq!(validate::escape_surreal_string("hello"), "hello");
-    assert_eq!(validate::escape_surreal_string("it's"), "it\\'s");
-    assert_eq!(validate::escape_surreal_string("a\\b"), "a\\\\b");
+fn sanity_escape_sql_string_basic() {
+    assert_eq!(validate::escape_sql_string("hello"), "hello");
+    assert_eq!(validate::escape_sql_string("it's"), "it\\'s");
+    assert_eq!(validate::escape_sql_string("a\\b"), "a\\\\b");
 }

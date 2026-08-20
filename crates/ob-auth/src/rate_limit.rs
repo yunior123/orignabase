@@ -50,27 +50,41 @@ impl RateLimiter {
     }
 }
 
-/// Extract client IP from request (checks X-Forwarded-For, then peer addr).
+/// Trusted proxy IP — only trust X-Forwarded-For from Caddy at 127.0.0.1.
+const TRUSTED_PROXY_IP: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+
+/// Extract client IP from request, respecting X-Forwarded-For only from trusted proxy.
+/// Only trusts X-Forwarded-For/X-Real-IP when the peer address is 127.0.0.1 (Caddy).
 fn extract_ip(request: &Request) -> IpAddr {
-    // Check X-Forwarded-For header first (for reverse proxies)
-    if let Some(forwarded) = request.headers().get("x-forwarded-for")
-        && let Ok(val) = forwarded.to_str()
-        && let Some(first_ip) = val.split(',').next()
-        && let Ok(ip) = first_ip.trim().parse::<IpAddr>()
-    {
-        return ip;
+    // Get peer address from ConnectInfo extension
+    let peer_ip = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip())
+        .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+
+    // Only trust forwarded headers from the trusted Caddy proxy (127.0.0.1)
+    if peer_ip == TRUSTED_PROXY_IP {
+        // Check X-Forwarded-For header first
+        if let Some(forwarded) = request.headers().get("x-forwarded-for")
+            && let Ok(val) = forwarded.to_str()
+            && let Some(first_ip) = val.split(',').next()
+            && let Ok(ip) = first_ip.trim().parse::<IpAddr>()
+        {
+            return ip;
+        }
+
+        // Check X-Real-IP header
+        if let Some(real_ip) = request.headers().get("x-real-ip")
+            && let Ok(val) = real_ip.to_str()
+            && let Ok(ip) = val.trim().parse::<IpAddr>()
+        {
+            return ip;
+        }
     }
 
-    // Check X-Real-IP header
-    if let Some(real_ip) = request.headers().get("x-real-ip")
-        && let Ok(val) = real_ip.to_str()
-        && let Ok(ip) = val.trim().parse::<IpAddr>()
-    {
-        return ip;
-    }
-
-    // Fallback to loopback
-    IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+    // Not from trusted proxy or no valid forwarded header → use peer IP
+    peer_ip
 }
 
 /// Axum middleware for rate limiting auth routes.
@@ -104,14 +118,18 @@ pub async fn check_rate_limit(
     let now = Utc::now().timestamp();
     let window_start = now - window_seconds;
 
-    // Count recent attempts
-    let query = format!(
-        "SELECT count() FROM mfa_attempts WHERE user_id = '{}' AND action = '{}' AND timestamp >= {} GROUP ALL",
-        user_id, action, window_start
-    );
+    // Count recent attempts (parameterized to prevent SQL injection)
+    let query = "SELECT count() FROM mfa_attempts WHERE user_id = $user_id AND action = $action AND timestamp >= $window_start GROUP ALL";
 
     let results = db
-        .query_raw(&query)
+        .query_bind_value(
+            query,
+            serde_json::json!({
+                "user_id": user_id,
+                "action": action,
+                "window_start": window_start,
+            }),
+        )
         .await
         .map_err(|e| Error::Internal(format!("Rate limit check failed: {}", e)))?;
 
@@ -222,41 +240,72 @@ mod tests {
         assert!(!limiter.check(ip));
     }
 
+    /// Helper to build a request with a ConnectInfo extension for testing extract_ip.
+    fn build_request_with_peer(
+        peer_addr: &str,
+        headers: Vec<(&str, &str)>,
+    ) -> Request<axum::body::Body> {
+        let mut builder = Request::builder();
+        for (k, v) in &headers {
+            builder = builder.header(*k, *v);
+        }
+        let mut req = builder.body(axum::body::Body::empty()).unwrap();
+        let socket_addr: std::net::SocketAddr = peer_addr.parse().unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(socket_addr));
+        req
+    }
+
     #[test]
-    fn test_extract_ip_fallback() {
+    fn test_extract_ip_fallback_no_connect_info() {
+        // No ConnectInfo extension → falls back to LOCALHOST
         let req = Request::builder().body(axum::body::Body::empty()).unwrap();
         let ip = extract_ip(&req);
         assert_eq!(ip, IpAddr::V4(Ipv4Addr::LOCALHOST));
     }
 
     #[test]
-    fn test_extract_ip_from_x_forwarded_for() {
-        let req = Request::builder()
-            .header("x-forwarded-for", "203.0.113.50, 70.41.3.18")
-            .body(axum::body::Body::empty())
-            .unwrap();
+    fn test_extract_ip_from_trusted_proxy_xff() {
+        // Peer is 127.0.0.1 (Caddy) → trust X-Forwarded-For
+        let req = build_request_with_peer(
+            "127.0.0.1:8080",
+            vec![("x-forwarded-for", "203.0.113.50, 70.41.3.18")],
+        );
         let ip = extract_ip(&req);
         assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 50)));
     }
 
     #[test]
-    fn test_extract_ip_from_x_real_ip() {
-        let req = Request::builder()
-            .header("x-real-ip", "198.51.100.7")
-            .body(axum::body::Body::empty())
-            .unwrap();
+    fn test_extract_ip_from_trusted_proxy_x_real_ip() {
+        // Peer is 127.0.0.1 (Caddy) → trust X-Real-IP
+        let req = build_request_with_peer("127.0.0.1:8080", vec![("x-real-ip", "198.51.100.7")]);
         let ip = extract_ip(&req);
         assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)));
     }
 
     #[test]
-    fn test_extract_ip_x_forwarded_for_takes_priority() {
-        let req = Request::builder()
-            .header("x-forwarded-for", "1.2.3.4")
-            .header("x-real-ip", "5.6.7.8")
-            .body(axum::body::Body::empty())
-            .unwrap();
+    fn test_extract_ip_xff_takes_priority_over_x_real_ip() {
+        let req = build_request_with_peer(
+            "127.0.0.1:8080",
+            vec![("x-forwarded-for", "1.2.3.4"), ("x-real-ip", "5.6.7.8")],
+        );
         let ip = extract_ip(&req);
         assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)));
+    }
+
+    #[test]
+    fn test_extract_ip_rejects_spoofed_xff_from_untrusted_peer() {
+        // Peer is NOT 127.0.0.1 → ignore X-Forwarded-For, use peer IP
+        let req =
+            build_request_with_peer("203.0.113.99:54321", vec![("x-forwarded-for", "1.2.3.4")]);
+        let ip = extract_ip(&req);
+        assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 99)));
+    }
+
+    #[test]
+    fn test_extract_ip_rejects_spoofed_x_real_ip_from_untrusted_peer() {
+        let req = build_request_with_peer("10.0.0.5:12345", vec![("x-real-ip", "1.2.3.4")]);
+        let ip = extract_ip(&req);
+        assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)));
     }
 }

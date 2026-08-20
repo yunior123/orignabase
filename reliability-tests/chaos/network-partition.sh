@@ -4,14 +4,14 @@ BASE_URL="${1:-https://api.orignagta.ca}"
 SSH_HOST="${2:-root@204.168.137.16}"
 SSH_KEY="${3:-$HOME/.ssh/id_ed25519}"
 
-echo "=== Chaos: Network Partition (SurrealDB) ==="
+echo "=== Chaos: Network Partition (PostgreSQL) ==="
 
-# Get SurrealDB container IP
-DB_IP=$(ssh -i "$SSH_KEY" "$SSH_HOST" "docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' surrealdb")
-echo "SurrealDB IP: $DB_IP"
+# Get PostgreSQL container IP
+DB_IP=$(ssh -i "$SSH_KEY" "$SSH_HOST" "docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' orignabase-postgres-1")
+echo "PostgreSQL IP: $DB_IP"
 
-# Block traffic from orignabase to surrealdb
-ssh -i "$SSH_KEY" "$SSH_HOST" "docker exec orignabase sh -c 'apt-get update -qq && apt-get install -qq -y iptables > /dev/null 2>&1; iptables -A OUTPUT -d $DB_IP -j DROP'" || true
+# Block traffic from the dev app container to PostgreSQL
+ssh -i "$SSH_KEY" "$SSH_HOST" "docker exec orignabase-orignabase-dev-1 sh -c 'apt-get update -qq && apt-get install -qq -y iptables > /dev/null 2>&1; iptables -A OUTPUT -d $DB_IP -j DROP'" || true
 echo "Network partition active"
 sleep 5
 
@@ -20,7 +20,7 @@ HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$BASE_URL/heal
 echo "During partition: /health → $HTTP_CODE"
 
 # Remove partition
-ssh -i "$SSH_KEY" "$SSH_HOST" "docker exec orignabase iptables -D OUTPUT -d $DB_IP -j DROP" || true
+ssh -i "$SSH_KEY" "$SSH_HOST" "docker exec orignabase-orignabase-dev-1 iptables -D OUTPUT -d $DB_IP -j DROP" || true
 echo "Network partition removed"
 sleep 5
 

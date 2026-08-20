@@ -28,3 +28,5 @@ cluster = ["async-nats"]
 
 [dev-dependencies]
 tokio-test = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+tokio-tungstenite = "0.24"

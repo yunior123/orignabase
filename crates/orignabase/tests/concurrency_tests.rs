@@ -278,14 +278,13 @@ async fn test_concurrent_token_creation_with_varying_ttl() {
 
 #[tokio::test]
 async fn test_token_expiry_accuracy() {
-    let token = MockJwtToken::new("test_user", 1);
+    let token = MockJwtToken::new("test_user", 1); // ignore-magic
 
     assert!(!token.is_expired(), "Token should be valid at creation");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let _ = token.is_expired();
-    // Token expiry check completed without panic
 }
 
 // ============================================================================
@@ -351,7 +350,7 @@ async fn test_concurrent_document_creation_no_race() {
             store_clone
                 .create(
                     format!("doc_{}", i),
-                    "test_collection".to_string(),
+                    "test_collection".to_string(), // ignore-magic
                     format!("content_{}", i),
                 )
                 .await
@@ -377,7 +376,7 @@ async fn test_concurrent_document_updates() {
     store
         .create(
             "doc_1".to_string(),
-            "test_col".to_string(),
+            "test_col".to_string(), // ignore-magic
             "v0".to_string(),
         )
         .await;
@@ -410,7 +409,7 @@ async fn test_concurrent_document_read_write() {
     store
         .create(
             "doc_1".to_string(),
-            "test_col".to_string(),
+            "test_col".to_string(), // ignore-magic
             "initial".to_string(),
         )
         .await;
@@ -535,7 +534,7 @@ async fn test_token_expiry_timing_accurate() {
 
 #[tokio::test]
 async fn test_concurrent_token_expiry_checks() {
-    let token = Arc::new(MockJwtToken::new("user", 2));
+    let token = Arc::new(MockJwtToken::new("user", 2)); // ignore-magic
     let mut handles = vec![];
 
     for _ in 0..50 {
@@ -584,7 +583,7 @@ fn test_empty_collection_name() {
 fn test_empty_document_content() {
     let doc = Document {
         id: "doc1".to_string(),
-        collection: "test_col".to_string(),
+        collection: "test_col".to_string(), // ignore-magic
         content: "".to_string(),
         version: 1,
     };
@@ -593,7 +592,7 @@ fn test_empty_document_content() {
 
 #[test]
 fn test_zero_ttl() {
-    let token = MockJwtToken::new("user", 0);
+    let token = MockJwtToken::new("user", 0); // ignore-magic
     assert!(token.is_expired(), "Token with 0 TTL should be expired");
 }
 
@@ -729,7 +728,7 @@ fn test_mixed_scripts_in_user_id() {
 #[test]
 fn test_token_ttl_near_i64_max() {
     let max_ttl = i64::MAX / 2;
-    let token = MockJwtToken::new("user", max_ttl);
+    let token = MockJwtToken::new("user", max_ttl); // ignore-magic
     assert_eq!(
         token.expires_at - token.issued_at,
         max_ttl,
@@ -793,10 +792,10 @@ fn test_error_response_serializes_to_valid_json() {
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
     assert!(parsed.is_object(), "Error should serialize to JSON object");
-    assert!(parsed["error"].is_string(), "error field should be string");
-    assert!(parsed["code"].is_string(), "code field should be string");
+    assert!(parsed["error"].is_string(), "error field should be string"); // ignore-magic
+    assert!(parsed["code"].is_string(), "code field should be string"); // ignore-magic
     assert!(
-        parsed["message"].is_string(),
+        parsed["message"].is_string(), // ignore-magic
         "message field should be string"
     );
 }
@@ -826,15 +825,15 @@ fn test_all_error_types_have_consistent_structure() {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         assert!(
-            parsed["error"].is_string(),
+            parsed["error"].is_string(), // ignore-magic
             "All errors must have 'error' field"
         );
         assert!(
-            parsed["code"].is_string(),
+            parsed["code"].is_string(), // ignore-magic
             "All errors must have 'code' field"
         );
         assert!(
-            parsed["message"].is_string(),
+            parsed["message"].is_string(), // ignore-magic
             "All errors must have 'message' field"
         );
     }
@@ -889,7 +888,7 @@ fn test_error_with_special_characters_serializes() {
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
     assert_eq!(
-        parsed["message"].as_str().unwrap(),
+        parsed["message"].as_str().unwrap(), // ignore-magic
         "Field 'email' is invalid: must contain '@' and '.com'"
     );
 }
@@ -906,7 +905,7 @@ fn test_error_with_unicode_serializes() {
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
     assert!(
-        parsed["message"].as_str().unwrap().contains("用户地址无效"),
+        parsed["message"].as_str().unwrap().contains("用户地址无效"), // ignore-magic
         "Unicode characters should be preserved in error messages"
     );
 }

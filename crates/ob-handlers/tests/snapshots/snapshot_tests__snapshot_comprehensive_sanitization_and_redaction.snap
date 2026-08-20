@@ -1,9 +1,10 @@
 ---
 source: crates/ob-handlers/tests/snapshot_tests.rs
+assertion_line: 899
 expression: combined
 ---
 {
   "original": "\n        <script>alert('xss')</script>\n        Contact support@example.com or call 416-555-0123\n        <p>Safe content here</p>\n    ",
-  "sanitized": "\n        alert('xss')\n        Contact support@example.com or call 416-555-0123\n        Safe content here\n    ",
-  "redacted": "\n        alert('xss')\n        Contact [REDACTED] or call [REDACTED]\n        Safe content here\n    "
+  "redacted": "\n        \n        Contact [REDACTED] or call [REDACTED]\n        Safe content here\n    ",
+  "sanitized": "\n        \n        Contact support@example.com or call 416-555-0123\n        Safe content here\n    "
 }

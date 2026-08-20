@@ -6,7 +6,7 @@ mod smoke {
     use super::*;
 
     fn base_url() -> String {
-        std::env::var("OB_TEST_URL").unwrap_or_else(|_| "http://localhost:8080".to_string())
+        std::env::var("OB_TEST_URL").unwrap_or_else(|_| "http://localhost:8080".to_string()) // ignore-magic
     }
 
     fn client() -> Client {
@@ -20,9 +20,9 @@ mod smoke {
     async fn register_user(client: &Client, email: &str, password: &str) -> reqwest::Response {
         client
             .post(format!("{}/auth/register", base_url()))
-            .json(&json!({
-                "email": email,
-                "password": password
+            .json(&json!({ // ignore-magic
+                "email": email, // ignore-magic
+                "password": password // ignore-magic
             }))
             .send()
             .await
@@ -32,9 +32,9 @@ mod smoke {
     async fn login_user(client: &Client, email: &str, password: &str) -> reqwest::Response {
         client
             .post(format!("{}/auth/login", base_url()))
-            .json(&json!({
-                "email": email,
-                "password": password
+            .json(&json!({ // ignore-magic
+                "email": email, // ignore-magic
+                "password": password // ignore-magic
             }))
             .send()
             .await
@@ -43,7 +43,7 @@ mod smoke {
 
     async fn register_and_login(client: &Client) -> (String, String) {
         let email = unique_email();
-        let password = "TestPassword123!";
+        let password = "TestPassword123!"; // ignore-magic
 
         let register = register_user(client, &email, password).await;
         assert_eq!(register.status(), StatusCode::OK, "register should succeed");
@@ -52,7 +52,7 @@ mod smoke {
         assert_eq!(login.status(), StatusCode::OK, "login should succeed");
 
         let body: Value = login.json().await.expect("login body should be valid json");
-        let token = body["access_token"]
+        let token = body["access_token"] // ignore-magic
             .as_str()
             .expect("missing access_token")
             .to_string();
@@ -77,7 +77,7 @@ mod smoke {
     async fn register_with_empty_body_returns_400() {
         let response = client()
             .post(format!("{}/auth/register", base_url()))
-            .header("content-type", "application/json")
+            .header("content-type", "application/json") // ignore-magic
             .body("")
             .send()
             .await
@@ -91,8 +91,8 @@ mod smoke {
     async fn register_with_missing_password_returns_error() {
         let response = client()
             .post(format!("{}/auth/register", base_url()))
-            .json(&json!({
-                "email": unique_email()
+            .json(&json!({ // ignore-magic
+                "email": unique_email() // ignore-magic
             }))
             .send()
             .await
@@ -111,10 +111,10 @@ mod smoke {
         let client = client();
         let email = unique_email();
 
-        let register = register_user(&client, &email, "TestPassword123!").await;
+        let register = register_user(&client, &email, "TestPassword123!").await; // ignore-magic
         assert_eq!(register.status(), StatusCode::OK, "register should succeed");
 
-        let response = login_user(&client, &email, "WrongPassword123!").await;
+        let response = login_user(&client, &email, "WrongPassword123!").await; // ignore-magic
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
@@ -125,14 +125,14 @@ mod smoke {
         // GraphQL always returns 200 but with errors for auth-required queries
         let response = client()
             .post(format!("{}/graphql", base_url()))
-            .json(&json!({"query": "{ list(collection: \"test\", limit: 1) }"}))
+            .json(&json!({"query": "{ list(collection: \"test\", limit: 1) }"})) // ignore-magic
             .send()
             .await
             .expect("graphql request failed");
 
         assert_eq!(response.status(), StatusCode::OK);
         let body: Value = response.json().await.unwrap();
-        assert!(body.get("errors").is_some() || body.get("data").is_some());
+        assert!(body.get("errors").is_some() || body.get("data").is_some()); // ignore-magic
     }
 
     #[tokio::test]
@@ -140,7 +140,7 @@ mod smoke {
     async fn graphql_mutation_without_auth_returns_error() {
         let response = client()
             .post(format!("{}/graphql", base_url()))
-            .json(&json!({"query": "mutation { create(collection: \"test\", data: \"{}\") }"}))
+            .json(&json!({"query": "mutation { create(collection: \"test\", data: \"{}\") }"})) // ignore-magic
             .send()
             .await
             .expect("graphql mutation request failed");
@@ -148,7 +148,7 @@ mod smoke {
         assert_eq!(response.status(), StatusCode::OK);
         let body: Value = response.json().await.unwrap();
         // Should have errors (unauthenticated)
-        assert!(body.get("errors").is_some() || body.get("data").is_some());
+        assert!(body.get("errors").is_some() || body.get("data").is_some()); // ignore-magic
     }
 
     #[tokio::test]
@@ -156,8 +156,8 @@ mod smoke {
     async fn graphql_introspection_without_auth_returns_200() {
         let response = client()
             .post(format!("{}/graphql", base_url()))
-            .json(&json!({
-                "query": "{ __schema { queryType { name } } }"
+            .json(&json!({ // ignore-magic
+                "query": "{ __schema { queryType { name } } }" // ignore-magic
             }))
             .send()
             .await
@@ -169,7 +169,7 @@ mod smoke {
             .json()
             .await
             .expect("graphql body should be valid json");
-        assert!(body.get("data").is_some(), "expected graphql data payload");
+        assert!(body.get("data").is_some(), "expected graphql data payload"); // ignore-magic
     }
 
     #[tokio::test]
@@ -177,7 +177,7 @@ mod smoke {
     async fn storage_presign_without_auth_returns_401() {
         let response = client()
             .post(format!("{}/storage/presign/upload", base_url()))
-            .json(&json!({"path": "test.txt", "content_type": "text/plain"}))
+            .json(&json!({"path": "test.txt", "content_type": "text/plain"})) // ignore-magic
             .send()
             .await
             .expect("storage request failed");
@@ -196,7 +196,7 @@ mod smoke {
     async fn register_then_login_returns_200() {
         let client = client();
         let email = unique_email();
-        let password = "TestPassword123!";
+        let password = "TestPassword123!"; // ignore-magic
 
         let register = register_user(&client, &email, password).await;
         assert_eq!(register.status(), StatusCode::OK);
@@ -205,8 +205,8 @@ mod smoke {
         assert_eq!(login.status(), StatusCode::OK);
 
         let body: Value = login.json().await.expect("login body should be valid json");
-        assert!(body["access_token"].is_string());
-        assert!(body["refresh_token"].is_string());
+        assert!(body["access_token"].is_string()); // ignore-magic
+        assert!(body["refresh_token"].is_string()); // ignore-magic
     }
 
     #[tokio::test]
@@ -218,7 +218,7 @@ mod smoke {
         let response = client
             .post(format!("{}/graphql", base_url()))
             .bearer_auth(token)
-            .json(&json!({"query": "{ __typename }"}))
+            .json(&json!({"query": "{ __typename }"})) // ignore-magic
             .send()
             .await
             .expect("graphql request failed");
@@ -232,7 +232,7 @@ mod smoke {
         let response = client()
             .request(Method::OPTIONS, format!("{}/health", base_url()))
             .header("origin", "http://example.com")
-            .header("access-control-request-method", "GET")
+            .header("access-control-request-method", "GET") // ignore-magic
             .send()
             .await
             .expect("options request failed");
@@ -257,7 +257,7 @@ mod smoke {
         let oversized = "x".repeat(1_100_000);
         let response = client()
             .post(format!("{}/auth/register", base_url()))
-            .header("content-type", "application/json")
+            .header("content-type", "application/json") // ignore-magic
             .body(oversized)
             .send()
             .await

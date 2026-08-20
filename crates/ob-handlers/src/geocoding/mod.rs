@@ -113,12 +113,10 @@ mod tests {
     use ob_database::DatabaseClient;
     use std::sync::Arc;
 
-    fn create_test_state() -> HandlersState {
+    async fn create_test_state() -> HandlersState {
         HandlersState {
             config: Arc::new(ob_core::Config::load(None).unwrap()),
-            db: tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(DatabaseClient::new_mem())
-            }),
+            db: DatabaseClient::new_mem().await,
             http_client: reqwest::Client::new(),
             stripe_client: None,
             stripe_base_url: String::new(),
@@ -128,7 +126,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_query_returns_validation_error() {
-        let state = create_test_state();
+        let state = create_test_state().await;
         let req = GeocodeAutocompleteRequest {
             query: "".to_string(),
             country: None,
@@ -146,7 +144,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_whitespace_only_query_returns_validation_error() {
-        let state = create_test_state();
+        let state = create_test_state().await;
         let req = GeocodeAutocompleteRequest {
             query: "   ".to_string(),
             country: None,
@@ -160,7 +158,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_missing_api_key_returns_empty_features() {
-        let state = create_test_state();
+        let state = create_test_state().await;
         let req = GeocodeAutocompleteRequest {
             query: "toronto".to_string(),
             country: None,
@@ -184,9 +182,7 @@ mod tests {
 
         let state = HandlersState {
             config: Arc::new(config),
-            db: tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(DatabaseClient::new_mem())
-            }),
+            db: DatabaseClient::new_mem().await,
             http_client: reqwest::Client::new(),
             stripe_client: None,
             stripe_base_url: String::new(),

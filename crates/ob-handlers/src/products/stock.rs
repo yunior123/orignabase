@@ -1,12 +1,14 @@
 //! Stock notification subscribe/unsubscribe handlers.
 //! Ported from: functions/handlers/products.py (subscribe_stock_notification, unsubscribe_stock_notification)
 
-use axum::{Json, Router, extract::State, routing::post};
+use axum::{Extension, Json, Router, extract::State, routing::post};
+use ob_auth::middleware::AuthContext;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::info;
 
 use crate::HandlersState;
+use crate::shared::auth::resolve_self_user_id;
 use crate::shared::schema::{collections, fields};
 use crate::shared::validation::validate_uid;
 
@@ -53,10 +55,12 @@ pub fn router(state: HandlersState) -> Router {
 
 async fn subscribe(
     State(state): State<HandlersState>,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<StockSubscribeRequest>,
 ) -> Result<Json<StockSubscribeResponse>, ob_core::Error> {
+    let user_id = resolve_self_user_id(&auth, Some(req.user_id.as_str()), "userId")?;
     validate_uid("productId", &req.product_id)?;
-    validate_uid("userId", &req.user_id)?;
+    validate_uid("userId", &user_id)?;
 
     // Validate productId format (no path traversal)
     if req.product_id.contains('/') || req.product_id == "." || req.product_id == ".." {
@@ -82,7 +86,7 @@ async fn subscribe(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    if seller_id == req.user_id {
+    if seller_id == user_id {
         return Err(ob_core::Error::Forbidden(
             "Sellers cannot subscribe to their own product notifications".into(),
         ));
@@ -102,12 +106,13 @@ async fn subscribe(
 
     // Check for existing active subscription (idempotent)
     let existing_query = format!(
-        "SELECT * FROM {} WHERE {} = '{}' AND {} = '{}' AND notifiedAt = NONE LIMIT 1",
+        "SELECT * FROM {} WHERE data->>'{}' = '{}' AND data->>'{}' = '{}' AND (data->>'{}') IS NULL LIMIT 1",
         collections::STOCK_NOTIFICATIONS,
         fields::PRODUCT_ID,
-        ob_core::escape_surreal_string(&req.product_id),
-        "userId",
-        ob_core::escape_surreal_string(&req.user_id),
+        ob_core::escape_sql_string(&req.product_id),
+        fields::USER_ID,
+        ob_core::escape_sql_string(&user_id),
+        fields::NOTIFIED_AT,
     );
 
     let existing: Vec<Value> = state
@@ -125,7 +130,7 @@ async fn subscribe(
     // Fetch user email
     let user = state
         .db
-        .get_document(collections::USERS, &req.user_id)
+        .get_document(collections::USERS, &user_id)
         .await
         .map_err(|_| ob_core::Error::NotFound("User not found".into()))?;
 
@@ -147,10 +152,10 @@ async fn subscribe(
     let now = chrono::Utc::now().to_rfc3339();
     let doc = serde_json::json!({
         fields::PRODUCT_ID: req.product_id,
-        "userId": req.user_id,
+        fields::USER_ID: user_id,
         fields::EMAIL: user_email,
-        "productName": product_name,
-        "notifiedAt": null,
+        fields::PRODUCT_NAME: product_name,
+        fields::NOTIFIED_AT: null,
         fields::CREATED_AT: now,
     });
 
@@ -160,7 +165,7 @@ async fn subscribe(
         .await
         .map_err(|e| ob_core::Error::Database(format!("Failed to create subscription: {e}")))?;
 
-    info!(product_id = %req.product_id, user_id = %req.user_id, "Stock notification subscribed");
+    info!(product_id = %req.product_id, user_id = %user_id, "Stock notification subscribed");
 
     Ok(Json(StockSubscribeResponse {
         success: true,
@@ -170,19 +175,22 @@ async fn subscribe(
 
 async fn unsubscribe(
     State(state): State<HandlersState>,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<StockUnsubscribeRequest>,
 ) -> Result<Json<StockUnsubscribeResponse>, ob_core::Error> {
+    let user_id = resolve_self_user_id(&auth, Some(req.user_id.as_str()), "userId")?;
     validate_uid("productId", &req.product_id)?;
-    validate_uid("userId", &req.user_id)?;
+    validate_uid("userId", &user_id)?;
 
     // Delete active subscriptions for this product+user
     let delete_query = format!(
-        "DELETE FROM {} WHERE {} = '{}' AND {} = '{}' AND notifiedAt = NONE",
+        "DELETE FROM {} WHERE data->>'{}' = '{}' AND data->>'{}' = '{}' AND (data->>'{}') IS NULL",
         collections::STOCK_NOTIFICATIONS,
         fields::PRODUCT_ID,
-        ob_core::escape_surreal_string(&req.product_id),
-        "userId",
-        ob_core::escape_surreal_string(&req.user_id),
+        ob_core::escape_sql_string(&req.product_id),
+        fields::USER_ID,
+        ob_core::escape_sql_string(&user_id),
+        fields::NOTIFIED_AT,
     );
 
     state
@@ -191,7 +199,7 @@ async fn unsubscribe(
         .await
         .map_err(|e| ob_core::Error::Database(format!("Failed to unsubscribe: {e}")))?;
 
-    info!(product_id = %req.product_id, user_id = %req.user_id, "Stock notification unsubscribed");
+    info!(product_id = %req.product_id, user_id = %user_id, "Stock notification unsubscribed");
 
     Ok(Json(StockUnsubscribeResponse {
         success: true,
@@ -208,7 +216,18 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
 
+    fn auth(user_id: &str) -> Extension<AuthContext> {
+        Extension(AuthContext {
+            user_id: user_id.into(),
+            roles: vec!["user".into()],
+            authenticated: true,
+            email_verified: true,
+            custom_claims: serde_json::Value::Null,
+        })
+    }
+
     async fn setup_state() -> HandlersState {
+        unsafe { std::env::set_var("OB_TEST_MODE", "1") };
         HandlersState {
             config: Arc::new(Config::load(None).unwrap()),
             db: DatabaseClient::new_mem().await,
@@ -319,14 +338,17 @@ mod tests {
     #[tokio::test]
     async fn test_subscribe_success_creates_notification_and_is_idempotent() {
         let state = setup_state().await;
+        let u = uuid::Uuid::new_v4().to_string();
+        let prod = format!("prod_sub_{u}");
+        let buyer = format!("buyer_sub_{u}");
         state
             .db
             .upsert_document(
                 collections::PRODUCTS,
-                "prod_1",
+                &prod,
                 json!({
-                    fields::PRODUCT_ID: "prod_1",
-                    fields::SELLER_ID: "seller_1",
+                    fields::PRODUCT_ID: prod,
+                    fields::SELLER_ID: format!("seller_sub_{u}"),
                     fields::STOCK_QUANTITY: 0,
                     fields::TITLE: "Blue Widget",
                 }),
@@ -337,9 +359,9 @@ mod tests {
             .db
             .upsert_document(
                 collections::USERS,
-                "buyer_1",
+                &buyer,
                 json!({
-                    fields::UID: "buyer_1",
+                    fields::UID: buyer,
                     fields::EMAIL: "buyer@example.com",
                 }),
             )
@@ -348,9 +370,10 @@ mod tests {
 
         let Json(resp) = subscribe(
             State(state.clone()),
+            auth(&buyer),
             Json(StockSubscribeRequest {
-                product_id: "prod_1".into(),
-                user_id: "buyer_1".into(),
+                product_id: prod.clone(),
+                user_id: buyer.clone(),
             }),
         )
         .await
@@ -359,22 +382,25 @@ mod tests {
 
         let rows = state
             .db
-            .query_bind_value(
-                "SELECT * FROM stock_notifications WHERE productId = $productId AND userId = $userId",
-                json!({"productId": "prod_1", "userId": "buyer_1"})
-            )
+            .query_raw(&format!(
+                "SELECT * FROM {} WHERE data->>'productId' = '{}' AND data->>'userId' = '{}'",
+                collections::STOCK_NOTIFICATIONS,
+                prod,
+                buyer
+            ))
             .await
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][fields::EMAIL], "buyer@example.com");
-        assert_eq!(rows[0]["productName"], "Blue Widget");
-        assert!(rows[0]["notifiedAt"].is_null());
+        assert_eq!(rows[0][fields::PRODUCT_NAME], "Blue Widget");
+        assert!(rows[0][fields::NOTIFIED_AT].is_null());
 
         let Json(idempotent) = subscribe(
             State(state.clone()),
+            auth(&buyer),
             Json(StockSubscribeRequest {
-                product_id: "prod_1".into(),
-                user_id: "buyer_1".into(),
+                product_id: prod.clone(),
+                user_id: buyer.clone(),
             }),
         )
         .await
@@ -384,9 +410,10 @@ mod tests {
         let rows_after = state
             .db
             .query_raw(&format!(
-                "SELECT * FROM {} WHERE {} = 'prod_1' AND userId = 'buyer_1'",
+                "SELECT * FROM {} WHERE data->>'productId' = '{}' AND data->>'userId' = '{}'",
                 collections::STOCK_NOTIFICATIONS,
-                fields::PRODUCT_ID,
+                prod,
+                buyer,
             ))
             .await
             .unwrap();
@@ -400,6 +427,7 @@ mod tests {
 
         let invalid_format = subscribe(
             State(state.clone()),
+            auth("buyer_1"),
             Json(StockSubscribeRequest {
                 product_id: "../etc/passwd".into(),
                 user_id: "buyer_1".into(),
@@ -429,6 +457,7 @@ mod tests {
 
         let self_subscribe = subscribe(
             State(state.clone()),
+            auth("seller_1"),
             Json(StockSubscribeRequest {
                 product_id: "prod_self".into(),
                 user_id: "seller_1".into(),
@@ -458,6 +487,7 @@ mod tests {
 
         let in_stock = subscribe(
             State(state.clone()),
+            auth("buyer_1"),
             Json(StockSubscribeRequest {
                 product_id: "prod_stocked".into(),
                 user_id: "buyer_1".into(),
@@ -494,6 +524,7 @@ mod tests {
 
         let no_email = subscribe(
             State(state.clone()),
+            auth("buyer_2"),
             Json(StockSubscribeRequest {
                 product_id: "prod_no_email".into(),
                 user_id: "buyer_2".into(),
@@ -505,6 +536,7 @@ mod tests {
 
         let missing_product = subscribe(
             State(state),
+            auth("buyer_1"),
             Json(StockSubscribeRequest {
                 product_id: "prod_missing".into(),
                 user_id: "buyer_1".into(),
@@ -524,6 +556,7 @@ mod tests {
         // No product seeded — get_document will return error/null
         let result = subscribe(
             State(state.clone()),
+            auth("buyer_1"),
             Json(StockSubscribeRequest {
                 product_id: "nonexistent_prod".into(),
                 user_id: "buyer_1".into(),
@@ -542,13 +575,16 @@ mod tests {
     #[tokio::test]
     async fn test_unsubscribe_deletes_active_notifications() {
         let state = setup_state().await;
+        let u = uuid::Uuid::new_v4().to_string();
+        let prod = format!("prod_unsub_{u}");
+        let buyer = format!("buyer_unsub_{u}");
         state
             .db
             .create_document(
                 collections::STOCK_NOTIFICATIONS,
                 json!({
-                    fields::PRODUCT_ID: "prod_1",
-                    "userId": "buyer_1",
+                    fields::PRODUCT_ID: prod,
+                    "userId": buyer,
                     "notifiedAt": null,
                 }),
             )
@@ -559,8 +595,8 @@ mod tests {
             .create_document(
                 collections::STOCK_NOTIFICATIONS,
                 json!({
-                    fields::PRODUCT_ID: "prod_1",
-                    "userId": "buyer_1",
+                    fields::PRODUCT_ID: prod,
+                    "userId": buyer,
                     "notifiedAt": "2026-03-10T10:00:00Z",
                 }),
             )
@@ -569,9 +605,10 @@ mod tests {
 
         let Json(resp) = unsubscribe(
             State(state.clone()),
+            auth(&buyer),
             Json(StockUnsubscribeRequest {
-                product_id: "prod_1".into(),
-                user_id: "buyer_1".into(),
+                product_id: prod.clone(),
+                user_id: buyer.clone(),
             }),
         )
         .await
@@ -580,13 +617,15 @@ mod tests {
 
         let rows = state
             .db
-            .query_bind_value(
-                "SELECT * FROM stock_notifications WHERE productId = $productId AND userId = $userId",
-                json!({"productId": "prod_1", "userId": "buyer_1"})
-            )
+            .query_raw(&format!(
+                "SELECT * FROM {} WHERE data->>'productId' = '{}' AND data->>'userId' = '{}'",
+                collections::STOCK_NOTIFICATIONS,
+                prod,
+                buyer
+            ))
             .await
             .unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["notifiedAt"], "2026-03-10T10:00:00Z");
+        assert_eq!(rows[0][fields::NOTIFIED_AT], "2026-03-10T10:00:00Z");
     }
 }

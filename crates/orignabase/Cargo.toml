@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [features]
 default = []
+integration = []
 cluster = ["ob-realtime/cluster"]
 
 [dependencies]
@@ -44,6 +45,7 @@ toml = { workspace = true }
 reqwest = { workspace = true }
 hex = { workspace = true }
 chrono = { workspace = true }
+sqlx = { workspace = true }
 uuid = { workspace = true }
 governor = { workspace = true }
 tower_governor = { workspace = true }

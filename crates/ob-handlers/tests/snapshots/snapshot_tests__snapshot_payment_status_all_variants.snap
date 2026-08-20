@@ -3,12 +3,12 @@ source: crates/ob-handlers/tests/snapshot_tests.rs
 expression: json
 ---
 [
-  "PENDING",
-  "AUTHORIZED",
-  "CAPTURED",
-  "REFUNDED",
-  "PARTIAL_REFUND",
-  "FAILED",
-  "CANCELLED",
-  "DISPUTED"
+  "awaiting_payment",
+  "authorized",
+  "captured",
+  "refunded",
+  "partially_refunded",
+  "payment_failed",
+  "cancelled",
+  "disputed"
 ]

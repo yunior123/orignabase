@@ -1,3 +1,19 @@
+// Test mode rules: permissive for most collections but with order ownership
+// enforcement for IDOR security tests.
+
+rules orders {
+    read: isAuthenticated() && (
+        isOwner(resource.userId) ||
+        isOwner(resource.buyerId) ||
+        isOwner(resource.sellerId) ||
+        hasRole("admin")
+    );
+    create: isAuthenticated();
+    update: isAuthenticated();
+    delete: isAuthenticated();
+    list: isAuthenticated();
+}
+
 rules * {
     read: isAuthenticated();
     create: isAuthenticated();

@@ -89,6 +89,16 @@ impl JwtKeys {
 
     /// Create HS256 keys from a shared secret.
     pub fn from_secret(secret: &str) -> Self {
+        if secret.is_empty() {
+            tracing::error!(
+                "JWT HMAC secret is empty — tokens will be trivially forgeable. Set OB_AUTH__JWT_SECRET."
+            );
+        } else if secret.len() < 32 {
+            tracing::warn!(
+                "JWT HMAC secret is only {} bytes — recommend at least 32 bytes for production.",
+                secret.len()
+            );
+        }
         Self::Hmac {
             secret: secret.to_string(),
         }
@@ -113,7 +123,7 @@ impl JwtKeys {
             Self::Rsa { .. } => Validation::new(Algorithm::RS256),
             Self::Hmac { .. } => Validation::default(), // HS256
         };
-        validation.leeway = 0;
+        validation.leeway = 30;
         validation
     }
 
@@ -268,8 +278,20 @@ pub fn issue_challenge_token(user_id: &str, keys: &JwtKeys) -> Result<String> {
         .map_err(|e| Error::Auth(format!("Challenge token creation failed: {e}")))
 }
 
-/// Verify and decode a JWT token.
-/// For RS256 keys: tries current key first, falls back to previous keys.
+/// Verifies a JWT against the active signing key set and returns its claims.
+///
+/// Parameters:
+/// - `token`: raw bearer token string to decode and validate.
+/// - `keys`: current JWT key material plus any retained previous decoding keys.
+///
+/// Returns:
+/// - `Ok(Claims)` when signature, expiry, and standard claim validation succeed.
+/// - `Err(...)` if no active or previous key can validate the token.
+///
+/// Gotchas:
+/// - Validation policy comes from `keys.validation()`, so accepted algorithms and claim
+///   checks are centralized there rather than in each caller.
+/// - Only the most recent previous key is tried to limit the post-rotation acceptance window.
 pub fn verify_token(token: &str, keys: &JwtKeys) -> Result<Claims> {
     let validation = keys.validation();
 
@@ -278,11 +300,11 @@ pub fn verify_token(token: &str, keys: &JwtKeys) -> Result<Claims> {
         return Ok(data.claims);
     }
 
-    // Fall back to previous keys (only for RS256)
-    for prev_key in keys.previous_decoding_keys() {
-        if let Ok(data) = decode::<Claims>(token, &prev_key, &validation) {
-            return Ok(data.claims);
-        }
+    // Fall back to only the most recent previous key (max 1) to limit exposure window
+    if let Some(prev_key) = keys.previous_decoding_keys().into_iter().next()
+        && let Ok(data) = decode::<Claims>(token, &prev_key, &validation)
+    {
+        return Ok(data.claims);
     }
 
     Err(Error::Auth("Token verification failed".into()))
@@ -330,6 +352,14 @@ pub fn generate_rsa_keys(keys_dir: &Path) -> Result<(Vec<u8>, Vec<u8>)> {
         )));
     }
 
+    // Set restrictive permissions on private key (Unix only)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&private_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| Error::Config(format!("Failed to set key permissions: {e}")))?;
+    }
+
     let private_pem = std::fs::read(&private_path)
         .map_err(|e| Error::Config(format!("Failed to read private key: {e}")))?;
     let public_pem = std::fs::read(&public_path)
@@ -338,8 +368,19 @@ pub fn generate_rsa_keys(keys_dir: &Path) -> Result<(Vec<u8>, Vec<u8>)> {
     Ok((private_pem, public_pem))
 }
 
-/// Rotate JWT keys: generate new key pair, archive old one, update metadata.
-/// Returns the fingerprint of the new key.
+/// Rotates the JWT RSA key pair on disk and records the new public-key fingerprint.
+///
+/// Parameters:
+/// - `keys_dir`: directory containing the active key pair and rotation metadata.
+///
+/// Returns:
+/// - `Ok(String)` with the fingerprint of the newly active public key.
+/// - `Err(...)` if archiving, key generation, metadata persistence, or cleanup fails.
+///
+/// Gotchas:
+/// - Existing keys are archived before replacement, so the directory must be writable.
+/// - The caller is responsible for reloading in-memory key state after rotation completes.
+/// - Backup cleanup is intentionally conservative and keeps a small rollback window.
 pub fn rotate_keys(keys_dir: &Path) -> Result<String> {
     use std::fs;
 
@@ -496,7 +537,6 @@ mod tests {
     fn test_custom_claims_serialization() {
         let keys = test_keys();
 
-        // Create claims with custom claims
         let custom = serde_json::json!({
             "role": "seller",
             "store_id": "store_123",
@@ -589,10 +629,9 @@ mod tests {
         let token = issue_access_token("user123", &[], &keys, ttl_secs, false).unwrap();
         let claims = verify_token(&token, &keys).unwrap();
 
-        // Verify exp is roughly 30 days in future
         let now = chrono::Utc::now().timestamp();
         let diff = claims.exp - now;
-        assert!(diff > ttl_secs as i64 - 10); // Allow 10 sec variance
+        assert!(diff > ttl_secs as i64 - 10);
         assert!(diff <= ttl_secs as i64 + 10);
     }
 
@@ -604,7 +643,7 @@ mod tests {
 
         let now = chrono::Utc::now().timestamp();
         let age = now - claims.iat;
-        assert!((0..=5).contains(&age)); // Issued within last 5 seconds
+        assert!((0..=5).contains(&age));
     }
 
     #[test]
@@ -656,11 +695,10 @@ mod tests {
         let keys = test_keys();
         let now = chrono::Utc::now().timestamp();
 
-        // Token that expired 1 second ago
         let claims = Claims {
             sub: "user123".to_string(),
             iat: now - 3600,
-            exp: now - 1,
+            exp: now - 120,
             roles: vec![],
             typ: "access".to_string(),
             email_verified: false,
@@ -671,7 +709,7 @@ mod tests {
         let token = jsonwebtoken::encode(&keys.header(), &claims, &keys.encoding_key()).unwrap();
 
         let result = verify_token(&token, &keys);
-        assert!(result.is_err()); // Should be rejected
+        assert!(result.is_err());
     }
 
     #[test]
@@ -679,11 +717,10 @@ mod tests {
         let keys = test_keys();
         let now = chrono::Utc::now().timestamp();
 
-        // Token expiring in 2 seconds (should still be valid now)
         let claims = Claims {
             sub: "user123".to_string(),
             iat: now,
-            exp: now + 2,
+            exp: now + 300,
             roles: vec![],
             typ: "access".to_string(),
             email_verified: false,
@@ -694,7 +731,7 @@ mod tests {
         let token = jsonwebtoken::encode(&keys.header(), &claims, &keys.encoding_key()).unwrap();
 
         let result = verify_token(&token, &keys);
-        assert!(result.is_ok()); // Should be valid
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -706,5 +743,331 @@ mod tests {
         assert!(claims.roles.is_empty());
         assert!(!claims.email_verified);
         assert!(!claims.mfa_required);
+    }
+
+    #[test]
+    fn test_issue_verification_token() {
+        let keys = test_keys();
+        let token = issue_verification_token("user123", &keys).unwrap();
+        let claims = verify_token(&token, &keys).unwrap();
+        assert_eq!(claims.sub, "user123");
+        assert_eq!(claims.typ, "email_verify");
+        assert!(!claims.email_verified);
+        assert!(claims.roles.is_empty());
+    }
+
+    #[test]
+    fn test_issue_verification_token_ttl() {
+        let keys = test_keys();
+        let before = chrono::Utc::now().timestamp();
+        let token = issue_verification_token("user123", &keys).unwrap();
+        let after = chrono::Utc::now().timestamp();
+        let claims = verify_token(&token, &keys).unwrap();
+        assert!(claims.exp >= before + 86400);
+        assert!(claims.exp <= after + 86400);
+    }
+
+    #[test]
+    fn test_issue_reset_token() {
+        let keys = test_keys();
+        let token = issue_reset_token("user456", &keys).unwrap();
+        let claims = verify_token(&token, &keys).unwrap();
+        assert_eq!(claims.sub, "user456");
+        assert_eq!(claims.typ, "password_reset");
+        assert!(claims.roles.is_empty());
+    }
+
+    #[test]
+    fn test_issue_reset_token_ttl() {
+        let keys = test_keys();
+        let before = chrono::Utc::now().timestamp();
+        let token = issue_reset_token("user456", &keys).unwrap();
+        let after = chrono::Utc::now().timestamp();
+        let claims = verify_token(&token, &keys).unwrap();
+        assert!(claims.exp >= before + 3600);
+        assert!(claims.exp <= after + 3600);
+    }
+
+    #[test]
+    fn test_issue_magic_link_token() {
+        let keys = test_keys();
+        let token = issue_magic_link_token("user789", &keys).unwrap();
+        let claims = verify_token(&token, &keys).unwrap();
+        assert_eq!(claims.sub, "user789");
+        assert_eq!(claims.typ, "magic_link");
+        assert!(claims.roles.is_empty());
+    }
+
+    #[test]
+    fn test_issue_magic_link_token_ttl() {
+        let keys = test_keys();
+        let before = chrono::Utc::now().timestamp();
+        let token = issue_magic_link_token("user789", &keys).unwrap();
+        let after = chrono::Utc::now().timestamp();
+        let claims = verify_token(&token, &keys).unwrap();
+        assert!(claims.exp >= before + 900);
+        assert!(claims.exp <= after + 900);
+    }
+
+    #[test]
+    fn test_issue_challenge_token() {
+        let keys = test_keys();
+        let token = issue_challenge_token("user999", &keys).unwrap();
+        let claims = verify_token(&token, &keys).unwrap();
+        assert_eq!(claims.sub, "user999");
+        assert_eq!(claims.typ, "mfa_challenge");
+        assert!(claims.mfa_required);
+        assert!(claims.roles.is_empty());
+    }
+
+    #[test]
+    fn test_issue_challenge_token_ttl() {
+        let keys = test_keys();
+        let before = chrono::Utc::now().timestamp();
+        let token = issue_challenge_token("user999", &keys).unwrap();
+        let after = chrono::Utc::now().timestamp();
+        let claims = verify_token(&token, &keys).unwrap();
+        assert!(claims.exp >= before + 300);
+        assert!(claims.exp <= after + 300);
+    }
+
+    #[test]
+    fn test_access_token_with_custom_claims() {
+        let keys = test_keys();
+        let custom = serde_json::json!({
+            "role": "admin",
+            "permissions": ["read", "write", "delete"],
+            "org_id": "org_123"
+        });
+        let token = issue_access_token_with_claims(
+            "admin1",
+            &["admin".to_string()],
+            &keys,
+            7200,
+            true,
+            custom.clone(),
+        )
+        .unwrap();
+        let claims = verify_token(&token, &keys).unwrap();
+        assert_eq!(claims.sub, "admin1");
+        assert_eq!(claims.custom_claims, custom);
+        assert!(claims.email_verified);
+        assert_eq!(claims.roles, vec!["admin"]);
+    }
+
+    #[test]
+    fn test_jwt_keys_header_rsa() {
+        let keys = JwtKeys::from_secret("test");
+        let _header = keys.header();
+    }
+
+    #[test]
+    fn test_jwt_keys_validation_hmac() {
+        let keys = JwtKeys::from_secret("test");
+        let validation = keys.validation();
+        assert_eq!(validation.algorithms, vec![jsonwebtoken::Algorithm::HS256]);
+    }
+
+    #[test]
+    fn test_jwt_keys_decoding_key_hmac() {
+        let keys = JwtKeys::from_secret("test");
+        let _dk = keys.decoding_key();
+    }
+
+    #[test]
+    fn test_jwt_keys_previous_decoding_keys_hmac_empty() {
+        let keys = JwtKeys::from_secret("test");
+        let prev = keys.previous_decoding_keys();
+        assert!(prev.is_empty());
+    }
+
+    #[test]
+    fn test_claims_serialization_roundtrip() {
+        let now = chrono::Utc::now().timestamp();
+        let claims = Claims {
+            sub: "user1".into(),
+            iat: now,
+            exp: now + 3600,
+            roles: vec!["user".into(), "seller".into()],
+            typ: "access".into(),
+            email_verified: true,
+            mfa_required: false,
+            custom_claims: serde_json::json!({"key": "value"}),
+        };
+        let json = serde_json::to_value(&claims).unwrap();
+        let deserialized: Claims = serde_json::from_value(json).unwrap();
+        assert_eq!(deserialized.sub, "user1");
+        assert_eq!(deserialized.roles.len(), 2);
+        assert!(deserialized.email_verified);
+    }
+
+    #[test]
+    fn test_claims_default_email_verified() {
+        let json = serde_json::json!({
+            "sub": "u1", "iat": 0, "exp": 0, "typ": "access"
+        });
+        let claims: Claims = serde_json::from_value(json).unwrap();
+        assert!(!claims.email_verified);
+    }
+
+    #[test]
+    fn test_claims_default_mfa_required() {
+        let json = serde_json::json!({
+            "sub": "u1", "iat": 0, "exp": 0, "typ": "access"
+        });
+        let claims: Claims = serde_json::from_value(json).unwrap();
+        assert!(!claims.mfa_required);
+    }
+
+    #[test]
+    fn test_claims_default_roles() {
+        let json = serde_json::json!({
+            "sub": "u1", "iat": 0, "exp": 0, "typ": "access"
+        });
+        let claims: Claims = serde_json::from_value(json).unwrap();
+        assert!(claims.roles.is_empty());
+    }
+
+    #[test]
+    fn test_claims_default_custom_claims() {
+        let json = serde_json::json!({
+            "sub": "u1", "iat": 0, "exp": 0, "typ": "access"
+        });
+        let claims: Claims = serde_json::from_value(json).unwrap();
+        assert_eq!(claims.custom_claims, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_empty_string_secret() {
+        let keys = JwtKeys::from_secret("");
+        let token = issue_access_token("u1", &[], &keys, 60, false).unwrap();
+        let claims = verify_token(&token, &keys).unwrap();
+        assert_eq!(claims.sub, "u1");
+    }
+
+    #[test]
+    fn test_issue_access_token_email_not_verified() {
+        let keys = test_keys();
+        let token = issue_access_token("u1", &[], &keys, 3600, false).unwrap();
+        let claims = verify_token(&token, &keys).unwrap();
+        assert!(!claims.email_verified);
+    }
+
+    #[test]
+    fn test_issue_access_token_zero_roles() {
+        let keys = test_keys();
+        let token = issue_access_token("u1", &[], &keys, 3600, false).unwrap();
+        let claims = verify_token(&token, &keys).unwrap();
+        assert!(claims.roles.is_empty());
+    }
+
+    fn unique_test_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ob_jwt_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_generate_rsa_keys_creates_files() {
+        let dir = unique_test_dir();
+        let (priv_pem, pub_pem) = generate_rsa_keys(&dir).unwrap();
+        assert!(!priv_pem.is_empty());
+        assert!(!pub_pem.is_empty());
+        assert!(dir.join("jwt_private.pem").exists());
+        assert!(dir.join("jwt_public.pem").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rsa_pem_roundtrip() {
+        let dir = unique_test_dir();
+        let (priv_pem, pub_pem) = generate_rsa_keys(&dir).unwrap();
+        let keys = JwtKeys::from_rsa_pem(&priv_pem, &pub_pem).unwrap();
+        let token = issue_access_token("u1", &["user".into()], &keys, 3600, true).unwrap();
+        let claims = verify_token(&token, &keys).unwrap();
+        assert_eq!(claims.sub, "u1");
+        assert_eq!(claims.typ, "access");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rsa_from_rsa_pem_invalid_private() {
+        let result = JwtKeys::from_rsa_pem(b"not-a-key", b"not-a-key");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rsa_from_rsa_pem_invalid_public() {
+        let dir = unique_test_dir();
+        let (priv_pem, _) = generate_rsa_keys(&dir).unwrap();
+        let result = JwtKeys::from_rsa_pem(&priv_pem, b"not-a-key");
+        assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rsa_with_rotation() {
+        let dir = unique_test_dir();
+        let (priv_pem, pub_pem) = generate_rsa_keys(&dir).unwrap();
+        let keys = JwtKeys::from_rsa_pem_with_rotation(&priv_pem, &pub_pem, vec![]).unwrap();
+        let token = issue_access_token("u1", &[], &keys, 3600, false).unwrap();
+        let claims = verify_token(&token, &keys).unwrap();
+        assert_eq!(claims.sub, "u1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rsa_with_rotation_fallback() {
+        let dir = unique_test_dir();
+        let (priv1, pub1) = generate_rsa_keys(&dir).unwrap();
+        let keys_old = JwtKeys::from_rsa_pem(&priv1, &pub1).unwrap();
+        let token_old = issue_access_token("u_old", &[], &keys_old, 3600, false).unwrap();
+
+        let (priv2, pub2) = generate_rsa_keys(&dir).unwrap();
+        let keys_new = JwtKeys::from_rsa_pem_with_rotation(&priv2, &pub2, vec![pub1]).unwrap();
+        let claims = verify_token(&token_old, &keys_new).unwrap();
+        assert_eq!(claims.sub, "u_old");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rotate_keys_creates_backup() {
+        let dir = unique_test_dir();
+        let _ = generate_rsa_keys(&dir).unwrap();
+        let fp = rotate_keys(&dir).unwrap();
+        assert_eq!(fp.len(), 16);
+
+        let backups: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "bak"))
+            .collect();
+        assert!(!backups.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_cleanup_old_backups() {
+        let dir = unique_test_dir();
+        for i in 0..6 {
+            std::fs::write(dir.join(format!("key_{i}.pem.bak")), "data").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        cleanup_old_backups(&dir, 3).unwrap();
+        let remaining: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "bak"))
+            .collect();
+        assert_eq!(remaining.len(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_cleanup_old_backups_no_backups() {
+        let dir = unique_test_dir();
+        let result = cleanup_old_backups(&dir, 4);
+        assert!(result.is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

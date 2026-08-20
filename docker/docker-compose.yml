@@ -5,20 +5,24 @@
 #   Prod:    cp .env.prod .env && docker compose up -d
 
 services:
-  surrealdb:
-    image: surrealdb/surrealdb:v2
-    command: start --user ${SURREALDB_USER} --pass ${SURREALDB_PASS} rocksdb:/data/database.db
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-orignabase}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-orignabase_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-orignabase}
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:5432:5432"
     volumes:
-      - surrealdb_data:/data
+      - postgres_data:/var/lib/postgresql/data
+      - ../migrations:/docker-entrypoint-initdb.d:ro
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-orignabase}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     logging:
       driver: "json-file"
       options:
@@ -55,6 +59,67 @@ services:
         limits:
           memory: 256M
 
+  docuseal-db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: ${DOCUSEAL_POSTGRES_USER:-docuseal}
+      POSTGRES_PASSWORD: ${DOCUSEAL_POSTGRES_PASSWORD:?Set DOCUSEAL_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${DOCUSEAL_POSTGRES_DB:-docuseal}
+    volumes:
+      - docuseal_postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DOCUSEAL_POSTGRES_USER:-docuseal} -d ${DOCUSEAL_POSTGRES_DB:-docuseal}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  docuseal:
+    image: docuseal/docuseal:2.3.6
+    environment:
+      DATABASE_URL: ${DOCUSEAL_DATABASE_URL:?Set DOCUSEAL_DATABASE_URL}
+      SECRET_KEY_BASE: ${DOCUSEAL_SECRET_KEY_BASE}
+      FORCE_SSL: ${DOCUSEAL_FORCE_SSL:-true}
+      HOST: ${DOCUSEAL_HOST:-https://signatures.orignagta.ca}
+      SMTP_ADDRESS: ${DOCUSEAL_SMTP_ADDRESS:-}
+      SMTP_PORT: ${DOCUSEAL_SMTP_PORT:-587}
+      SMTP_DOMAIN: ${DOCUSEAL_SMTP_DOMAIN:-orignagta.ca}
+      SMTP_USERNAME: ${DOCUSEAL_SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${DOCUSEAL_SMTP_PASSWORD:-}
+      SMTP_AUTHENTICATION: ${DOCUSEAL_SMTP_AUTHENTICATION:-plain}
+      SMTP_FROM: ${DOCUSEAL_SMTP_FROM:-signatures@orignagta.ca}
+      SMTP_ENABLE_STARTTLS: ${DOCUSEAL_SMTP_ENABLE_STARTTLS:-true}
+      SMTP_SSL_VERIFY: ${DOCUSEAL_SMTP_SSL_VERIFY:-true}
+    depends_on:
+      docuseal-db:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "ruby -rnet/http -e 'res = Net::HTTP.get_response(URI(\"http://127.0.0.1:3000/\")); exit(res.code.to_i < 500 ? 0 : 1)'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+
   orignabase:
     build:
       context: ..
@@ -65,11 +130,7 @@ services:
       OB_HOST: ${OB_HOST}
       OB_PORT: ${OB_PORT}
       OB_BASE_URL: ${OB_BASE_URL}
-      OB_DATABASE__ENDPOINT: ${OB_DATABASE__ENDPOINT}
-      OB_DATABASE__USERNAME: ${OB_DATABASE__USERNAME}
-      OB_DATABASE__PASSWORD: ${OB_DATABASE__PASSWORD}
-      OB_DATABASE__NAMESPACE: ${OB_DATABASE__NAMESPACE}
-      OB_DATABASE__NAME: ${OB_DATABASE__NAME}
+      OB_DATABASE__URL: ${OB_DATABASE__URL:-REDACTED_SECRET/orignabase}
       OB_AUTH__JWT_SECRET: ${OB_AUTH__JWT_SECRET}
       OB_AUTH__ACCESS_TOKEN_TTL_SECS: ${OB_AUTH__ACCESS_TOKEN_TTL_SECS}
       OB_AUTH__REFRESH_TOKEN_TTL_SECS: ${OB_AUTH__REFRESH_TOKEN_TTL_SECS}
@@ -80,11 +141,10 @@ services:
       OB_SEARCH__API_KEY: ${OB_SEARCH__API_KEY}
       OB_SECRETS__STRIPE_SECRET_KEY: ${OB_SECRETS__STRIPE_SECRET_KEY}
       OB_SECRETS__STRIPE_WEBHOOK_SECRET: ${OB_SECRETS__STRIPE_WEBHOOK_SECRET}
-      OB_SECRETS__MAILJET_API_KEY: ${OB_SECRETS__MAILJET_API_KEY}
-      OB_SECRETS__MAILJET_SECRET_KEY: ${OB_SECRETS__MAILJET_SECRET_KEY}
+      OB_SECRETS__POSTAL_API_KEY: ${OB_SECRETS__POSTAL_API_KEY}
       OB_SECRETS__GEOAPIFY_API_KEY: ${OB_SECRETS__GEOAPIFY_API_KEY}
     depends_on:
-      surrealdb:
+      postgres:
         condition: service_healthy
       meilisearch:
         condition: service_healthy
@@ -115,11 +175,17 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - /var/www/orignagta:/var/www/orignagta:ro
+      - /var/www/orignaventures:/var/www/orignaventures:ro
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
       orignabase:
         condition: service_healthy
+      docuseal:
+        condition: service_healthy
+    networks:
+      - default
+      - ventures_net
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80/"]
       interval: 30s
@@ -136,8 +202,35 @@ services:
         limits:
           memory: 128M
 
+  origna-ventures-api:
+    build:
+      context: /opt/origna_ventures/backend
+      dockerfile: Dockerfile
+    container_name: origna-ventures-api
+    env_file: /opt/origna_ventures/backend/.env
+    volumes:
+      - /opt/origna_ventures/backend/data/storage:/app/storage
+    networks:
+      - ventures_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
 volumes:
-  surrealdb_data:
+  postgres_data:
   meili_data:
+  docuseal_postgres_data:
   caddy_data:
   caddy_config:
+
+networks:
+  ventures_net:
+    driver: bridge

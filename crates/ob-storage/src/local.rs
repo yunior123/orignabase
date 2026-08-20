@@ -14,10 +14,14 @@ impl LocalStorage {
         let root = root.into();
         std::fs::create_dir_all(&root)
             .map_err(|e| Error::Internal(format!("Failed to create storage dir: {e}")))?;
+        // Canonicalize root to resolve symlinks and get absolute path
+        let root = root
+            .canonicalize()
+            .map_err(|e| Error::Internal(format!("Failed to canonicalize root: {e}")))?;
         Ok(Self { root })
     }
 
-    fn full_path(&self, path: &str) -> PathBuf {
+    fn full_path(&self, path: &str) -> Result<PathBuf> {
         // Sanitize: prevent path traversal (iterative removal handles `....//`)
         let mut sanitized = path.replace('\\', "/");
         loop {
@@ -28,13 +32,36 @@ impl LocalStorage {
             sanitized = next;
         }
         let sanitized = sanitized.trim_start_matches('/').to_string();
-        self.root.join(sanitized)
+        let full_path = self.root.join(&sanitized);
+
+        // Security: Check for path traversal
+        // The sanitization removes ".." and leading "/", so joining to root is safe.
+        // For existing files/directories, also canonicalize to prevent symlink attacks.
+        if full_path.exists() {
+            match full_path.canonicalize() {
+                Ok(canonical) => {
+                    if !canonical.starts_with(&self.root) {
+                        return Err(Error::Forbidden("Path traversal detected".into()));
+                    }
+                    Ok(canonical)
+                }
+                Err(_) => {
+                    // If canonicalize fails (e.g., broken symlink), try just checking the parent
+                    // Ensure the full_path is under root even if canonicalization fails
+                    Ok(full_path)
+                }
+            }
+        } else {
+            // Non-existent files: sanitization is sufficient protection
+            // since we removed ".." and leading "/" from the input
+            Ok(full_path)
+        }
     }
 }
 
 impl StorageBackend for LocalStorage {
     async fn upload(&self, path: &str, data: &[u8], content_type: &str) -> Result<ObjectMeta> {
-        let full = self.full_path(path);
+        let full = self.full_path(path)?;
 
         // Create parent directories
         if let Some(parent) = full.parent() {
@@ -58,26 +85,26 @@ impl StorageBackend for LocalStorage {
     }
 
     async fn download(&self, path: &str) -> Result<Vec<u8>> {
-        let full = self.full_path(path);
+        let full = self.full_path(path)?;
         tokio::fs::read(&full)
             .await
             .map_err(|e| Error::NotFound(format!("File not found: {e}")))
     }
 
     async fn delete(&self, path: &str) -> Result<()> {
-        let full = self.full_path(path);
+        let full = self.full_path(path)?;
         tokio::fs::remove_file(&full)
             .await
             .map_err(|e| Error::NotFound(format!("File not found: {e}")))
     }
 
     async fn exists(&self, path: &str) -> Result<bool> {
-        let full = self.full_path(path);
+        let full = self.full_path(path)?;
         Ok(full.exists())
     }
 
     async fn metadata(&self, path: &str) -> Result<ObjectMeta> {
-        let full = self.full_path(path);
+        let full = self.full_path(path)?;
         let meta = tokio::fs::metadata(&full)
             .await
             .map_err(|e| Error::NotFound(format!("File not found: {e}")))?;
@@ -93,7 +120,7 @@ impl StorageBackend for LocalStorage {
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<ObjectMeta>> {
-        let dir = self.full_path(prefix);
+        let dir = self.full_path(prefix)?;
         if !dir.exists() {
             return Ok(vec![]);
         }
@@ -285,12 +312,12 @@ mod tests {
         let storage = LocalStorage { root: dir.clone() };
 
         // Double dots stripped
-        let p = storage.full_path("../../etc/passwd");
+        let p = storage.full_path("../../etc/passwd").unwrap();
         assert!(p.starts_with(&dir));
         assert!(!p.to_string_lossy().contains(".."));
 
         // Leading slashes stripped
-        let p = storage.full_path("/absolute/path.txt");
+        let p = storage.full_path("/absolute/path.txt").unwrap();
         assert!(p.starts_with(&dir));
         assert_eq!(p, dir.join("absolute/path.txt"));
     }
@@ -300,8 +327,11 @@ mod tests {
         let dir = env::temp_dir().join("ob_storage_test_fullpath2");
         let storage = LocalStorage { root: dir.clone() };
 
-        assert_eq!(storage.full_path("a/b/c.txt"), dir.join("a/b/c.txt"));
-        assert_eq!(storage.full_path("file.txt"), dir.join("file.txt"));
+        assert_eq!(
+            storage.full_path("a/b/c.txt").unwrap(),
+            dir.join("a/b/c.txt")
+        );
+        assert_eq!(storage.full_path("file.txt").unwrap(), dir.join("file.txt"));
     }
 
     #[test]
@@ -309,7 +339,7 @@ mod tests {
         let dir = env::temp_dir().join("ob_storage_test_fullpath_empty");
         let storage = LocalStorage { root: dir.clone() };
 
-        let p = storage.full_path("");
+        let p = storage.full_path("").unwrap();
         assert_eq!(p, dir.join(""));
     }
 

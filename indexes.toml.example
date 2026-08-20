@@ -2,7 +2,7 @@
 # Apply with: orignabase schema indexes
 #
 # Indexes improve query performance on frequently filtered/sorted fields.
-# SurrealDB creates indexes lazily — they're built on first query after definition.
+# Indexes are applied by OrignaBase against PostgreSQL and are safe to re-run.
 #
 # Better than Firebase:
 # - Declarative TOML file (version-controlled, human-readable)

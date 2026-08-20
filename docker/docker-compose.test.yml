@@ -1,18 +1,19 @@
-version: "3.8"
-
 # CI-optimized: no volumes, no Caddy, kv-mem for speed
 services:
-  surrealdb:
-    image: surrealdb/surrealdb:v2
-    command: start --user root --pass root memory
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: orignabase
+      POSTGRES_PASSWORD: orignabase_dev
+      POSTGRES_DB: orignabase
     ports:
-      - "8000:8000"
+      - "5432:5432"
     deploy:
       resources:
         limits:
           memory: 512M
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD-SHELL", "pg_isready -U orignabase"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -24,6 +25,11 @@ services:
       MEILI_NO_ANALYTICS: "true"
     ports:
       - "7700:7700"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7700/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     deploy:
       resources:
         limits:
@@ -35,11 +41,7 @@ services:
       dockerfile: docker/Dockerfile
     environment:
       OB_BASE_URL: http://orignabase:8080
-      OB_DATABASE__ENDPOINT: ws://surrealdb:8000
-      OB_DATABASE__USERNAME: root
-      OB_DATABASE__PASSWORD: root
-      OB_DATABASE__NAMESPACE: orignabase
-      OB_DATABASE__NAME: test
+      OB_DATABASE__URL: REDACTED_SECRET/orignabase
       OB_SEARCH__URL: http://meilisearch:7700
       OB_SEARCH__API_KEY: test_master_key
       OB_AUTH__JWT_SECRET: test_jwt_secret_for_ci_only
@@ -56,10 +58,10 @@ services:
     ports:
       - "8080:8080"
     depends_on:
-      surrealdb:
+      postgres:
         condition: service_healthy
       meilisearch:
-        condition: service_started
+        condition: service_healthy
     deploy:
       resources:
         limits:

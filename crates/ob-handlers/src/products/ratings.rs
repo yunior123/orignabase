@@ -1,14 +1,17 @@
 //! Product ratings and reviews.
 //! Ported from: functions/handlers/products.py (submit_product_rating, get_product_ratings_paginated)
 
-use axum::{Json, Router, extract::State, routing::post};
+use axum::{Extension, Json, Router, extract::State, routing::post};
+use ob_auth::middleware::AuthContext;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::info;
 
 use crate::HandlersState;
+use crate::shared::auth::resolve_self_user_id;
 use crate::shared::schema::{collections, fields};
 use crate::shared::validation::{sanitize_html, validate_uid};
+use ob_database::fields as db_fields;
 
 // ─── Request/Response types ─────────────────────────────────────────────────
 
@@ -113,16 +116,19 @@ pub fn router(state: HandlersState) -> Router {
 // ─── Handlers ───────────────────────────────────────────────────────────────
 
 async fn submit_rating(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<HandlersState>,
     Json(req): Json<SubmitRatingRequest>,
 ) -> Result<Json<SubmitRatingResponse>, ob_core::Error> {
     validate_uid("productId", &req.product_id)?;
-    validate_uid("userId", &req.user_id)?;
     validate_uid("orderId", &req.order_id)?;
+
+    // P1-NEW-1: Derive userId from JWT to prevent IDOR
+    let user_id = resolve_self_user_id(&auth, Some(req.user_id.as_str()), "userId")?;
 
     crate::shared::rate_limiter::check_user_rate_limit(
         &state.db,
-        &req.user_id,
+        &user_id,
         "submit_rating",
         5,  // 5 reviews
         60, // per hour
@@ -161,21 +167,21 @@ async fn submit_rating(
     }
 
     let order_buyer = order
-        .get(fields::BUYER_ID)
+        .get(db_fields::BUYER_ID)
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    if order_buyer != req.user_id {
+    if order_buyer != user_id {
         return Err(ob_core::Error::Forbidden("Order ownership mismatch".into()));
     }
 
     // Verify order is in ratable state (DELIVERED or DISPUTED)
     let order_status = order
-        .get(fields::STATUS)
+        .get(db_fields::STATUS)
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    if order_status != "DELIVERED" && order_status != "DISPUTED" {
+    if order_status != "delivered" && order_status != "disputed" {
         return Err(ob_core::Error::Validation(
             "Order not in ratable state".into(),
         ));
@@ -204,9 +210,9 @@ async fn submit_rating(
         .find(|item| {
             item.get(fields::PRODUCT_ID).and_then(|v| v.as_str()) == Some(req.product_id.as_str())
         })
-        .and_then(|item| item.get(fields::SELLER_ID).and_then(|v| v.as_str()));
+        .and_then(|item| item.get(db_fields::SELLER_ID).and_then(|v| v.as_str()));
 
-    if rated_item_seller == Some(req.user_id.as_str()) {
+    if rated_item_seller == Some(user_id.as_str()) {
         return Err(ob_core::Error::Forbidden(
             "Sellers cannot rate their own products".into(),
         ));
@@ -214,12 +220,11 @@ async fn submit_rating(
 
     // Check for duplicate rating (one per user per product)
     let dup_query = format!(
-        "SELECT * FROM {} WHERE {} = '{}' AND {} = '{}' LIMIT 1",
+        "SELECT * FROM {} WHERE data->>'{}' = '{}' AND data->>'userId' = '{}' LIMIT 1",
         collections::PRODUCT_RATINGS,
         fields::PRODUCT_ID,
-        ob_core::escape_surreal_string(&req.product_id),
-        "userId",
-        ob_core::escape_surreal_string(&req.user_id),
+        ob_core::escape_sql_string(&req.product_id),
+        ob_core::escape_sql_string(&user_id),
     );
 
     let existing: Vec<Value> = state.db.query_raw(&dup_query).await.unwrap_or_default();
@@ -256,14 +261,14 @@ async fn submit_rating(
     let now = chrono::Utc::now().to_rfc3339();
     let rating_doc = serde_json::json!({
         fields::PRODUCT_ID: req.product_id,
-        "userId": req.user_id,
-        "orderId": req.order_id,
+        db_fields::USER_ID: user_id,
+        fields::ORDER_ID: req.order_id,
         fields::RATING: req.rating,
         fields::REVIEW_TEXT: review,
-        "reviewImageUrls": req.review_image_urls,
+        fields::REVIEW_IMAGE_URLS: req.review_image_urls,
         fields::HELPFUL_COUNT: 0,
-        "verifiedPurchase": true,
-        fields::CREATED_AT: now,
+        fields::VERIFIED_PURCHASE: true,
+        db_fields::CREATED_AT: now,
     });
 
     state
@@ -276,7 +281,7 @@ async fn submit_rating(
     let product_update = serde_json::json!({
         fields::AVG_RATING: new_avg,
         fields::TOTAL_REVIEWS: new_count,
-        fields::UPDATED_AT: now,
+        db_fields::UPDATED_AT: now,
     });
 
     state
@@ -317,24 +322,30 @@ async fn get_ratings(
         ));
     }
 
+    // Build query — product_id is escaped, min_rating is a validated f64 (safe to interpolate)
     let mut conditions = vec![format!(
-        "{} = '{}'",
+        "data->>'{}' = '{}'",
         fields::PRODUCT_ID,
-        ob_core::escape_surreal_string(&req.product_id)
+        ob_core::escape_sql_string(&req.product_id)
     )];
 
     if let Some(min) = req.min_rating {
-        conditions.push(format!("{} >= {}", fields::RATING, min));
+        // min_rating is validated to 1.0..=5.0, f64 Display cannot produce SQL injection
+        conditions.push(format!(
+            "CAST(data->>'{}' AS DOUBLE PRECISION) >= {}",
+            fields::RATING,
+            min
+        ));
     }
 
     let where_clause = format!(" WHERE {}", conditions.join(" AND "));
     let fetch_limit = limit + 1;
 
     let query = format!(
-        "SELECT * FROM {}{} ORDER BY {} DESC LIMIT {}",
+        "SELECT * FROM {}{} ORDER BY data->>'{}' DESC LIMIT {}",
         collections::PRODUCT_RATINGS,
         where_clause,
-        fields::CREATED_AT,
+        db_fields::CREATED_AT,
         fetch_limit,
     );
 
@@ -350,7 +361,7 @@ async fn get_ratings(
     let next_cursor = if has_more {
         ratings
             .last()
-            .and_then(|r| r.get("id"))
+            .and_then(|r| r.get(db_fields::ID))
             .and_then(|v| v.as_str())
             .map(String::from)
     } else {
@@ -397,16 +408,19 @@ async fn review_vote(
 
     let vote_col = collections::REVIEW_VOTES;
     let find_query = format!(
-        "SELECT * FROM {} WHERE reviewId = '{}' AND userId = '{}' LIMIT 1",
+        "SELECT * FROM {} WHERE data->>'reviewId' = '{}' AND data->>'userId' = '{}' LIMIT 1",
         vote_col,
-        ob_core::escape_surreal_string(&req.review_id),
-        ob_core::escape_surreal_string(&user_id)
+        ob_core::escape_sql_string(&req.review_id),
+        ob_core::escape_sql_string(&user_id)
     );
     let existing: Vec<serde_json::Value> =
         state.db.query_raw(&find_query).await.unwrap_or_default();
 
     if let Some(record) = existing.first() {
-        let old_vote = record.get("vote").and_then(|v| v.as_str()).unwrap_or("");
+        let old_vote = record
+            .get(fields::VOTE)
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if old_vote == vote_str {
             // Unchanged, idempotent
             return Ok(Json(serde_json::json!({
@@ -415,15 +429,24 @@ async fn review_vote(
             })));
         }
 
-        let record_id = record.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let record_id = record
+            .get(db_fields::ID)
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
 
-        let update_vote_query = format!(
-            "UPDATE {} SET vote = '{}', {} = time::now()",
-            record_id,
-            vote_str,
-            fields::UPDATED_AT
-        );
-        state.db.query_raw(&update_vote_query).await?;
+        // Update vote via CRUD method (avoids raw SQL update strings)
+        let now = chrono::Utc::now().to_rfc3339();
+        state
+            .db
+            .update_document(
+                vote_col,
+                record_id,
+                serde_json::json!({
+                    fields::VOTE: vote_str,
+                    db_fields::UPDATED_AT: now,
+                }),
+            )
+            .await?;
 
         // Determine adjustments based on old and new vote
         let (helpful_adj, unhelpful_adj) = match (old_vote, vote_str) {
@@ -437,26 +460,49 @@ async fn review_vote(
         };
 
         if helpful_adj != 0 || unhelpful_adj != 0 {
-            let update_ratings_query = format!(
-                "UPDATE {}:{} SET helpfulVotes += {}, unhelpfulVotes += {}, {} = time::now()",
-                collections::PRODUCT_RATINGS,
-                ob_core::escape_surreal_string(&req.review_id),
-                helpful_adj,
-                unhelpful_adj,
-                fields::UPDATED_AT
-            );
-            state.db.query_raw(&update_ratings_query).await?;
+            // Read current review, adjust counts, update via CRUD
+            let review = state
+                .db
+                .get_document(collections::PRODUCT_RATINGS, &req.review_id)
+                .await
+                .unwrap_or_default();
+            let cur_helpful = review
+                .get(fields::HELPFUL_VOTES)
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let cur_unhelpful = review
+                .get(fields::UNHELPFUL_VOTES)
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let now_ts = chrono::Utc::now().to_rfc3339();
+            state
+                .db
+                .update_document(
+                    collections::PRODUCT_RATINGS,
+                    &req.review_id,
+                    serde_json::json!({
+                        fields::HELPFUL_VOTES: cur_helpful + helpful_adj as i64,
+                        fields::UNHELPFUL_VOTES: cur_unhelpful + unhelpful_adj as i64,
+                        db_fields::UPDATED_AT: now_ts,
+                    }),
+                )
+                .await?;
         }
     } else {
-        let create_vote_query = format!(
-            "CREATE {} SET reviewId = '{}', userId = '{}', vote = '{}', createdAt = time::now(), {} = time::now()",
-            vote_col,
-            ob_core::escape_surreal_string(&req.review_id),
-            ob_core::escape_surreal_string(&user_id),
-            vote_str,
-            fields::UPDATED_AT
-        );
-        state.db.query_raw(&create_vote_query).await?;
+        let now_ts = chrono::Utc::now().to_rfc3339();
+        state
+            .db
+            .create_document(
+                vote_col,
+                serde_json::json!({
+                    fields::REVIEW_ID: req.review_id,
+                    db_fields::USER_ID: user_id,
+                    fields::VOTE: vote_str,
+                    db_fields::CREATED_AT: now_ts,
+                    db_fields::UPDATED_AT: now_ts,
+                }),
+            )
+            .await?;
 
         let (helpful_adj, unhelpful_adj) = match vote_str {
             "helpful" => (1, 0),
@@ -465,15 +511,31 @@ async fn review_vote(
         };
 
         if helpful_adj != 0 || unhelpful_adj != 0 {
-            let update_ratings_query = format!(
-                "UPDATE {}:{} SET helpfulVotes += {}, unhelpfulVotes += {}, {} = time::now()",
-                collections::PRODUCT_RATINGS,
-                ob_core::escape_surreal_string(&req.review_id),
-                helpful_adj,
-                unhelpful_adj,
-                fields::UPDATED_AT
-            );
-            state.db.query_raw(&update_ratings_query).await?;
+            let review = state
+                .db
+                .get_document(collections::PRODUCT_RATINGS, &req.review_id)
+                .await
+                .unwrap_or_default();
+            let cur_helpful = review
+                .get(fields::HELPFUL_VOTES)
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let cur_unhelpful = review
+                .get(fields::UNHELPFUL_VOTES)
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            state
+                .db
+                .update_document(
+                    collections::PRODUCT_RATINGS,
+                    &req.review_id,
+                    serde_json::json!({
+                        fields::HELPFUL_VOTES: cur_helpful + helpful_adj as i64,
+                        fields::UNHELPFUL_VOTES: cur_unhelpful + unhelpful_adj as i64,
+                        db_fields::UPDATED_AT: now_ts,
+                    }),
+                )
+                .await?;
         }
     }
 
@@ -484,10 +546,12 @@ async fn review_vote(
 }
 
 async fn submit_rating_atomic(
+    auth: Extension<AuthContext>,
     State(state): State<HandlersState>,
     Json(req): Json<SubmitRatingAtomicRequest>,
 ) -> Result<Json<SubmitRatingResponse>, ob_core::Error> {
     submit_rating(
+        auth,
         State(state),
         Json(SubmitRatingRequest {
             product_id: req.product_id,
@@ -543,7 +607,7 @@ async fn answer_review(
         .get_document(collections::PRODUCTS, product_id)
         .await?;
     let owner = product
-        .get(fields::SELLER_ID)
+        .get(db_fields::SELLER_ID)
         .and_then(|v| v.as_str())
         .unwrap_or("");
     if owner != seller_id && !auth.has_role("admin") {
@@ -559,9 +623,9 @@ async fn answer_review(
             collections::PRODUCT_RATINGS,
             &req.review_id,
             serde_json::json!({
-                "sellerResponse": response_text,
-                "sellerRespondedAt": now,
-                fields::UPDATED_AT: now,
+                fields::SELLER_RESPONSE: response_text,
+                fields::SELLER_RESPONDED_AT: now,
+                db_fields::UPDATED_AT: now,
             }),
         )
         .await?;
@@ -577,7 +641,19 @@ mod tests {
     use ob_database::DatabaseClient;
     use std::sync::Arc;
 
+    fn auth(user_id: &str) -> Extension<AuthContext> {
+        Extension(AuthContext {
+            user_id: user_id.into(),
+            roles: vec!["buyer".into()],
+            authenticated: true,
+            email_verified: true,
+            custom_claims: serde_json::Value::Null,
+        })
+    }
+
     async fn setup_state() -> HandlersState {
+        // Skip rate limiting in handler tests to avoid cross-test collisions in shared PG
+        unsafe { std::env::set_var("OB_TEST_MODE", "1") };
         HandlersState {
             config: Arc::new(Config::load(None).unwrap()),
             db: DatabaseClient::new_mem().await,
@@ -809,17 +885,22 @@ mod tests {
     #[tokio::test]
     async fn test_submit_rating_rejects_duplicate_rating() {
         let state = setup_state().await;
+        let u = uuid::Uuid::new_v4().to_string();
+        let ord = format!("ord_dup_{u}");
+        let prod = format!("prod_dup_{u}");
+        let buyer = format!("buyer_dup_{u}");
+        let seller = format!("seller_dup_{u}");
         state
             .db
             .upsert_document(
                 collections::ORDERS,
-                "ord_1",
+                &ord,
                 serde_json::json!({
-                    fields::BUYER_ID: "buyer_1",
-                    fields::STATUS: "DELIVERED",
+                    db_fields::BUYER_ID: buyer,
+                    db_fields::STATUS: "delivered",
                     fields::ITEMS: [{
-                        fields::PRODUCT_ID: "prod_1",
-                        fields::SELLER_ID: "seller_1",
+                        fields::PRODUCT_ID: prod,
+                        db_fields::SELLER_ID: seller,
                     }],
                 }),
             )
@@ -829,9 +910,9 @@ mod tests {
             .db
             .upsert_document(
                 collections::PRODUCTS,
-                "prod_1",
+                &prod,
                 serde_json::json!({
-                    fields::SELLER_ID: "seller_1",
+                    db_fields::SELLER_ID: seller,
                     fields::AVG_RATING: 4.0,
                     fields::TOTAL_REVIEWS: 1,
                 }),
@@ -843,19 +924,20 @@ mod tests {
             .create_document(
                 collections::PRODUCT_RATINGS,
                 serde_json::json!({
-                    fields::PRODUCT_ID: "prod_1",
-                    "userId": "buyer_1",
+                    fields::PRODUCT_ID: prod,
+                    "userId": buyer,
                 }),
             )
             .await
             .unwrap();
 
         let err = submit_rating(
+            auth(&buyer),
             State(state),
             Json(SubmitRatingRequest {
-                product_id: "prod_1".into(),
-                user_id: "buyer_1".into(),
-                order_id: "ord_1".into(),
+                product_id: prod.clone(),
+                user_id: buyer.clone(),
+                order_id: ord.clone(),
                 rating: 5.0,
                 review_text: Some("great".into()),
                 review_image_urls: vec![],
@@ -869,17 +951,21 @@ mod tests {
     #[tokio::test]
     async fn test_submit_rating_rejects_self_rating() {
         let state = setup_state().await;
+        let u = uuid::Uuid::new_v4().to_string();
+        let ord = format!("ord_self_{u}");
+        let prod = format!("prod_self_{u}");
+        let seller = format!("seller_self_{u}");
         state
             .db
             .upsert_document(
                 collections::ORDERS,
-                "ord_1",
+                &ord,
                 serde_json::json!({
-                    fields::BUYER_ID: "seller_1",
-                    fields::STATUS: "DELIVERED",
+                    db_fields::BUYER_ID: seller,
+                    db_fields::STATUS: "delivered",
                     fields::ITEMS: [{
-                        fields::PRODUCT_ID: "prod_1",
-                        fields::SELLER_ID: "seller_1",
+                        fields::PRODUCT_ID: prod,
+                        db_fields::SELLER_ID: seller,
                     }],
                 }),
             )
@@ -887,16 +973,17 @@ mod tests {
             .unwrap();
         state
             .db
-            .upsert_document(collections::PRODUCTS, "prod_1", serde_json::json!({}))
+            .upsert_document(collections::PRODUCTS, &prod, serde_json::json!({}))
             .await
             .unwrap();
 
         let err = submit_rating(
+            auth(&seller),
             State(state),
             Json(SubmitRatingRequest {
-                product_id: "prod_1".into(),
-                user_id: "seller_1".into(),
-                order_id: "ord_1".into(),
+                product_id: prod.clone(),
+                user_id: seller.clone(),
+                order_id: ord.clone(),
                 rating: 4.0,
                 review_text: None,
                 review_image_urls: vec![],
@@ -910,17 +997,21 @@ mod tests {
     #[tokio::test]
     async fn test_submit_rating_success_updates_product_aggregate() {
         let state = setup_state().await;
+        let u = uuid::Uuid::new_v4().to_string();
+        let prod = format!("prod_agg_{u}");
+        let buyer = format!("buyer_agg_{u}");
+        let ord = format!("ord_agg_{u}");
         state
             .db
             .upsert_document(
                 collections::ORDERS,
-                "ord_1",
+                &ord,
                 serde_json::json!({
-                    fields::BUYER_ID: "buyer_1",
-                    fields::STATUS: "DELIVERED",
+                    db_fields::BUYER_ID: buyer,
+                    db_fields::STATUS: "delivered",
                     fields::ITEMS: [{
-                        fields::PRODUCT_ID: "prod_1",
-                        fields::SELLER_ID: "seller_1",
+                        fields::PRODUCT_ID: prod,
+                        db_fields::SELLER_ID: "seller_1",
                     }],
                 }),
             )
@@ -930,22 +1021,23 @@ mod tests {
             .db
             .upsert_document(
                 collections::PRODUCTS,
-                "prod_1",
+                &prod,
                 serde_json::json!({
                     fields::AVG_RATING: 4.0,
                     fields::TOTAL_REVIEWS: 1,
-                    fields::SELLER_ID: "seller_1",
+                    db_fields::SELLER_ID: "seller_1",
                 }),
             )
             .await
             .unwrap();
 
         let Json(resp) = submit_rating(
+            auth(&buyer),
             State(state.clone()),
             Json(SubmitRatingRequest {
-                product_id: "prod_1".into(),
-                user_id: "buyer_1".into(),
-                order_id: "ord_1".into(),
+                product_id: prod.clone(),
+                user_id: buyer.clone(),
+                order_id: ord.clone(),
                 rating: 5.0,
                 review_text: Some("Excellent".into()),
                 review_image_urls: vec!["https://cdn.example.com/review.jpg".into()],
@@ -957,7 +1049,7 @@ mod tests {
         assert_eq!(resp.rating_count, 2);
         let product = state
             .db
-            .get_document(collections::PRODUCTS, "prod_1")
+            .get_document(collections::PRODUCTS, &prod)
             .await
             .unwrap();
         assert!(product[fields::AVG_RATING].as_f64().unwrap() > 4.4);
@@ -966,20 +1058,24 @@ mod tests {
     #[tokio::test]
     async fn test_get_ratings_filters_and_paginates() {
         let state = setup_state().await;
-        for (id, rating, product, created_at) in [
-            ("r1", 5.0, "prod_1", "2026-01-03T00:00:00Z"),
-            ("r2", 4.0, "prod_1", "2026-01-02T00:00:00Z"),
-            ("r3", 5.0, "prod_2", "2026-01-01T00:00:00Z"),
+        let u = uuid::Uuid::new_v4().to_string();
+        let prod1 = format!("prod_fp1_{u}");
+        let prod2 = format!("prod_fp2_{u}");
+        for (suffix, rating, product, created_at) in [
+            ("1", 5.0, prod1.as_str(), "2026-01-03T00:00:00Z"),
+            ("2", 4.0, prod1.as_str(), "2026-01-02T00:00:00Z"),
+            ("3", 5.0, prod2.as_str(), "2026-01-01T00:00:00Z"),
         ] {
+            let id = format!("r_fp{suffix}_{u}");
             state
                 .db
                 .upsert_document(
                     collections::PRODUCT_RATINGS,
-                    id,
+                    &id,
                     serde_json::json!({
                         fields::PRODUCT_ID: product,
                         fields::RATING: rating,
-                        fields::CREATED_AT: created_at,
+                        db_fields::CREATED_AT: created_at,
                     }),
                 )
                 .await
@@ -989,7 +1085,7 @@ mod tests {
         let Json(resp) = get_ratings(
             State(state),
             Json(GetRatingsRequest {
-                product_id: "prod_1".into(),
+                product_id: prod1.clone(),
                 limit: 1,
                 start_after: None,
                 min_rating: None,
@@ -1000,7 +1096,7 @@ mod tests {
 
         assert_eq!(resp.total_fetched, 1);
         assert!(resp.has_more);
-        assert_eq!(resp.ratings[0][fields::PRODUCT_ID], "prod_1");
+        assert_eq!(resp.ratings[0][fields::PRODUCT_ID], prod1.as_str());
         assert_eq!(resp.ratings[0][fields::RATING], 5.0);
     }
 
@@ -1021,7 +1117,7 @@ mod tests {
             .upsert_document(
                 collections::PRODUCTS,
                 "prod_1",
-                serde_json::json!({ fields::SELLER_ID: "seller_1" }),
+                serde_json::json!({ db_fields::SELLER_ID: "seller_1" }),
             )
             .await
             .unwrap();
@@ -1049,6 +1145,7 @@ mod tests {
     async fn test_submit_rating_invalid_rating_range() {
         let state = setup_state().await;
         let err = submit_rating(
+            auth("user_1"),
             State(state),
             Json(SubmitRatingRequest {
                 product_id: "prod_1".into(),
@@ -1067,21 +1164,30 @@ mod tests {
     #[tokio::test]
     async fn test_submit_rating_long_review_truncated() {
         let state = setup_state().await;
-        state.db.upsert_document(
-            collections::ORDERS, "ord_1",
-            serde_json::json!({
-                fields::BUYER_ID: "buyer_1",
-                fields::STATUS: "DELIVERED",
-                fields::ITEMS: [{ fields::PRODUCT_ID: "prod_1", fields::SELLER_ID: "seller_1" }],
-            }),
-        ).await.unwrap();
+        let u = uuid::Uuid::new_v4().to_string();
+        let prod = format!("prod_lr_{u}");
+        let buyer = format!("buyer_lr_{u}");
+        let ord = format!("ord_lr_{u}");
+        state
+            .db
+            .upsert_document(
+                collections::ORDERS,
+                &ord,
+                serde_json::json!({
+                    db_fields::BUYER_ID: buyer,
+                    db_fields::STATUS: "delivered",
+                    fields::ITEMS: [{ fields::PRODUCT_ID: prod, db_fields::SELLER_ID: "seller_1" }],
+                }),
+            )
+            .await
+            .unwrap();
         state
             .db
             .upsert_document(
                 collections::PRODUCTS,
-                "prod_1",
+                &prod,
                 serde_json::json!({
-                    fields::SELLER_ID: "seller_1",
+                    db_fields::SELLER_ID: "seller_1",
                     fields::AVG_RATING: 0.0,
                     fields::TOTAL_REVIEWS: 0,
                 }),
@@ -1091,11 +1197,12 @@ mod tests {
 
         let long_text = "a".repeat(2000);
         let Json(resp) = submit_rating(
+            auth(&buyer),
             State(state),
             Json(SubmitRatingRequest {
-                product_id: "prod_1".into(),
-                user_id: "buyer_1".into(),
-                order_id: "ord_1".into(),
+                product_id: prod.clone(),
+                user_id: buyer.clone(),
+                order_id: ord.clone(),
                 rating: 4.0,
                 review_text: Some(long_text),
                 review_image_urls: vec![],
@@ -1110,6 +1217,7 @@ mod tests {
     async fn test_submit_rating_order_not_found() {
         let state = setup_state().await;
         let err = submit_rating(
+            auth("user_1"),
             State(state),
             Json(SubmitRatingRequest {
                 product_id: "prod_1".into(),
@@ -1128,26 +1236,31 @@ mod tests {
     #[tokio::test]
     async fn test_submit_rating_order_ownership_mismatch() {
         let state = setup_state().await;
+        let u = uuid::Uuid::new_v4().to_string();
+        let ord = format!("ord_own_{u}");
+        let prod = format!("prod_own_{u}");
+        let user = format!("user_own_{u}");
         state
             .db
             .upsert_document(
                 collections::ORDERS,
-                "ord_1",
+                &ord,
                 serde_json::json!({
-                    fields::BUYER_ID: "other_user",
-                    fields::STATUS: "DELIVERED",
-                    fields::ITEMS: [{ fields::PRODUCT_ID: "prod_1" }],
+                    db_fields::BUYER_ID: "other_user",
+                    db_fields::STATUS: "delivered",
+                    fields::ITEMS: [{ fields::PRODUCT_ID: prod }],
                 }),
             )
             .await
             .unwrap();
 
         let err = submit_rating(
+            auth(&user),
             State(state),
             Json(SubmitRatingRequest {
-                product_id: "prod_1".into(),
-                user_id: "user_1".into(),
-                order_id: "ord_1".into(),
+                product_id: prod.clone(),
+                user_id: user.clone(),
+                order_id: ord.clone(),
                 rating: 4.0,
                 review_text: None,
                 review_image_urls: vec![],
@@ -1161,26 +1274,31 @@ mod tests {
     #[tokio::test]
     async fn test_submit_rating_order_not_ratable() {
         let state = setup_state().await;
+        let u = uuid::Uuid::new_v4().to_string();
+        let ord = format!("ord_nr_{u}");
+        let prod = format!("prod_nr_{u}");
+        let user = format!("user_nr_{u}");
         state
             .db
             .upsert_document(
                 collections::ORDERS,
-                "ord_1",
+                &ord,
                 serde_json::json!({
-                    fields::BUYER_ID: "user_1",
-                    fields::STATUS: "PENDING_PAYMENT",
-                    fields::ITEMS: [{ fields::PRODUCT_ID: "prod_1" }],
+                    db_fields::BUYER_ID: user,
+                    db_fields::STATUS: "pending",
+                    fields::ITEMS: [{ fields::PRODUCT_ID: prod }],
                 }),
             )
             .await
             .unwrap();
 
         let err = submit_rating(
+            auth(&user),
             State(state),
             Json(SubmitRatingRequest {
-                product_id: "prod_1".into(),
-                user_id: "user_1".into(),
-                order_id: "ord_1".into(),
+                product_id: prod.clone(),
+                user_id: user.clone(),
+                order_id: ord.clone(),
                 rating: 4.0,
                 review_text: None,
                 review_image_urls: vec![],
@@ -1194,26 +1312,32 @@ mod tests {
     #[tokio::test]
     async fn test_submit_rating_product_not_in_order() {
         let state = setup_state().await;
+        let u = uuid::Uuid::new_v4().to_string();
+        let ord = format!("ord_nio_{u}");
+        let prod = format!("prod_nio_{u}");
+        let other_prod = format!("other_prod_{u}");
+        let user = format!("user_nio_{u}");
         state
             .db
             .upsert_document(
                 collections::ORDERS,
-                "ord_1",
+                &ord,
                 serde_json::json!({
-                    fields::BUYER_ID: "user_1",
-                    fields::STATUS: "DELIVERED",
-                    fields::ITEMS: [{ fields::PRODUCT_ID: "other_prod" }],
+                    db_fields::BUYER_ID: user,
+                    db_fields::STATUS: "delivered",
+                    fields::ITEMS: [{ fields::PRODUCT_ID: other_prod }],
                 }),
             )
             .await
             .unwrap();
 
         let err = submit_rating(
+            auth(&user),
             State(state),
             Json(SubmitRatingRequest {
-                product_id: "prod_1".into(),
-                user_id: "user_1".into(),
-                order_id: "ord_1".into(),
+                product_id: prod.clone(),
+                user_id: user.clone(),
+                order_id: ord.clone(),
                 rating: 4.0,
                 review_text: None,
                 review_image_urls: vec![],
@@ -1227,21 +1351,31 @@ mod tests {
     #[tokio::test]
     async fn test_submit_rating_product_not_found() {
         let state = setup_state().await;
-        state.db.upsert_document(
-            collections::ORDERS, "ord_1",
-            serde_json::json!({
-                fields::BUYER_ID: "buyer_1",
-                fields::STATUS: "DELIVERED",
-                fields::ITEMS: [{ fields::PRODUCT_ID: "prod_1", fields::SELLER_ID: "seller_1" }],
-            }),
-        ).await.unwrap();
+        let u = uuid::Uuid::new_v4().to_string();
+        let prod = format!("prod_nf_{u}");
+        let ord = format!("ord_nf_{u}");
+        let buyer = format!("buyer_nf_{u}");
+        state
+            .db
+            .upsert_document(
+                collections::ORDERS,
+                &ord,
+                serde_json::json!({
+                    db_fields::BUYER_ID: buyer,
+                    db_fields::STATUS: "delivered",
+                    fields::ITEMS: [{ fields::PRODUCT_ID: prod, db_fields::SELLER_ID: "seller_1" }],
+                }),
+            )
+            .await
+            .unwrap();
 
         let err = submit_rating(
+            auth(&buyer),
             State(state),
             Json(SubmitRatingRequest {
-                product_id: "prod_1".into(),
-                user_id: "buyer_1".into(),
-                order_id: "ord_1".into(),
+                product_id: prod.clone(),
+                user_id: buyer.clone(),
+                order_id: ord.clone(),
                 rating: 4.0,
                 review_text: None,
                 review_image_urls: vec![],
@@ -1277,16 +1411,19 @@ mod tests {
     #[tokio::test]
     async fn test_get_ratings_with_min_rating_filter() {
         let state = setup_state().await;
-        for (id, rating) in [("r1", 5.0), ("r2", 2.0), ("r3", 4.0)] {
+        let u = uuid::Uuid::new_v4().to_string();
+        let prod = format!("prod_minr_{u}");
+        for (suffix, rating) in [("1", 5.0), ("2", 2.0), ("3", 4.0)] {
+            let id = format!("r_minr{suffix}_{u}");
             state
                 .db
                 .upsert_document(
                     collections::PRODUCT_RATINGS,
-                    id,
+                    &id,
                     serde_json::json!({
-                        fields::PRODUCT_ID: "prod_1",
+                        fields::PRODUCT_ID: prod,
                         fields::RATING: rating,
-                        fields::CREATED_AT: "2026-01-01T00:00:00Z",
+                        db_fields::CREATED_AT: "2026-01-01T00:00:00Z",
                     }),
                 )
                 .await
@@ -1296,7 +1433,7 @@ mod tests {
         let Json(resp) = get_ratings(
             State(state),
             Json(GetRatingsRequest {
-                product_id: "prod_1".into(),
+                product_id: prod.clone(),
                 limit: 10,
                 start_after: None,
                 min_rating: Some(4.0),
@@ -1376,21 +1513,30 @@ mod tests {
     #[tokio::test]
     async fn test_submit_rating_atomic_passes_through() {
         let state = setup_state().await;
-        state.db.upsert_document(
-            collections::ORDERS, "ord_1",
-            serde_json::json!({
-                fields::BUYER_ID: "buyer_1",
-                fields::STATUS: "DELIVERED",
-                fields::ITEMS: [{ fields::PRODUCT_ID: "prod_1", fields::SELLER_ID: "seller_1" }],
-            }),
-        ).await.unwrap();
+        let u = uuid::Uuid::new_v4().to_string();
+        let prod = format!("prod_at_{u}");
+        let buyer = format!("buyer_at_{u}");
+        let ord = format!("ord_at_{u}");
+        state
+            .db
+            .upsert_document(
+                collections::ORDERS,
+                &ord,
+                serde_json::json!({
+                    db_fields::BUYER_ID: buyer,
+                    db_fields::STATUS: "delivered",
+                    fields::ITEMS: [{ fields::PRODUCT_ID: prod, db_fields::SELLER_ID: "seller_1" }],
+                }),
+            )
+            .await
+            .unwrap();
         state
             .db
             .upsert_document(
                 collections::PRODUCTS,
-                "prod_1",
+                &prod,
                 serde_json::json!({
-                    fields::SELLER_ID: "seller_1",
+                    db_fields::SELLER_ID: "seller_1",
                     fields::AVG_RATING: 0.0,
                     fields::TOTAL_REVIEWS: 0,
                 }),
@@ -1399,11 +1545,12 @@ mod tests {
             .unwrap();
 
         let Json(resp) = submit_rating_atomic(
+            auth(&buyer),
             State(state),
             Json(SubmitRatingAtomicRequest {
-                product_id: "prod_1".into(),
-                user_id: "buyer_1".into(),
-                order_id: "ord_1".into(),
+                product_id: prod.clone(),
+                user_id: buyer.clone(),
+                order_id: ord.clone(),
                 rating: 5.0,
                 review_text: Some("Great".into()),
                 images: vec!["https://cdn/img.jpg".into()],
@@ -1434,7 +1581,7 @@ mod tests {
             .upsert_document(
                 collections::PRODUCTS,
                 "prod_1",
-                serde_json::json!({ fields::SELLER_ID: "seller_1" }),
+                serde_json::json!({ db_fields::SELLER_ID: "seller_1" }),
             )
             .await
             .unwrap();

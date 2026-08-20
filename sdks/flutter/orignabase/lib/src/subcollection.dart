@@ -7,11 +7,11 @@ import 'realtime.dart';
 
 /// Subcollection support via naming conventions.
 ///
-/// Since SurrealDB doesn't have native subcollections like Firestore,
+/// Since PostgreSQL doesn't have native subcollections like Firestore,
 /// this emulates them using a double-underscore naming convention
 /// and an automatic `parent_id` field.
 ///
-/// Firestore: `users/{uid}/orders` → SurrealDB: `users__orders` (with `parent_id` field)
+/// Firestore: `users/{uid}/orders` → PostgreSQL: `users__orders` (with `parent_id` field)
 ///
 /// ```dart
 /// final orders = ob.collection('users').subcollection('user123', 'orders');
@@ -30,7 +30,7 @@ class SubcollectionRef extends Query {
     this.childCollection,
   ) : super(_subclient, '${parentCollection}__$childCollection');
 
-  /// The actual SurrealDB collection name uses double underscore separator.
+  /// The actual PostgreSQL collection name uses double underscore separator.
   String get collectionPath => collectionName;
 
   /// The parent filter value used to scope queries.
@@ -160,8 +160,7 @@ class _SubcollectionQuery extends Query {
   @override
   Future<QuerySnapshot> get() async {
     // Inject parent_id filter into the inner query before executing
-    final withParent =
-        _inner.where('parent_id', isEqualTo: _parentFilterValue);
+    final withParent = _inner.where('parent_id', isEqualTo: _parentFilterValue);
     return withParent.get();
   }
 

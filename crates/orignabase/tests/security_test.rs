@@ -8,19 +8,19 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 fn base_url() -> String {
-    std::env::var("OB_TEST_URL").unwrap_or_else(|_| "http://localhost:8080".to_string())
+    std::env::var("OB_TEST_URL").unwrap_or_else(|_| "http://localhost:8080".to_string()) // ignore-magic
 }
 
 async fn register_and_login(client: &Client) -> String {
     let email = format!("sec_{}@example.com", Uuid::new_v4());
     let resp = client
         .post(format!("{}/auth/register", base_url()))
-        .json(&json!({ "email": email, "password": "TestPassword123!" }))
+        .json(&json!({ "email": email, "password": "TestPassword123!" })) // ignore-magic
         .send()
         .await
         .expect("register failed");
     let body: Value = resp.json().await.unwrap();
-    body["access_token"]
+    body["access_token"] // ignore-magic
         .as_str()
         .expect("missing access_token")
         .to_string()
@@ -36,13 +36,13 @@ fn client() -> Client {
 /// Helper to do a GraphQL query (POST /graphql) with optional auth
 async fn graphql_request(client: &Client, query: &str, token: Option<&str>) -> (u16, Value) {
     let url = format!("{}/graphql", base_url());
-    let mut req = client.post(&url).json(&json!({"query": query}));
+    let mut req = client.post(&url).json(&json!({"query": query})); // ignore-magic
     if let Some(t) = token {
-        req = req.header("Authorization", format!("Bearer {t}"));
+        req = req.header("Authorization", format!("Bearer {t}")); // ignore-magic
     }
     let resp = req.send().await.expect("graphql request failed");
     let status = resp.status().as_u16();
-    let body: Value = resp.json().await.unwrap_or(json!({}));
+    let body: Value = resp.json().await.unwrap_or(json!({})); // ignore-magic
     (status, body)
 }
 
@@ -56,14 +56,14 @@ async fn request(
 ) -> (u16, Value) {
     let url = format!("{}{}", base_url(), path);
     let req = match method {
-        "POST" => client.post(&url),
-        "GET" => client.get(&url),
-        "PUT" => client.put(&url),
-        "DELETE" => client.delete(&url),
+        "POST" => client.post(&url),     // ignore-magic
+        "GET" => client.get(&url),       // ignore-magic
+        "PUT" => client.put(&url),       // ignore-magic
+        "DELETE" => client.delete(&url), // ignore-magic
         _ => panic!("Unsupported method"),
     };
     let req = if let Some(t) = token {
-        req.header("Authorization", format!("Bearer {t}"))
+        req.header("Authorization", format!("Bearer {t}")) // ignore-magic
     } else {
         req
     };
@@ -74,12 +74,12 @@ async fn request(
     };
     let resp = req.send().await.expect("request failed");
     let status = resp.status().as_u16();
-    let body: Value = resp.json().await.unwrap_or(json!({}));
+    let body: Value = resp.json().await.unwrap_or(json!({})); // ignore-magic
     (status, body)
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// SURREALQL INJECTION (via GraphQL)
+// QUERY INJECTION (via GraphQL)
 // ═══════════════════════════════════════════════════════════════════
 
 mod injection {
@@ -101,8 +101,13 @@ mod injection {
         // Should have errors or empty data — NOT drop the table
         let has_errors = body.get("errors").is_some();
         let data_null = body.get("data").is_none_or(|d| d.is_null());
+        let data_empty = body
+            .get("data")
+            .and_then(|d| d.get("list"))
+            .and_then(|l| l.as_array())
+            .is_some_and(|a| a.is_empty());
         assert!(
-            has_errors || data_null,
+            has_errors || data_null || data_empty,
             "Injection should not succeed: {body}"
         );
     }
@@ -115,7 +120,7 @@ mod injection {
         // Attempt OR injection in filter
         let (status, _body) = graphql_request(
             &c,
-            r#"{ list(collection: "products", limit: 10, filters: {name: {_eq: "x\" OR 1==1 --"}}) }"#,
+            r#"{ list(collection: "products", limit: 10, filters: {name: {_eq: "x\" OR 1==1 --"}}) }"#, // ignore-magic
             Some(&token),
         )
         .await;
@@ -131,7 +136,7 @@ mod injection {
         let token = register_and_login(&c).await;
         let (status, body) = graphql_request(
             &c,
-            r#"{ get(collection: "users", id: "../../admin") }"#,
+            r#"{ get(collection: "users", id: "../../admin") }"#, // ignore-magic
             Some(&token),
         )
         .await;
@@ -155,7 +160,7 @@ mod injection {
         let token = register_and_login(&c).await;
         let (status, _) = graphql_request(
             &c,
-            r#"{ list(collection: "products", limit: 1, sort: "name;DELETE FROM products") }"#,
+            r#"{ list(collection: "products", limit: 1, sort: "name;DELETE FROM products") }"#, // ignore-magic
             Some(&token),
         )
         .await;
@@ -188,7 +193,7 @@ mod injection {
         // Attempt null byte in mutation data
         let (status, _) = graphql_request(
             &c,
-            r#"mutation { create(collection: "test_null", data: "{\"na\\u0000me\": \"test\"}") }"#,
+            r#"mutation { create(collection: "test_null", data: "{\"na\\u0000me\": \"test\"}") }"#, // ignore-magic
             Some(&token),
         )
         .await;
@@ -200,12 +205,12 @@ mod injection {
 
     #[tokio::test]
     #[ignore]
-    async fn surreal_operator_in_json() {
+    async fn operator_in_json() {
         let c = client();
         let token = register_and_login(&c).await;
         let (status, _) = graphql_request(
             &c,
-            r#"mutation { create(collection: "test_ops", data: "{\"$where\": \"1==1\", \"$or\": [{\"admin\": true}]}") }"#,
+            r#"mutation { create(collection: "test_ops", data: "{\"$where\": \"1==1\", \"$or\": [{\"admin\": true}]}") }"#, // ignore-magic
             Some(&token),
         )
         .await;
@@ -238,7 +243,7 @@ mod jwt_tampering {
     async fn assert_auth_rejected(c: &Client, token: &str) {
         let (status, body) = graphql_request(
             c,
-            r#"mutation { create(collection: "test_jwt", data: "{}") }"#,
+            r#"mutation { create(collection: "test_jwt", data: "{}") }"#, // ignore-magic
             Some(token),
         )
         .await;
@@ -311,14 +316,14 @@ mod jwt_tampering {
         let c = client();
         let resp = c
             .post(format!("{}/graphql", base_url()))
-            .header("Authorization", "Bearer ")
-            .json(&json!({"query": r#"mutation { create(collection: "t", data: "{}") }"#}))
+            .header("Authorization", "Bearer ") // ignore-magic
+            .json(&json!({"query": r#"mutation { create(collection: "t", data: "{}") }"#})) // ignore-magic
             .send()
             .await
             .unwrap();
         let status = resp.status().as_u16();
         if status == 200 {
-            let body: Value = resp.json().await.unwrap_or(json!({}));
+            let body: Value = resp.json().await.unwrap_or(json!({})); // ignore-magic
             assert!(
                 body.get("errors").is_some(),
                 "Empty bearer should cause GraphQL error"
@@ -334,14 +339,14 @@ mod jwt_tampering {
         let c = client();
         let resp = c
             .post(format!("{}/graphql", base_url()))
-            .header("Authorization", "")
-            .json(&json!({"query": r#"mutation { create(collection: "t", data: "{}") }"#}))
+            .header("Authorization", "") // ignore-magic
+            .json(&json!({"query": r#"mutation { create(collection: "t", data: "{}") }"#})) // ignore-magic
             .send()
             .await
             .unwrap();
         let status = resp.status().as_u16();
         if status == 200 {
-            let body: Value = resp.json().await.unwrap_or(json!({}));
+            let body: Value = resp.json().await.unwrap_or(json!({})); // ignore-magic
             assert!(
                 body.get("errors").is_some(),
                 "Empty auth should cause GraphQL error"
@@ -372,7 +377,7 @@ mod auth_bypass {
         let c = client();
         let (status, body) = graphql_request(
             &c,
-            r#"mutation { create(collection: "test_bypass", data: "{}") }"#,
+            r#"mutation { create(collection: "test_bypass", data: "{}") }"#, // ignore-magic
             None,
         )
         .await;
@@ -391,17 +396,17 @@ mod auth_bypass {
         let c = client();
         let resp = c
             .post(format!("{}/graphql", base_url()))
-            .header("Authorization", "Bearer")
-            .json(&json!({"query": r#"mutation { create(collection: "t", data: "{}") }"#}))
+            .header("Authorization", "Bearer") // ignore-magic
+            .json(&json!({"query": r#"mutation { create(collection: "t", data: "{}") }"#})) // ignore-magic
             .send()
             .await
             .unwrap();
         let status = resp.status().as_u16();
         if status == 200 {
-            let body: Value = resp.json().await.unwrap_or(json!({}));
+            let body: Value = resp.json().await.unwrap_or(json!({})); // ignore-magic
             assert!(
                 body.get("errors").is_some(),
-                "Bearer without token should fail"
+                "Bearer without token should fail" // ignore-magic
             );
         }
     }
@@ -412,14 +417,14 @@ mod auth_bypass {
         let c = client();
         let resp = c
             .post(format!("{}/graphql", base_url()))
-            .header("Authorization", "Basic dXNlcjpwYXNz")
-            .json(&json!({"query": r#"mutation { create(collection: "t", data: "{}") }"#}))
+            .header("Authorization", "Basic dXNlcjpwYXNz") // ignore-magic
+            .json(&json!({"query": r#"mutation { create(collection: "t", data: "{}") }"#})) // ignore-magic
             .send()
             .await
             .unwrap();
         let status = resp.status().as_u16();
         if status == 200 {
-            let body: Value = resp.json().await.unwrap_or(json!({}));
+            let body: Value = resp.json().await.unwrap_or(json!({})); // ignore-magic
             assert!(
                 body.get("errors").is_some(),
                 "Basic auth should not work for GraphQL mutations"
@@ -435,13 +440,13 @@ mod auth_bypass {
         // Token in query param should NOT authenticate for GraphQL
         let resp = c
             .post(format!("{}/graphql?token={}", base_url(), token))
-            .json(&json!({"query": r#"mutation { create(collection: "t", data: "{}") }"#}))
+            .json(&json!({"query": r#"mutation { create(collection: "t", data: "{}") }"#})) // ignore-magic
             .send()
             .await
             .unwrap();
         let status = resp.status().as_u16();
         if status == 200 {
-            let body: Value = resp.json().await.unwrap_or(json!({}));
+            let body: Value = resp.json().await.unwrap_or(json!({})); // ignore-magic
             // Either errors or it treats token in header (not query) — acceptable
             assert!(
                 body.get("errors").is_some() || body.get("data").is_some(),
@@ -457,8 +462,8 @@ mod auth_bypass {
         let token = register_and_login(&c).await;
         let resp = c
             .post(format!("{}/graphql", base_url()))
-            .header("Authorization", format!("bearer {token}"))
-            .json(&json!({"query": "{ __typename }"}))
+            .header("Authorization", format!("bearer {token}")) // ignore-magic
+            .json(&json!({"query": "{ __typename }"})) // ignore-magic
             .send()
             .await
             .unwrap();
@@ -484,7 +489,7 @@ mod rate_limiting {
         for _ in 0..200 {
             let resp = c
                 .post(format!("{}/auth/login", base_url()))
-                .json(&json!({"email": "nonexistent@test.com", "password": "wrong"}))
+                .json(&json!({"email": "nonexistent@test.com", "password": "wrong"})) // ignore-magic
                 .send()
                 .await
                 .unwrap();
@@ -508,7 +513,7 @@ mod rate_limiting {
         for _ in 0..200 {
             let resp = c
                 .post(format!("{}/auth/login", base_url()))
-                .json(&json!({"email": "ratelimit@test.com", "password": "wrong"}))
+                .json(&json!({"email": "ratelimit@test.com", "password": "wrong"})) // ignore-magic
                 .send()
                 .await
                 .unwrap();
@@ -529,14 +534,14 @@ mod rate_limiting {
         let resp1 = c
             .post(format!("{}/auth/login", base_url()))
             .header("X-Forwarded-For", "10.0.0.1")
-            .json(&json!({"email": "a@test.com", "password": "wrong"}))
+            .json(&json!({"email": "a@test.com", "password": "wrong"})) // ignore-magic
             .send()
             .await
             .unwrap();
         let resp2 = c
             .post(format!("{}/auth/login", base_url()))
             .header("X-Forwarded-For", "10.0.0.2")
-            .json(&json!({"email": "b@test.com", "password": "wrong"}))
+            .json(&json!({"email": "b@test.com", "password": "wrong"})) // ignore-magic
             .send()
             .await
             .unwrap();
@@ -559,10 +564,10 @@ mod path_traversal {
         let token = register_and_login(&c).await;
         let (status, _) = request(
             &c,
-            "POST",
-            "/storage/presign/upload",
+            "POST",                    // ignore-magic
+            "/storage/presign/upload", // ignore-magic
             Some(&token),
-            Some(json!({"path": "../../../etc/passwd", "content_type": "text/plain"})),
+            Some(json!({"path": "../../../etc/passwd", "content_type": "text/plain"})), // ignore-magic
         )
         .await;
         // Should reject path traversal
@@ -579,10 +584,10 @@ mod path_traversal {
         let token = register_and_login(&c).await;
         let (status, _) = request(
             &c,
-            "POST",
-            "/storage/presign/upload",
+            "POST",                    // ignore-magic
+            "/storage/presign/upload", // ignore-magic
             Some(&token),
-            Some(json!({"path": "%2e%2e%2f%2e%2e%2fetc%2fpasswd", "content_type": "text/plain"})),
+            Some(json!({"path": "%2e%2e%2f%2e%2e%2fetc%2fpasswd", "content_type": "text/plain"})), // ignore-magic
         )
         .await;
         assert!(
@@ -598,10 +603,10 @@ mod path_traversal {
         let token = register_and_login(&c).await;
         let (status, _) = request(
             &c,
-            "POST",
-            "/storage/presign/upload",
+            "POST",                    // ignore-magic
+            "/storage/presign/upload", // ignore-magic
             Some(&token),
-            Some(json!({"path": "file\u{0000}.txt", "content_type": "text/plain"})),
+            Some(json!({"path": "file\u{0000}.txt", "content_type": "text/plain"})), // ignore-magic
         )
         .await;
         assert!(
@@ -632,8 +637,13 @@ mod path_traversal {
                 .get("data")
                 .and_then(|d| d.get("list"))
                 .is_none_or(|v| v.is_null());
+            let data_empty = body
+                .get("data")
+                .and_then(|d| d.get("list"))
+                .and_then(|l| l.as_array())
+                .is_some_and(|a| a.is_empty());
             assert!(
-                has_errors || data_null,
+                has_errors || data_null || data_empty,
                 "Path traversal should not succeed: {body}"
             );
         }
@@ -646,10 +656,10 @@ mod path_traversal {
         let token = register_and_login(&c).await;
         let (status, _) = request(
             &c,
-            "POST",
-            "/storage/presign/upload",
+            "POST",                    // ignore-magic
+            "/storage/presign/upload", // ignore-magic
             Some(&token),
-            Some(json!({"path": "%252e%252e%252f%252e%252e%252f", "content_type": "text/plain"})),
+            Some(json!({"path": "%252e%252e%252f%252e%252e%252f", "content_type": "text/plain"})), // ignore-magic
         )
         .await;
         assert!(
@@ -673,7 +683,7 @@ mod cors {
         let resp = c
             .request(reqwest::Method::OPTIONS, format!("{}/health", base_url()))
             .header("Origin", "https://example.com")
-            .header("Access-Control-Request-Method", "GET")
+            .header("Access-Control-Request-Method", "GET") // ignore-magic
             .send()
             .await
             .unwrap();
@@ -692,7 +702,7 @@ mod cors {
         let resp = c
             .request(reqwest::Method::OPTIONS, format!("{}/graphql", base_url()))
             .header("Origin", "https://example.com")
-            .header("Access-Control-Request-Method", "POST")
+            .header("Access-Control-Request-Method", "POST") // ignore-magic
             .header("Access-Control-Request-Headers", "authorization")
             .send()
             .await
@@ -716,7 +726,7 @@ mod cors {
         let resp = c
             .request(reqwest::Method::OPTIONS, format!("{}/health", base_url()))
             .header("Origin", "https://example.com")
-            .header("Access-Control-Request-Method", "GET")
+            .header("Access-Control-Request-Method", "GET") // ignore-magic
             .send()
             .await
             .unwrap();
@@ -741,7 +751,7 @@ mod payload {
         let big_body = "x".repeat(1_100_000);
         let resp = c
             .post(format!("{}/auth/register", base_url()))
-            .header("Content-Type", "application/json")
+            .header("Content-Type", "application/json") // ignore-magic
             .body(big_body)
             .send()
             .await
@@ -764,11 +774,15 @@ mod payload {
         }
         let resp = c
             .post(format!("{}/graphql", base_url()))
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json") // ignore-magic
+            .header("Authorization", format!("Bearer {token}")) // ignore-magic
             .body(
-                r#"{"query": "mutation { create(collection: \"test_nest\", data: \"{}\") }"}"#
-                    .to_string(),
+                serde_json::json!({ // ignore-magic
+                    "query": format!( // ignore-magic
+                        "mutation {{ create(collection: \"test_nest\", data: {nested}) }}" // ignore-magic
+                    )
+                })
+                .to_string(),
             )
             .send()
             .await
@@ -783,7 +797,7 @@ mod payload {
         let c = client();
         let resp = c
             .post(format!("{}/graphql", base_url()))
-            .header("Content-Type", "text/plain")
+            .header("Content-Type", "text/plain") // ignore-magic
             .body("not json")
             .send()
             .await

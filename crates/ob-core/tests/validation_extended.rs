@@ -40,37 +40,37 @@ fn test_postal_code_special_characters() {
 }
 
 #[test]
-fn test_surreal_record_id_valid() {
-    assert!(validate_surreal_record_id("users:abc123").is_ok());
-    assert!(validate_surreal_record_id("orders:ord_12345").is_ok());
-    assert!(validate_surreal_record_id("products:prod-uuid").is_ok());
+fn test_record_id_valid() {
+    assert!(validate_record_id("users:abc123").is_ok());
+    assert!(validate_record_id("orders:ord_12345").is_ok());
+    assert!(validate_record_id("products:prod-uuid").is_ok());
 }
 
 #[test]
-fn test_surreal_record_id_missing_colon() {
-    assert!(validate_surreal_record_id("users_abc123").is_err());
+fn test_record_id_missing_colon() {
+    assert!(validate_record_id("users_abc123").is_err());
 }
 
 #[test]
-fn test_surreal_record_id_multiple_colons() {
-    assert!(validate_surreal_record_id("users:rec:extra").is_err());
+fn test_record_id_multiple_colons() {
+    assert!(validate_record_id("users:rec:extra").is_err());
 }
 
 #[test]
-fn test_surreal_record_id_empty_parts() {
-    assert!(validate_surreal_record_id(":record").is_err());
-    assert!(validate_surreal_record_id("users:").is_err());
+fn test_record_id_empty_parts() {
+    assert!(validate_record_id(":record").is_err());
+    assert!(validate_record_id("users:").is_err());
 }
 
 #[test]
-fn test_surreal_record_id_invalid_collection() {
-    assert!(validate_surreal_record_id("123users:rec").is_err());
+fn test_record_id_invalid_collection() {
+    assert!(validate_record_id("123users:rec").is_err());
 }
 
 #[test]
-fn test_surreal_record_id_special_characters() {
-    assert!(validate_surreal_record_id("users:id;DROP").is_err());
-    assert!(validate_surreal_record_id("users:id'quote").is_err());
+fn test_record_id_special_characters() {
+    assert!(validate_record_id("users:id;DROP").is_err());
+    assert!(validate_record_id("users:id'quote").is_err());
 }
 
 #[test]
@@ -114,35 +114,29 @@ fn test_document_id_empty() {
 }
 
 #[test]
-fn test_escape_surreal_string_single_quotes() {
-    assert_eq!(escape_surreal_string("it's"), "it\\'s");
+fn test_escape_sql_string_single_quotes() {
+    assert_eq!(escape_sql_string("it's"), "it\\'s");
 }
 
 #[test]
-fn test_escape_surreal_string_backslashes() {
-    assert_eq!(
-        escape_surreal_string("path\\to\\file"),
-        "path\\\\to\\\\file"
-    );
+fn test_escape_sql_string_backslashes() {
+    assert_eq!(escape_sql_string("path\\to\\file"), "path\\\\to\\\\file");
 }
 
 #[test]
-fn test_escape_surreal_string_mixed() {
-    assert_eq!(
-        escape_surreal_string("O'Neil's\\path"),
-        "O\\'Neil\\'s\\\\path"
-    );
+fn test_escape_sql_string_mixed() {
+    assert_eq!(escape_sql_string("O'Neil's\\path"), "O\\'Neil\\'s\\\\path");
 }
 
 #[test]
-fn test_escape_surreal_string_sql_injection() {
+fn test_escape_sql_string_sql_injection() {
     let input = "'; DROP TABLE users; --";
-    let output = escape_surreal_string(input);
+    let output = escape_sql_string(input);
     assert!(output.contains("\\'"));
 }
 
 #[test]
-fn test_escape_surreal_string_normal() {
-    assert_eq!(escape_surreal_string("hello"), "hello");
-    assert_eq!(escape_surreal_string("test123"), "test123");
+fn test_escape_sql_string_normal() {
+    assert_eq!(escape_sql_string("hello"), "hello");
+    assert_eq!(escape_sql_string("test123"), "test123");
 }

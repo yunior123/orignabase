@@ -1,13 +1,13 @@
 #!/bin/bash
-# SurrealDB backup script — run daily via cron
+# PostgreSQL backup script — run daily via cron
 # Usage: ./scripts/backup.sh [--dry-run]
-# Cron: 0 2 * * * /opt/orignabase/scripts/backup.sh >> /var/log/surrealdb_backup.log 2>&1
+# Cron: 0 2 * * * /opt/orignabase/scripts/backup.sh >> /var/log/postgres_backup.log 2>&1
 
 set -euo pipefail
 
 DRY_RUN="${1:-}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-BACKUP_DIR="${BACKUP_DIR:-/opt/backups/surrealdb}"
+BACKUP_DIR="${BACKUP_DIR:-/opt/backups/postgres}"
 RETENTION_DAYS="${RETENTION_DAYS:-30}"
 
 # Colors for output
@@ -32,7 +32,7 @@ log_warn() {
 mkdir -p "$BACKUP_DIR"
 chmod 700 "$BACKUP_DIR"
 
-log_info "Starting SurrealDB backup"
+log_info "Starting PostgreSQL backup"
 log_info "Backup directory: $BACKUP_DIR"
 log_info "Retention period: $RETENTION_DAYS days"
 
@@ -40,10 +40,10 @@ if [ -n "$DRY_RUN" ]; then
     log_warn "DRY-RUN mode enabled (no backups will be created)"
 fi
 
-# Function to export database
+# Function to dump database
 export_database() {
     local db_name="$1"
-    local output_file="$BACKUP_DIR/${db_name}_${TIMESTAMP}.surql"
+    local output_file="$BACKUP_DIR/${db_name}_${TIMESTAMP}.sql"
 
     log_info "Exporting database: $db_name"
 
@@ -52,16 +52,15 @@ export_database() {
         return 0
     fi
 
-    # Use surreal CLI to export
-    # Assumes surreal is in PATH or use full path
-    if ! surreal export \
-        --conn http://localhost:8000 \
-        --user "${SURREALDB_USER:-root}" \
-        --pass "${SURREALDB_PASS:-orignabase_root_2026}" \
-        --ns orignabase \
-        --db "$db_name" \
-        "$output_file" 2>/dev/null; then
-        log_error "Failed to export database: $db_name"
+    if ! PGPASSWORD="${POSTGRES_PASSWORD:-orignabase_dev}" pg_dump \
+        --host "${POSTGRES_HOST:-localhost}" \
+        --port "${POSTGRES_PORT:-5432}" \
+        --username "${POSTGRES_USER:-orignabase}" \
+        --dbname "$db_name" \
+        --clean \
+        --if-exists \
+        --file "$output_file" 2>/dev/null; then
+        log_error "Failed to dump database: $db_name"
         return 1
     fi
 
@@ -82,7 +81,7 @@ rotate_backups() {
 
     if [ -n "$DRY_RUN" ]; then
         log_info "DRY-RUN: Would delete backups older than $RETENTION_DAYS days"
-        find "$BACKUP_DIR" -name "*.surql" -mtime "+$RETENTION_DAYS" -type f
+        find "$BACKUP_DIR" -name "*.sql" -mtime "+$RETENTION_DAYS" -type f
         return 0
     fi
 
@@ -94,7 +93,7 @@ rotate_backups() {
         else
             log_warn "Failed to delete: $file"
         fi
-    done < <(find "$BACKUP_DIR" -name "*.surql" -mtime "+$RETENTION_DAYS" -type f)
+    done < <(find "$BACKUP_DIR" -name "*.sql" -mtime "+$RETENTION_DAYS" -type f)
 
     if [ "$deleted_count" -gt 0 ]; then
         log_info "Rotation complete: deleted $deleted_count old backup(s)"
@@ -108,7 +107,7 @@ main() {
     local success=true
 
     # Backup primary database
-    if ! export_database "main"; then
+    if ! export_database "${POSTGRES_DB:-orignabase}"; then
         log_error "Primary database backup failed"
         success=false
     fi

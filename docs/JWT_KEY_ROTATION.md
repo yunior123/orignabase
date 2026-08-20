@@ -335,7 +335,7 @@ Scenario: Quarterly rotation schedule
 ### Audit Trail
 - All rotations logged: `/var/log/orignabase/jwt-rotation.log`
 - Fingerprints tracked in metadata for correlation
-- Admin API calls logged separately (Sentry integration)
+- Admin API calls logged separately (GlitchTip integration)
 
 ## Monitoring
 

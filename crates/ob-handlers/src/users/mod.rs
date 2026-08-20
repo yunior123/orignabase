@@ -7,14 +7,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::HandlersState;
-use crate::shared::auth::resolve_self_user_id;
+use crate::shared::auth::{require_admin, resolve_self_user_id};
 use crate::shared::schema::{COUNTRY_CANADA, UserRole, collections, fields};
 use crate::shared::validation::{sanitize_html, validate_email, validate_string, validate_uid};
+use ob_database::fields as db_fields;
+use std::sync::OnceLock;
 
 // =============================================================================
 // REQUEST / RESPONSE TYPES
 // =============================================================================
 
+/// Request body for POST /api/users/profile/update.
+///
+/// Requires JWT auth. Updates the user's own profile (or admin can update any user).
+/// Supports partial updates — only provided fields are modified.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateProfileRequest {
@@ -41,6 +47,7 @@ pub struct UpdateProfileRequest {
 pub struct AddressInput {
     pub street: String,
     pub city: String,
+    #[serde(alias = "province", rename = "state")]
     pub province: String,
     pub postal_code: String,
     #[serde(default = "default_country")]
@@ -57,6 +64,9 @@ pub struct TaxExemptionInput {
     pub gst_number: String,
 }
 
+/// Request body for POST /api/users/profile/get.
+///
+/// Requires JWT auth. Returns the user's full profile document.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetProfileRequest {
@@ -64,6 +74,9 @@ pub struct GetProfileRequest {
     pub user_id: Option<String>,
 }
 
+/// Request body for POST /api/users/email-consent — CASL marketing consent toggle.
+///
+/// Records consent method, timestamp, and opt-in/out state for Canadian Anti-Spam Law compliance.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EmailConsentRequest {
@@ -72,6 +85,7 @@ pub struct EmailConsentRequest {
     pub consent: bool,
 }
 
+/// Request body for POST /api/users/notification-prefs — push notification preferences.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NotificationPrefsRequest {
@@ -115,6 +129,7 @@ pub struct AddBuyerAddressRequest {
     pub user_id: Option<String>,
     pub street: String,
     pub city: String,
+    #[serde(alias = "province", rename = "state")]
     pub province: String,
     pub postal_code: String,
     #[serde(default = "default_country")]
@@ -133,6 +148,7 @@ pub struct UpdateBuyerAddressRequest {
     pub address_id: String,
     pub street: String,
     pub city: String,
+    #[serde(alias = "province", rename = "state")]
     pub province: String,
     pub postal_code: String,
     #[serde(default = "default_country")]
@@ -174,6 +190,7 @@ const MAX_NAME_LENGTH: usize = 100;
 const MIN_NAME_LENGTH: usize = 1;
 const VALID_LANGUAGES: &[&str] = &["en", "fr"];
 const GST_REGEX_PATTERN: &str = r"^\d{9}RT\d{4}$";
+static GST_RE: OnceLock<regex_lite::Regex> = OnceLock::new();
 const VALID_CONSENT_METHODS: &[&str] = &["google_oauth", "apple_oauth", "signup_form", "signup"];
 
 // =============================================================================
@@ -188,7 +205,7 @@ fn success(data: serde_json::Value) -> Json<SuccessResponse> {
 }
 
 fn validate_gst_number(gst: &str) -> ob_core::Result<()> {
-    let re = regex_lite::Regex::new(GST_REGEX_PATTERN).unwrap();
+    let re = GST_RE.get_or_init(|| regex_lite::Regex::new(GST_REGEX_PATTERN).expect("valid regex"));
     if !re.is_match(gst) {
         return Err(ob_core::Error::Validation(
             "Invalid GST number format. Expected: 123456789RT0001".into(),
@@ -247,7 +264,7 @@ fn sanitize_address_fields(
     }
     validate_string("street", street, 200)?;
     validate_string("city", city, 100)?;
-    validate_string("province", province, 50)?;
+    validate_string("state", province, 50)?;
     validate_string("postalCode", postal_code, 10)?;
     Ok(json!({
         fields::STREET: sanitize_html(street),
@@ -291,9 +308,9 @@ async fn update_profile(
 
     let now = Utc::now().to_rfc3339();
     let mut update_data = serde_json::Map::new();
-    update_data.insert(fields::UPDATED_AT.to_string(), json!(now));
+    update_data.insert(db_fields::UPDATED_AT.to_string(), json!(now));
 
-    let mut updated_fields = vec![fields::UPDATED_AT.to_string()];
+    let mut updated_fields = vec![db_fields::UPDATED_AT.to_string()];
 
     // Handle name update
     if let Some(ref name_raw) = req.name {
@@ -303,8 +320,8 @@ async fn update_profile(
                 "Name must be between {MIN_NAME_LENGTH} and {MAX_NAME_LENGTH} characters"
             )));
         }
-        update_data.insert(fields::NAME.to_string(), json!(name));
-        updated_fields.push(fields::NAME.to_string());
+        update_data.insert(db_fields::NAME.to_string(), json!(name));
+        updated_fields.push(db_fields::NAME.to_string());
     }
 
     // Handle address update
@@ -316,7 +333,7 @@ async fn update_profile(
         }
         validate_string("street", &addr.street, 200)?;
         validate_string("city", &addr.city, 100)?;
-        validate_string("province", &addr.province, 50)?;
+        validate_string("state", &addr.province, 50)?;
         validate_string("postalCode", &addr.postal_code, 10)?;
 
         update_data.insert(
@@ -335,19 +352,19 @@ async fn update_profile(
     // Handle language update
     if let Some(ref lang) = req.preferred_language {
         validate_language(lang)?;
-        update_data.insert("preferredLanguage".to_string(), json!(lang));
+        update_data.insert(fields::PREFERRED_LANGUAGE.to_string(), json!(lang));
         // CASL compliance: record consent method for language preference
-        update_data.insert("consentMethod".to_string(), json!("user_preference"));
-        update_data.insert("consentTimestamp".to_string(), json!(now));
-        updated_fields.push("preferredLanguage".to_string());
+        update_data.insert(fields::CONSENT_METHOD.to_string(), json!("user_preference"));
+        update_data.insert(fields::CONSENT_TIMESTAMP.to_string(), json!(now));
+        updated_fields.push(fields::PREFERRED_LANGUAGE.to_string());
     }
 
     // Handle terms version acceptance
     if let Some(ref version) = req.terms_version {
         validate_string("termsVersion", version, 20)?;
-        update_data.insert("termsVersion".to_string(), json!(version));
-        update_data.insert("termsAcceptedAt".to_string(), json!(now));
-        updated_fields.push("termsVersion".to_string());
+        update_data.insert(fields::TERMS_VERSION.to_string(), json!(version));
+        update_data.insert(fields::TERMS_ACCEPTED_AT.to_string(), json!(now));
+        updated_fields.push(fields::TERMS_VERSION.to_string());
     }
 
     // Handle tax exemption
@@ -357,13 +374,13 @@ async fn update_profile(
             validate_gst_number(&gst)?;
         }
         update_data.insert(
-            "taxExemption".to_string(),
+            fields::TAX_EXEMPTION.to_string(),
             json!({
-                "gstNumber": gst,
-                fields::UPDATED_AT: now,
+                fields::GST_NUMBER: gst,
+                db_fields::UPDATED_AT: now,
             }),
         );
-        updated_fields.push("taxExemption".to_string());
+        updated_fields.push(fields::TAX_EXEMPTION.to_string());
     }
 
     state
@@ -394,16 +411,16 @@ async fn get_profile(
 
     Ok(success(json!({
         fields::UID: user_id,
-        fields::EMAIL: user_doc.get(fields::EMAIL),
-        fields::NAME: user_doc.get(fields::NAME),
+        db_fields::EMAIL: user_doc.get(db_fields::EMAIL),
+        db_fields::NAME: user_doc.get(db_fields::NAME),
         fields::ADDRESS: user_doc.get(fields::ADDRESS),
-        "taxExemption": user_doc.get("taxExemption"),
+        fields::TAX_EXEMPTION: user_doc.get(fields::TAX_EXEMPTION),
         fields::ROLES: user_doc.get(fields::ROLES),
-        fields::CREATED_AT: user_doc.get(fields::CREATED_AT),
-        fields::UPDATED_AT: user_doc.get(fields::UPDATED_AT),
+        db_fields::CREATED_AT: user_doc.get(db_fields::CREATED_AT),
+        db_fields::UPDATED_AT: user_doc.get(db_fields::UPDATED_AT),
         fields::SUSPENDED: user_doc.get(fields::SUSPENDED).and_then(|v| v.as_bool()).unwrap_or(false),
-        "termsVersion": user_doc.get("termsVersion"),
-        "privacyPolicyVersion": user_doc.get("privacyPolicyVersion"),
+        fields::TERMS_VERSION: user_doc.get(fields::TERMS_VERSION),
+        fields::PRIVACY_POLICY_VERSION: user_doc.get(fields::PRIVACY_POLICY_VERSION),
     })))
 }
 
@@ -432,16 +449,16 @@ async fn email_consent(
             collections::USERS,
             &user_id,
             json!({
-                fields::EMAIL_CONSENT: req.consent,
-                "consentTimestamp": now,
-                "consentMethod": consent_method,
-                fields::UPDATED_AT: now,
+                db_fields::EMAIL_CONSENT: req.consent,
+                fields::CONSENT_TIMESTAMP: now,
+                fields::CONSENT_METHOD: consent_method,
+                db_fields::UPDATED_AT: now,
             }),
         )
         .await?;
 
     Ok(success(json!({
-        fields::EMAIL_CONSENT: req.consent,
+        db_fields::EMAIL_CONSENT: req.consent,
     })))
 }
 
@@ -470,13 +487,13 @@ async fn notification_preferences(
 
     let now = Utc::now().to_rfc3339();
     let mut update = serde_json::Map::new();
-    update.insert(fields::UPDATED_AT.to_string(), json!(now));
+    update.insert(db_fields::UPDATED_AT.to_string(), json!(now));
 
     if let Some(v) = req.notify_new_products {
-        update.insert("notifyNewProducts".to_string(), json!(v));
+        update.insert(fields::NOTIFY_NEW_PRODUCTS.to_string(), json!(v));
     }
     if let Some(v) = req.notify_trending {
-        update.insert("notifyTrending".to_string(), json!(v));
+        update.insert(fields::NOTIFY_TRENDING.to_string(), json!(v));
     }
 
     if update.len() <= 1 {
@@ -548,22 +565,22 @@ async fn create_profile(
             collections::USERS,
             json!({
                 fields::UID: user_id,
-                fields::EMAIL: req.email,
-                fields::NAME: name,
+                db_fields::EMAIL: req.email,
+                db_fields::NAME: name,
                 fields::ROLES: roles,
-                fields::CREATED_AT: now,
-                "preferredLanguage": lang,
+                db_fields::CREATED_AT: now,
+                fields::LANGUAGE: lang,
                 // Legal compliance (CASL / PIPEDA / Law 25)
-                "dataProcessingConsent": true,
-                fields::EMAIL_CONSENT: true,
-                "marketingOptIn": marketing_opt_in,
-                "consentTimestamp": now,
-                "termsAcceptedAt": now,
-                "privacyAcceptedAt": now,
-                "consentMethod": consent_method,
-                "privacyPolicyVersion": "1.0",
-                "termsVersion": "1.0",
-                "pushEnabled": true,
+                fields::DATA_PROCESSING_CONSENT: true,
+                db_fields::EMAIL_CONSENT: true,
+                fields::MARKETING_OPT_IN: marketing_opt_in,
+                fields::CONSENT_TIMESTAMP: now,
+                fields::TERMS_ACCEPTED_AT: now,
+                fields::PRIVACY_ACCEPTED_AT: now,
+                fields::CONSENT_METHOD: consent_method,
+                fields::PRIVACY_POLICY_VERSION: "1.0",
+                fields::TERMS_VERSION: "1.0",
+                fields::PUSH_ENABLED: true,
             }),
         )
         .await?;
@@ -582,23 +599,28 @@ async fn cleanup_fcm_token(
     validate_string("token", &req.token, 512)?;
 
     // FCM tokens are stored as documents in a subcollection-like pattern.
-    // In SurrealDB we use a flat collection with userId + token fields.
+    // In PostgreSQL we use a flat table with userId + token fields.
     let query = format!(
-        "SELECT * FROM {} WHERE {} = '{}' AND {} = '{}' LIMIT 1",
+        "SELECT * FROM {} WHERE data->>'{}' = $uid AND data->>'{}' = $token LIMIT 1",
         collections::FCM_TOKENS,
         fields::UID,
-        user_id,
         fields::TOKEN,
-        req.token.replace('\'', ""),
     );
-    let results = state.db.query_raw(&query).await.unwrap_or_default();
+    let results = state
+        .db
+        .query_bind_value(&query, json!({"uid": user_id, "token": req.token}))
+        .await
+        .unwrap_or_default();
 
     if results.is_empty() {
         // Idempotent — token already gone
         return Ok(success(json!({ "deleted": false })));
     }
 
-    let token_id = results[0].get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let token_id = results[0]
+        .get(db_fields::ID)
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
     if !token_id.is_empty() {
         let id = token_id
@@ -619,6 +641,25 @@ async fn add_buyer_address(
     validate_uid("userId", &user_id)?;
     let _ = state.db.get_document(collections::USERS, &user_id).await?;
 
+    let count_query = format!(
+        "SELECT COUNT(*) FROM {} WHERE data->>'{}' = $user_id",
+        collections::ADDRESSES,
+        db_fields::USER_ID,
+    );
+    let count_rows = state
+        .db
+        .query_bind_value(&count_query, serde_json::json!({"user_id": user_id}))
+        .await
+        .unwrap_or_default();
+    if let Some(first) = count_rows.first() {
+        let count = first.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
+        if count >= 10 {
+            return Err(ob_core::Error::Validation(
+                "Maximum number of addresses (10) reached. Please delete an address before adding a new one.".into()
+            ));
+        }
+    }
+
     let address = sanitize_address_fields(
         &req.street,
         &req.city,
@@ -630,13 +671,14 @@ async fn add_buyer_address(
 
     if req.is_default {
         let clear_query = format!(
-            "UPDATE {} SET isDefault = false, {} = '{}' WHERE userId = '{}'",
+            "UPDATE {} SET data = jsonb_set(jsonb_set(data, '{{isDefault}}', 'false'::jsonb), '{{updatedAt}}', to_jsonb($now::text)), updated_at = now() WHERE data->>'{}' = $user_id",
             collections::ADDRESSES,
-            fields::UPDATED_AT,
-            now,
-            ob_core::escape_surreal_string(&user_id),
+            db_fields::USER_ID,
         );
-        let _ = state.db.query_raw(&clear_query).await;
+        let _ = state
+            .db
+            .query_bind_value(&clear_query, json!({"now": now, "user_id": user_id}))
+            .await;
     }
 
     let created = state
@@ -644,18 +686,18 @@ async fn add_buyer_address(
         .create_document(
             collections::ADDRESSES,
             json!({
-                "userId": user_id,
-                "label": req.label.as_deref().unwrap_or(""),
-                "isDefault": req.is_default,
-                "address": address,
-                fields::CREATED_AT: now,
-                fields::UPDATED_AT: now,
+                db_fields::USER_ID: user_id,
+                fields::LABEL: req.label.as_deref().unwrap_or(""),
+                fields::IS_DEFAULT: req.is_default,
+                fields::ADDRESS: address,
+                db_fields::CREATED_AT: now,
+                db_fields::UPDATED_AT: now,
             }),
         )
         .await?;
 
     let address_id = created
-        .get("id")
+        .get(db_fields::ID)
         .and_then(|v| v.as_str())
         .map(|id| strip_record_prefix(collections::ADDRESSES, id).to_string())
         .unwrap_or_default();
@@ -677,7 +719,7 @@ async fn update_buyer_address(
         .get_document(collections::ADDRESSES, &req.address_id)
         .await?;
 
-    if existing.get("userId").and_then(|v| v.as_str()) != Some(user_id.as_str()) {
+    if existing.get(db_fields::USER_ID).and_then(|v| v.as_str()) != Some(user_id.as_str()) {
         return Err(ob_core::Error::Forbidden(
             "Address ownership mismatch".into(),
         ));
@@ -694,15 +736,17 @@ async fn update_buyer_address(
 
     if req.is_default {
         let clear_query = format!(
-            "UPDATE {} SET isDefault = false, {} = '{}' WHERE userId = '{}' AND id != type::thing('{}', '{}')",
+            "UPDATE {} SET data = jsonb_set(jsonb_set(data, '{{isDefault}}', 'false'::jsonb), '{{updatedAt}}', to_jsonb($now::text)), updated_at = now() WHERE data->>'{}' = $user_id AND id != $address_id",
             collections::ADDRESSES,
-            fields::UPDATED_AT,
-            now,
-            ob_core::escape_surreal_string(&user_id),
-            collections::ADDRESSES,
-            ob_core::escape_surreal_string(&req.address_id),
+            db_fields::USER_ID,
         );
-        let _ = state.db.query_raw(&clear_query).await;
+        let _ = state
+            .db
+            .query_bind_value(
+                &clear_query,
+                json!({"now": now, "user_id": user_id, "address_id": req.address_id}),
+            )
+            .await;
     }
 
     state
@@ -711,10 +755,10 @@ async fn update_buyer_address(
             collections::ADDRESSES,
             &req.address_id,
             json!({
-                "label": req.label.as_deref().unwrap_or(""),
-                "isDefault": req.is_default,
-                "address": address,
-                fields::UPDATED_AT: now,
+                fields::LABEL: req.label.as_deref().unwrap_or(""),
+                fields::IS_DEFAULT: req.is_default,
+                fields::ADDRESS: address,
+                db_fields::UPDATED_AT: now,
             }),
         )
         .await?;
@@ -736,14 +780,14 @@ async fn delete_buyer_address(
         .get_document(collections::ADDRESSES, &req.address_id)
         .await?;
 
-    if existing.get("userId").and_then(|v| v.as_str()) != Some(user_id.as_str()) {
+    if existing.get(db_fields::USER_ID).and_then(|v| v.as_str()) != Some(user_id.as_str()) {
         return Err(ob_core::Error::Forbidden(
             "Address ownership mismatch".into(),
         ));
     }
 
     let was_default = existing
-        .get("isDefault")
+        .get(fields::IS_DEFAULT)
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     state
@@ -753,13 +797,17 @@ async fn delete_buyer_address(
 
     if was_default {
         let query = format!(
-            "SELECT * FROM {} WHERE userId = '{}' ORDER BY {} DESC LIMIT 1",
+            "SELECT * FROM {} WHERE data->>'{}' = $user_id ORDER BY data->>'createdAt' DESC LIMIT 1",
             collections::ADDRESSES,
-            ob_core::escape_surreal_string(&user_id),
-            fields::CREATED_AT,
+            db_fields::USER_ID,
         );
-        if let Some(next_address) = state.db.query_raw(&query).await?.into_iter().next()
-            && let Some(raw_id) = next_address.get("id").and_then(|v| v.as_str())
+        if let Some(next_address) = state
+            .db
+            .query_bind_value(&query, json!({"user_id": user_id}))
+            .await?
+            .into_iter()
+            .next()
+            && let Some(raw_id) = next_address.get(db_fields::ID).and_then(|v| v.as_str())
         {
             let next_id = strip_record_prefix(collections::ADDRESSES, raw_id);
             let _ = state
@@ -767,7 +815,7 @@ async fn delete_buyer_address(
                 .update_document(
                     collections::ADDRESSES,
                     next_id,
-                    json!({ "isDefault": true, fields::UPDATED_AT: Utc::now().to_rfc3339() }),
+                    json!({ fields::IS_DEFAULT: true, db_fields::UPDATED_AT: Utc::now().to_rfc3339() }),
                 )
                 .await;
         }
@@ -790,7 +838,7 @@ async fn set_default_buyer_address(
         .get_document(collections::ADDRESSES, &req.address_id)
         .await?;
 
-    if existing.get("userId").and_then(|v| v.as_str()) != Some(user_id.as_str()) {
+    if existing.get(db_fields::USER_ID).and_then(|v| v.as_str()) != Some(user_id.as_str()) {
         return Err(ob_core::Error::Forbidden(
             "Address ownership mismatch".into(),
         ));
@@ -798,13 +846,14 @@ async fn set_default_buyer_address(
 
     let now = Utc::now().to_rfc3339();
     let clear_query = format!(
-        "UPDATE {} SET isDefault = false, {} = '{}' WHERE userId = '{}'",
+        "UPDATE {} SET data = jsonb_set(jsonb_set(data, '{{isDefault}}', 'false'::jsonb), '{{updatedAt}}', to_jsonb($now::text)), updated_at = now() WHERE data->>'{}' = $user_id",
         collections::ADDRESSES,
-        fields::UPDATED_AT,
-        now,
-        ob_core::escape_surreal_string(&user_id),
+        db_fields::USER_ID,
     );
-    let _ = state.db.query_raw(&clear_query).await;
+    let _ = state
+        .db
+        .query_bind_value(&clear_query, json!({"now": now, "user_id": user_id}))
+        .await;
 
     state
         .db
@@ -812,13 +861,113 @@ async fn set_default_buyer_address(
             collections::ADDRESSES,
             &req.address_id,
             json!({
-                "isDefault": true,
-                fields::UPDATED_AT: now,
+                fields::IS_DEFAULT: true,
+                db_fields::UPDATED_AT: now,
             }),
         )
         .await?;
 
     Ok(success(json!({ "updated": true })))
+}
+
+// =============================================================================
+// ADMIN: SELLER SUSPENSION
+// =============================================================================
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuspendSellerRequest {
+    #[serde(default)]
+    pub admin_id: Option<String>,
+    pub seller_id: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnsuspendSellerRequest {
+    #[serde(default)]
+    pub admin_id: Option<String>,
+    pub seller_id: String,
+}
+
+/// POST /api/admin/suspend-seller — Admin suspends a seller account.
+async fn suspend_seller(
+    State(state): State<HandlersState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<SuspendSellerRequest>,
+) -> ob_core::Result<Json<SuccessResponse>> {
+    let admin_id = require_admin(&auth)?;
+    validate_uid("sellerId", &req.seller_id)?;
+
+    let reason = req
+        .reason
+        .as_deref()
+        .map(|s| sanitize_html(s).chars().take(500).collect::<String>())
+        .unwrap_or_else(|| "Suspended by admin".to_string());
+
+    let now = Utc::now().to_rfc3339();
+
+    state
+        .db
+        .update_document(
+            collections::USERS,
+            &req.seller_id,
+            json!({
+                fields::SUSPENDED: true,
+                fields::SUSPENDED_AT: now,
+                fields::SUSPENDED_BY: admin_id,
+                fields::SUSPEND_REASON: reason,
+                db_fields::UPDATED_AT: now,
+            }),
+        )
+        .await
+        .map_err(|_| ob_core::Error::NotFound("Seller not found".into()))?;
+
+    tracing::info!(
+        admin_id = %admin_id,
+        seller_id = %req.seller_id,
+        "Seller suspended"
+    );
+
+    Ok(success(json!({ "suspended": true })))
+}
+
+/// POST /api/admin/unsuspend-seller — Admin reinstates a seller account.
+async fn unsuspend_seller(
+    State(state): State<HandlersState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<UnsuspendSellerRequest>,
+) -> ob_core::Result<Json<SuccessResponse>> {
+    let admin_id = require_admin(&auth)?;
+    validate_uid("sellerId", &req.seller_id)?;
+
+    let now = Utc::now().to_rfc3339();
+
+    state
+        .db
+        .update_document(
+            collections::USERS,
+            &req.seller_id,
+            json!({
+                fields::SUSPENDED: false,
+                fields::SUSPENDED_AT: serde_json::Value::Null,
+                fields::SUSPENDED_BY: serde_json::Value::Null,
+                fields::SUSPEND_REASON: serde_json::Value::Null,
+                db_fields::UPDATED_AT: now,
+            }),
+        )
+        .await
+        .map_err(|_| ob_core::Error::NotFound("Seller not found".into()))?;
+
+    tracing::info!(
+        admin_id = %admin_id,
+        seller_id = %req.seller_id,
+        "Seller unsuspended"
+    );
+
+    Ok(success(json!({ "suspended": false })))
 }
 
 // =============================================================================
@@ -843,6 +992,9 @@ pub fn router(state: HandlersState) -> Router {
             "/api/users/address/set-default",
             post(set_default_buyer_address),
         )
+        // Admin: seller suspension
+        .route("/api/admin/suspend-seller", post(suspend_seller))
+        .route("/api/admin/unsuspend-seller", post(unsuspend_seller))
         .with_state(state)
 }
 
@@ -881,7 +1033,7 @@ mod tests {
 
     #[test]
     fn test_create_profile_request_deser() {
-        let json_str = r#"{"userId":"u1","email":"a@b.com","name":"Test","roles":["buyer"]}"#;
+        let json_str = r#"{"userId":"u1","email":"a@b.com","name":"Test","roles":["buyer"]}"#; // ignore-magic
         let req: CreateProfileRequest = serde_json::from_str(json_str).unwrap();
         assert_eq!(req.user_id, Some("u1".to_string()));
         assert_eq!(req.email, "a@b.com");
@@ -912,14 +1064,14 @@ mod tests {
     #[test]
     fn test_address_input_default_country() {
         let json_str =
-            r#"{"street":"123 Main","city":"Toronto","province":"ON","postalCode":"M5V 1A1"}"#;
+            r#"{"street":"123 Main","city":"Toronto","state":"ON","postalCode":"M5V 1A1"}"#; // ignore-magic
         let addr: AddressInput = serde_json::from_str(json_str).unwrap();
         assert_eq!(addr.country, COUNTRY_CANADA);
     }
 
     #[test]
     fn test_email_consent_request_deser() {
-        let json_str = r#"{"userId":"u1","consent":false}"#;
+        let json_str = r#"{"userId":"u1","consent":false}"#; // ignore-magic
         let req: EmailConsentRequest = serde_json::from_str(json_str).unwrap();
         assert_eq!(req.user_id, Some("u1".to_string()));
         assert!(!req.consent);
@@ -927,7 +1079,7 @@ mod tests {
 
     #[test]
     fn test_notification_prefs_partial() {
-        let json_str = r#"{"userId":"u1","notifyNewProducts":true}"#;
+        let json_str = r#"{"userId":"u1","notifyNewProducts":true}"#; // ignore-magic
         let req: NotificationPrefsRequest = serde_json::from_str(json_str).unwrap();
         assert_eq!(req.notify_new_products, Some(true));
         assert_eq!(req.notify_trending, None);
@@ -977,7 +1129,7 @@ mod tests {
         assert!(result.is_ok());
         let addr = result.unwrap();
         // postal code is uppercased
-        assert_eq!(addr["postalCode"], "M5V 1A1");
+        assert_eq!(addr[fields::POSTAL_CODE], "M5V 1A1");
     }
 
     #[test]
@@ -1000,9 +1152,9 @@ mod tests {
         );
         assert!(result.is_ok());
         let addr = result.unwrap();
-        let street = addr["street"].as_str().unwrap();
+        let street = addr[fields::STREET].as_str().unwrap();
         assert!(!street.contains("<script>"));
-        let city = addr["city"].as_str().unwrap();
+        let city = addr[fields::CITY].as_str().unwrap();
         assert!(!city.contains("<b>"));
     }
 
@@ -1073,15 +1225,7 @@ mod tests {
 
     #[test]
     fn test_add_buyer_address_request_deser() {
-        let json = r#"{
-            "userId": "u1",
-            "street": "123 Main",
-            "city": "Toronto",
-            "province": "ON",
-            "postalCode": "M5V 1A1",
-            "label": "Home",
-            "isDefault": true
-        }"#;
+        let json = r#"{"userId":"u1","street":"123 Main","city":"Toronto","state":"ON","postalCode":"M5V 1A1","label":"Home","isDefault":true}"#; // ignore-magic
         let req: AddBuyerAddressRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.user_id, Some("u1".to_string()));
         assert_eq!(req.country, COUNTRY_CANADA); // default
@@ -1091,7 +1235,7 @@ mod tests {
 
     #[test]
     fn test_add_buyer_address_request_defaults() {
-        let json = r#"{"userId":"u1","street":"A","city":"B","province":"C","postalCode":"D"}"#;
+        let json = r#"{"userId":"u1","street":"A","city":"B","state":"C","postalCode":"D"}"#; // ignore-magic
         let req: AddBuyerAddressRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.country, COUNTRY_CANADA);
         assert!(req.label.is_none());
@@ -1100,11 +1244,7 @@ mod tests {
 
     #[test]
     fn test_update_buyer_address_request_deser() {
-        let json = r#"{
-            "userId":"u1","addressId":"addr1",
-            "street":"456 Oak","city":"Montreal","province":"QC","postalCode":"H1A 1A1",
-            "isDefault":false
-        }"#;
+        let json = r#"{"userId":"u1","addressId":"addr1","street":"456 Oak","city":"Montreal","state":"QC","postalCode":"H1A 1A1","isDefault":false}"#; // ignore-magic
         let req: UpdateBuyerAddressRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.address_id, "addr1");
         assert_eq!(req.country, COUNTRY_CANADA);
@@ -1112,34 +1252,28 @@ mod tests {
 
     #[test]
     fn test_delete_buyer_address_request_deser() {
-        let json = r#"{"userId":"u1","addressId":"addr99"}"#;
+        let json = r#"{"userId":"u1","addressId":"addr99"}"#; // ignore-magic
         let req: DeleteBuyerAddressRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.address_id, "addr99");
     }
 
     #[test]
     fn test_set_default_buyer_address_request_deser() {
-        let json = r#"{"userId":"u1","addressId":"addr42"}"#;
+        let json = r#"{"userId":"u1","addressId":"addr42"}"#; // ignore-magic
         let req: SetDefaultBuyerAddressRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.address_id, "addr42");
     }
 
     #[test]
     fn test_tax_exemption_input_deser() {
-        let json = r#"{"gstNumber":"123456789RT0001"}"#;
+        let json = r#"{"gstNumber":"123456789RT0001"}"#; // ignore-magic
         let tax: TaxExemptionInput = serde_json::from_str(json).unwrap();
         assert_eq!(tax.gst_number, "123456789RT0001");
     }
 
     #[test]
     fn test_update_profile_request_all_fields() {
-        let json = r#"{
-            "userId": "u1",
-            "name": "New Name",
-            "address": {"street":"1 A","city":"B","province":"C","postalCode":"D"},
-            "preferredLanguage": "fr",
-            "taxExemption": {"gstNumber":"123456789RT0001"}
-        }"#;
+        let json = r#"{"userId":"u1","name":"New Name","address":{"street":"1 A","city":"B","state":"C","postalCode":"D"},"preferredLanguage":"fr","taxExemption":{"gstNumber":"123456789RT0001"}}"#; // ignore-magic
         let req: UpdateProfileRequest = serde_json::from_str(json).unwrap();
         assert!(req.name.is_some());
         assert!(req.address.is_some());
@@ -1149,7 +1283,7 @@ mod tests {
 
     #[test]
     fn test_update_profile_request_minimal() {
-        let json = r#"{"userId":"u1"}"#;
+        let json = r#"{"userId":"u1"}"#; // ignore-magic
         let req: UpdateProfileRequest = serde_json::from_str(json).unwrap();
         assert!(req.name.is_none());
         assert!(req.address.is_none());
@@ -1159,7 +1293,7 @@ mod tests {
 
     #[test]
     fn test_create_profile_request_with_roles() {
-        let json = r#"{"userId":"u1","email":"a@b.com","name":"X","roles":["buyer","seller"]}"#;
+        let json = r#"{"userId":"u1","email":"a@b.com","name":"X","roles":["buyer","seller"]}"#; // ignore-magic
         let req: CreateProfileRequest = serde_json::from_str(json).unwrap();
         let roles = req.roles.unwrap();
         assert_eq!(roles.len(), 2);
@@ -1167,7 +1301,7 @@ mod tests {
 
     #[test]
     fn test_create_profile_request_with_consent() {
-        let json = r#"{"userId":"u1","email":"a@b.com","name":"X","consentMethod":"google_oauth","marketingOptIn":true}"#;
+        let json = r#"{"userId":"u1","email":"a@b.com","name":"X","consentMethod":"google_oauth","marketingOptIn":true}"#; // ignore-magic
         let req: CreateProfileRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.consent_method.as_deref(), Some("google_oauth"));
         assert_eq!(req.marketing_opt_in, Some(true));
@@ -1175,7 +1309,7 @@ mod tests {
 
     #[test]
     fn test_cleanup_fcm_token_request_deser() {
-        let json = r#"{"userId":"u1","token":"fcm_token_abc123"}"#;
+        let json = r#"{"userId":"u1","token":"fcm_token_abc123"}"#; // ignore-magic
         let req: CleanupFcmTokenRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.token, "fcm_token_abc123");
     }
@@ -1216,7 +1350,7 @@ mod tests {
 
     #[test]
     fn test_notification_prefs_both_fields() {
-        let json = r#"{"userId":"u1","notifyNewProducts":false,"notifyTrending":true}"#;
+        let json = r#"{"userId":"u1","notifyNewProducts":false,"notifyTrending":true}"#; // ignore-magic
         let req: NotificationPrefsRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.notify_new_products, Some(false));
         assert_eq!(req.notify_trending, Some(true));
@@ -1225,22 +1359,24 @@ mod tests {
     #[tokio::test]
     async fn test_create_profile_returns_existing_when_user_doc_exists() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let email = format!("exist-{}@test.com", &uuid::Uuid::new_v4().to_string()[..8]);
         state
             .db
             .upsert_document(
                 collections::USERS,
-                "user_1",
-                json!({ fields::EMAIL: "existing@example.com" }),
+                &user_id,
+                json!({ db_fields::EMAIL: &email }),
             )
             .await
             .unwrap();
 
         let Json(resp) = create_profile(
             State(state),
-            Extension(auth("test")),
+            Extension(auth(&user_id)),
             Json(CreateProfileRequest {
-                user_id: Some("user_1".to_string()),
-                email: "user@example.com".into(),
+                user_id: Some(user_id.clone()),
+                email: format!("new-{}@test.com", &uuid::Uuid::new_v4().to_string()[..8]),
                 name: "Test".into(),
                 roles: None,
                 preferred_language: None,
@@ -1258,13 +1394,15 @@ mod tests {
     #[tokio::test]
     async fn test_create_profile_success_normalizes_defaults() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let email = format!("fb-{}@example.com", &uuid::Uuid::new_v4().to_string()[..8]);
 
         let Json(resp) = create_profile(
             State(state.clone()),
-            Extension(auth("test")),
+            Extension(auth(&user_id)),
             Json(CreateProfileRequest {
-                user_id: Some("user_1".to_string()),
-                email: "fallback@example.com".into(),
+                user_id: Some(user_id.clone()),
+                email: email.clone(),
                 name: "  ".into(),
                 roles: None,
                 preferred_language: Some("xx".into()),
@@ -1278,33 +1416,38 @@ mod tests {
         assert_eq!(resp.data["created"], true);
         let users: Vec<serde_json::Value> = state
             .db
-            .query_raw("SELECT * FROM users WHERE uid = 'user_1' LIMIT 1")
+            .query_bind_value(
+                "SELECT * FROM users WHERE data->>'uid' = $uid LIMIT 1",
+                json!({fields::UID: &user_id}),
+            )
             .await
             .unwrap();
         let user = users.first().unwrap();
-        assert_eq!(user[fields::NAME], "fallback");
-        assert_eq!(user["preferredLanguage"], "en");
+        let email_prefix = email.split('@').next().unwrap();
+        assert_eq!(user[db_fields::NAME], email_prefix);
+        assert_eq!(user[fields::PREFERRED_LANGUAGE], "en");
         assert_eq!(user[fields::ROLES], json!(["buyer"]));
         assert_eq!(user["consentMethod"], "signup_form");
-        assert_eq!(user["marketingOptIn"], true);
+        assert_eq!(user[fields::MARKETING_OPT_IN], true);
     }
 
     #[tokio::test]
     async fn test_update_profile_rejects_invalid_gst_number() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
         state
             .db
-            .upsert_document(collections::USERS, "user_1", json!({}))
+            .upsert_document(collections::USERS, &user_id, json!({}))
             .await
             .unwrap();
 
         let err = update_profile(
             State(state),
-            Extension(auth("test")),
+            Extension(auth(&user_id)),
             Json(UpdateProfileRequest {
                 terms_accepted_at: None,
                 terms_version: None,
-                user_id: Some("user_1".to_string()),
+                user_id: Some(user_id.clone()),
                 name: None,
                 address: None,
                 preferred_language: None,
@@ -1322,23 +1465,24 @@ mod tests {
     #[tokio::test]
     async fn test_update_profile_success_updates_name_language_and_tax() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
         state
             .db
             .upsert_document(
                 collections::USERS,
-                "user_1",
-                json!({ fields::EMAIL: "user@example.com" }),
+                &user_id,
+                json!({ db_fields::EMAIL: "user@example.com" }),
             )
             .await
             .unwrap();
 
         let Json(resp) = update_profile(
             State(state.clone()),
-            Extension(auth("test")),
+            Extension(auth(&user_id)),
             Json(UpdateProfileRequest {
                 terms_accepted_at: None,
                 terms_version: None,
-                user_id: Some("user_1".to_string()),
+                user_id: Some(user_id.clone()),
                 name: Some(" Updated Name ".into()),
                 address: None,
                 preferred_language: Some("fr".into()),
@@ -1353,25 +1497,29 @@ mod tests {
         assert_eq!(resp.data["updated"], true);
         let user = state
             .db
-            .get_document(collections::USERS, "user_1")
+            .get_document(collections::USERS, &user_id)
             .await
             .unwrap();
-        assert_eq!(user[fields::NAME], "Updated Name");
-        assert_eq!(user["preferredLanguage"], "fr");
+        assert_eq!(user[db_fields::NAME], "Updated Name");
+        assert_eq!(user[fields::PREFERRED_LANGUAGE], "fr");
         assert_eq!(user["taxExemption"]["gstNumber"], "123456789RT0001");
     }
 
     #[tokio::test]
     async fn test_get_profile_success() {
         let state = setup_state().await;
+        let _ = state
+            .db
+            .query_raw("DELETE FROM users WHERE id = 'user_1'")
+            .await;
         state
             .db
             .upsert_document(
                 collections::USERS,
                 "user_1",
                 json!({
-                    fields::EMAIL: "user@example.com",
-                    fields::NAME: "User",
+                    db_fields::EMAIL: "user@example.com",
+                    db_fields::NAME: "User",
                     fields::ROLES: ["buyer"],
                 }),
             )
@@ -1380,7 +1528,7 @@ mod tests {
 
         let Json(resp) = get_profile(
             State(state),
-            Extension(auth("test")),
+            Extension(auth("user_1")),
             Json(GetProfileRequest {
                 user_id: Some("user_1".to_string()),
             }),
@@ -1388,34 +1536,35 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(resp.data[fields::EMAIL], "user@example.com");
-        assert_eq!(resp.data[fields::NAME], "User");
+        assert_eq!(resp.data[db_fields::EMAIL], "user@example.com");
+        assert_eq!(resp.data[db_fields::NAME], "User");
     }
 
     #[tokio::test]
     async fn test_email_consent_success_sets_unsubscribe_method() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
         state
             .db
-            .upsert_document(collections::USERS, "user_1", json!({}))
+            .upsert_document(collections::USERS, &user_id, json!({}))
             .await
             .unwrap();
 
         let Json(resp) = email_consent(
             State(state.clone()),
-            Extension(auth("test")),
+            Extension(auth(&user_id)),
             Json(EmailConsentRequest {
-                user_id: Some("user_1".to_string()),
+                user_id: Some(user_id.clone()),
                 consent: false,
             }),
         )
         .await
         .unwrap();
 
-        assert_eq!(resp.data[fields::EMAIL_CONSENT], false);
+        assert_eq!(resp.data[db_fields::EMAIL_CONSENT], false);
         let user = state
             .db
-            .get_document(collections::USERS, "user_1")
+            .get_document(collections::USERS, &user_id)
             .await
             .unwrap();
         assert_eq!(user["consentMethod"], "unsubscribe");
@@ -1424,11 +1573,12 @@ mod tests {
     #[tokio::test]
     async fn test_notification_preferences_requires_premium() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
         state
             .db
             .upsert_document(
                 collections::USERS,
-                "user_1",
+                &user_id,
                 json!({ fields::IS_PREMIUM: false }),
             )
             .await
@@ -1436,9 +1586,9 @@ mod tests {
 
         let err = notification_preferences(
             State(state),
-            Extension(auth("test")),
+            Extension(auth(&user_id)),
             Json(NotificationPrefsRequest {
-                user_id: Some("user_1".to_string()),
+                user_id: Some(user_id.clone()),
                 notify_new_products: Some(true),
                 notify_trending: None,
             }),
@@ -1452,11 +1602,12 @@ mod tests {
     #[tokio::test]
     async fn test_notification_preferences_requires_one_valid_field() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
         state
             .db
             .upsert_document(
                 collections::USERS,
-                "user_1",
+                &user_id,
                 json!({ fields::IS_PREMIUM: true }),
             )
             .await
@@ -1464,9 +1615,9 @@ mod tests {
 
         let err = notification_preferences(
             State(state),
-            Extension(auth("test")),
+            Extension(auth(&user_id)),
             Json(NotificationPrefsRequest {
-                user_id: Some("user_1".to_string()),
+                user_id: Some(user_id.clone()),
                 notify_new_products: None,
                 notify_trending: None,
             }),
@@ -1483,11 +1634,12 @@ mod tests {
     #[tokio::test]
     async fn test_notification_preferences_success() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
         state
             .db
             .upsert_document(
                 collections::USERS,
-                "user_1",
+                &user_id,
                 json!({ fields::IS_PREMIUM: true }),
             )
             .await
@@ -1495,9 +1647,9 @@ mod tests {
 
         let Json(resp) = notification_preferences(
             State(state.clone()),
-            Extension(auth("test")),
+            Extension(auth(&user_id)),
             Json(NotificationPrefsRequest {
-                user_id: Some("user_1".to_string()),
+                user_id: Some(user_id.clone()),
                 notify_new_products: Some(true),
                 notify_trending: Some(false),
             }),
@@ -1508,7 +1660,7 @@ mod tests {
         assert!(resp.success);
         let user = state
             .db
-            .get_document(collections::USERS, "user_1")
+            .get_document(collections::USERS, &user_id)
             .await
             .unwrap();
         assert_eq!(user["notifyNewProducts"], true);
@@ -1518,13 +1670,15 @@ mod tests {
     #[tokio::test]
     async fn test_cleanup_fcm_token_idempotent_when_missing() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let token = uuid::Uuid::new_v4().to_string();
 
         let Json(resp) = cleanup_fcm_token(
             State(state),
-            Extension(auth("test")),
+            Extension(auth(&user_id)),
             Json(CleanupFcmTokenRequest {
-                user_id: Some("user_1".to_string()),
-                token: "tok_1".into(),
+                user_id: Some(user_id.clone()),
+                token,
             }),
         )
         .await
@@ -1536,22 +1690,25 @@ mod tests {
     #[tokio::test]
     async fn test_cleanup_fcm_token_deletes_existing_token() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let token = uuid::Uuid::new_v4().to_string();
+        let tok_doc_id = uuid::Uuid::new_v4().to_string();
         state
             .db
             .upsert_document(
                 collections::FCM_TOKENS,
-                "tok_doc",
-                json!({ fields::UID: "user_1", fields::TOKEN: "tok_1" }),
+                &tok_doc_id,
+                json!({ fields::UID: &user_id, fields::TOKEN: &token }),
             )
             .await
             .unwrap();
 
         let Json(resp) = cleanup_fcm_token(
             State(state.clone()),
-            Extension(auth("test")),
+            Extension(auth(&user_id)),
             Json(CleanupFcmTokenRequest {
-                user_id: Some("user_1".to_string()),
-                token: "tok_1".into(),
+                user_id: Some(user_id.clone()),
+                token: token.clone(),
             }),
         )
         .await
@@ -1559,29 +1716,34 @@ mod tests {
 
         assert_eq!(resp.data["deleted"], true);
         let query = format!(
-            "SELECT * FROM {} WHERE {} = 'user_1' AND {} = 'tok_1'",
+            "SELECT * FROM {} WHERE data->>'{}' = $uid AND data->>'{}' = $token",
             collections::FCM_TOKENS,
             fields::UID,
             fields::TOKEN,
         );
-        let remaining: Vec<serde_json::Value> = state.db.query_raw(&query).await.unwrap();
+        let remaining: Vec<serde_json::Value> = state
+            .db
+            .query_bind_value(&query, json!({fields::UID: &user_id, "token": &token}))
+            .await
+            .unwrap();
         assert!(remaining.is_empty());
     }
 
     #[tokio::test]
     async fn test_add_buyer_address_creates_and_returns_id() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
         state
             .db
-            .upsert_document(collections::USERS, "user_1", json!({}))
+            .upsert_document(collections::USERS, &user_id, json!({}))
             .await
             .unwrap();
 
         let Json(resp) = add_buyer_address(
             State(state.clone()),
-            Extension(auth("test")),
+            Extension(auth(&user_id)),
             Json(AddBuyerAddressRequest {
-                user_id: Some("user_1".to_string()),
+                user_id: Some(user_id.clone()),
                 street: "1 Main St".into(),
                 city: "Toronto".into(),
                 province: "ON".into(),
@@ -1600,7 +1762,7 @@ mod tests {
             .get_document(collections::ADDRESSES, address_id)
             .await
             .unwrap();
-        assert_eq!(address["userId"], "user_1");
+        assert_eq!(address[db_fields::USER_ID], user_id.as_str());
         assert_eq!(address["isDefault"], true);
         assert_eq!(address["address"][fields::POSTAL_CODE], "M5V2H1");
     }
@@ -1608,22 +1770,25 @@ mod tests {
     #[tokio::test]
     async fn test_update_buyer_address_rejects_ownership_mismatch() {
         let state = setup_state().await;
+        let auth_user_id = uuid::Uuid::new_v4().to_string();
+        let other_user_id = uuid::Uuid::new_v4().to_string();
+        let address_id = uuid::Uuid::new_v4().to_string();
         state
             .db
             .upsert_document(
                 collections::ADDRESSES,
-                "addr_1",
-                json!({ "userId": "other_user" }),
+                &address_id,
+                json!({ "userId": other_user_id }),
             )
             .await
             .unwrap();
 
         let err = update_buyer_address(
             State(state),
-            Extension(auth("test")),
+            Extension(auth(&auth_user_id)),
             Json(UpdateBuyerAddressRequest {
-                user_id: Some("user_1".to_string()),
-                address_id: "addr_1".into(),
+                user_id: Some(auth_user_id),
+                address_id,
                 street: "1 Main".into(),
                 city: "Toronto".into(),
                 province: "ON".into(),
@@ -1642,15 +1807,18 @@ mod tests {
     #[tokio::test]
     async fn test_delete_buyer_address_promotes_next_default() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let addr1 = uuid::Uuid::new_v4().to_string();
+        let addr2 = uuid::Uuid::new_v4().to_string();
         state
             .db
             .upsert_document(
                 collections::ADDRESSES,
-                "addr_1",
+                &addr1,
                 json!({
-                    "userId": "user_1",
+                    "userId": &user_id,
                     "isDefault": true,
-                    fields::CREATED_AT: "2026-01-01T00:00:00Z",
+                    db_fields::CREATED_AT: "2026-01-01T00:00:00Z",
                 }),
             )
             .await
@@ -1659,11 +1827,11 @@ mod tests {
             .db
             .upsert_document(
                 collections::ADDRESSES,
-                "addr_2",
+                &addr2,
                 json!({
-                    "userId": "user_1",
+                    "userId": &user_id,
                     "isDefault": false,
-                    fields::CREATED_AT: "2026-01-02T00:00:00Z",
+                    db_fields::CREATED_AT: "2026-01-02T00:00:00Z",
                 }),
             )
             .await
@@ -1671,10 +1839,10 @@ mod tests {
 
         let Json(resp) = delete_buyer_address(
             State(state.clone()),
-            Extension(auth("test")),
+            Extension(auth(&user_id)),
             Json(DeleteBuyerAddressRequest {
-                user_id: Some("user_1".to_string()),
-                address_id: "addr_1".into(),
+                user_id: Some(user_id.clone()),
+                address_id: addr1.clone(),
             }),
         )
         .await
@@ -1683,7 +1851,7 @@ mod tests {
         assert_eq!(resp.data["deleted"], true);
         let promoted = state
             .db
-            .get_document(collections::ADDRESSES, "addr_2")
+            .get_document(collections::ADDRESSES, &addr2)
             .await
             .unwrap();
         assert_eq!(promoted["isDefault"], true);
@@ -1692,6 +1860,10 @@ mod tests {
     #[tokio::test]
     async fn test_set_default_buyer_address_updates_requested_address() {
         let state = setup_state().await;
+        let _ = state
+            .db
+            .query_raw("DELETE FROM addresses WHERE id IN ('addr_1', 'addr_2')")
+            .await;
         for (id, is_default) in [("addr_1", true), ("addr_2", false)] {
             state
                 .db
@@ -1706,7 +1878,7 @@ mod tests {
 
         let Json(resp) = set_default_buyer_address(
             State(state.clone()),
-            Extension(auth("test")),
+            Extension(auth("user_1")),
             Json(SetDefaultBuyerAddressRequest {
                 user_id: Some("user_1".to_string()),
                 address_id: "addr_2".into(),
@@ -1735,19 +1907,20 @@ mod tests {
     #[tokio::test]
     async fn test_update_profile_rejects_name_too_short() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
         state
             .db
-            .upsert_document(collections::USERS, "user_1", json!({}))
+            .upsert_document(collections::USERS, &user_id, json!({}))
             .await
             .unwrap();
 
         let err = update_profile(
             State(state),
-            Extension(auth("test")),
+            Extension(auth(&user_id)),
             Json(UpdateProfileRequest {
                 terms_accepted_at: None,
                 terms_version: None,
-                user_id: Some("user_1".to_string()),
+                user_id: Some(user_id.clone()),
                 name: Some("".into()), // empty after trim → 0 < MIN_NAME_LENGTH
                 address: None,
                 preferred_language: None,
@@ -1763,20 +1936,21 @@ mod tests {
     #[tokio::test]
     async fn test_update_profile_rejects_name_too_long() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
         state
             .db
-            .upsert_document(collections::USERS, "user_1", json!({}))
+            .upsert_document(collections::USERS, &user_id, json!({}))
             .await
             .unwrap();
 
         let long_name = "A".repeat(MAX_NAME_LENGTH + 1);
         let err = update_profile(
             State(state),
-            Extension(auth("test")),
+            Extension(auth(&user_id)),
             Json(UpdateProfileRequest {
                 terms_accepted_at: None,
                 terms_version: None,
-                user_id: Some("user_1".to_string()),
+                user_id: Some(user_id.clone()),
                 name: Some(long_name),
                 address: None,
                 preferred_language: None,
@@ -1794,19 +1968,20 @@ mod tests {
     #[tokio::test]
     async fn test_update_profile_rejects_non_canada_address() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
         state
             .db
-            .upsert_document(collections::USERS, "user_1", json!({}))
+            .upsert_document(collections::USERS, &user_id, json!({}))
             .await
             .unwrap();
 
         let err = update_profile(
             State(state),
-            Extension(auth("test")),
+            Extension(auth(&user_id)),
             Json(UpdateProfileRequest {
                 terms_accepted_at: None,
                 terms_version: None,
-                user_id: Some("user_1".to_string()),
+                user_id: Some(user_id.clone()),
                 name: None,
                 address: Some(AddressInput {
                     street: "123 Main".into(),
@@ -1828,19 +2003,20 @@ mod tests {
     #[tokio::test]
     async fn test_update_profile_with_valid_address() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
         state
             .db
-            .upsert_document(collections::USERS, "user_1", json!({}))
+            .upsert_document(collections::USERS, &user_id, json!({}))
             .await
             .unwrap();
 
         let Json(resp) = update_profile(
             State(state.clone()),
-            Extension(auth("test")),
+            Extension(auth(&user_id)),
             Json(UpdateProfileRequest {
                 terms_accepted_at: None,
                 terms_version: None,
-                user_id: Some("user_1".to_string()),
+                user_id: Some(user_id.clone()),
                 name: None,
                 address: Some(AddressInput {
                     street: "123 Main St".into(),
@@ -1862,7 +2038,7 @@ mod tests {
 
         let user = state
             .db
-            .get_document(collections::USERS, "user_1")
+            .get_document(collections::USERS, &user_id)
             .await
             .unwrap();
         assert_eq!(user[fields::ADDRESS][fields::POSTAL_CODE], "M5V 1A1");
@@ -1874,20 +2050,21 @@ mod tests {
     #[tokio::test]
     async fn test_update_profile_with_empty_gst_number() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
         state
             .db
-            .upsert_document(collections::USERS, "user_1", json!({}))
+            .upsert_document(collections::USERS, &user_id, json!({}))
             .await
             .unwrap();
 
         // Empty GST number should skip validation and succeed
         let Json(resp) = update_profile(
             State(state.clone()),
-            Extension(auth("test")),
+            Extension(auth(&user_id)),
             Json(UpdateProfileRequest {
                 terms_accepted_at: None,
                 terms_version: None,
-                user_id: Some("user_1".to_string()),
+                user_id: Some(user_id.clone()),
                 name: None,
                 address: None,
                 preferred_language: None,
@@ -1909,27 +2086,28 @@ mod tests {
     #[tokio::test]
     async fn test_email_consent_true_sets_user_preference_method() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
         state
             .db
-            .upsert_document(collections::USERS, "user_1", json!({}))
+            .upsert_document(collections::USERS, &user_id, json!({}))
             .await
             .unwrap();
 
         let Json(resp) = email_consent(
             State(state.clone()),
-            Extension(auth("test")),
+            Extension(auth(&user_id)),
             Json(EmailConsentRequest {
-                user_id: Some("user_1".to_string()),
+                user_id: Some(user_id.clone()),
                 consent: true,
             }),
         )
         .await
         .unwrap();
 
-        assert_eq!(resp.data[fields::EMAIL_CONSENT], true);
+        assert_eq!(resp.data[db_fields::EMAIL_CONSENT], true);
         let user = state
             .db
-            .get_document(collections::USERS, "user_1")
+            .get_document(collections::USERS, &user_id)
             .await
             .unwrap();
         assert_eq!(user["consentMethod"], "user_preference");
@@ -1945,6 +2123,10 @@ mod tests {
     #[tokio::test]
     async fn test_update_buyer_address_success_path() {
         let state = setup_state().await;
+        let _ = state
+            .db
+            .query_raw("DELETE FROM addresses WHERE id = 'addr_upd'")
+            .await;
         state
             .db
             .upsert_document(
@@ -1957,7 +2139,7 @@ mod tests {
 
         let Json(resp) = update_buyer_address(
             State(state.clone()),
-            Extension(auth("test")),
+            Extension(auth("user_1")),
             Json(UpdateBuyerAddressRequest {
                 user_id: Some("user_1".to_string()),
                 address_id: "addr_1".into(),
@@ -1980,18 +2162,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(addr["address"][fields::CITY], "Ottawa");
-        assert_eq!(addr["label"], "Work");
+        assert_eq!(addr[fields::LABEL], "Work");
     }
 
     #[tokio::test]
     async fn test_update_buyer_address_with_is_default_clears_others() {
         let state = setup_state().await;
+        let user_id = format!("user_{}", uuid::Uuid::new_v4());
+        let addr1_id = format!("addr_{}", uuid::Uuid::new_v4());
+        let addr2_id = format!("addr_{}", uuid::Uuid::new_v4());
         state
             .db
             .upsert_document(
                 collections::ADDRESSES,
-                "addr_1",
-                json!({ "userId": "user_1", "isDefault": true }),
+                &addr1_id,
+                json!({ "userId": user_id, "isDefault": true }),
             )
             .await
             .unwrap();
@@ -1999,18 +2184,18 @@ mod tests {
             .db
             .upsert_document(
                 collections::ADDRESSES,
-                "addr_2",
-                json!({ "userId": "user_1", "isDefault": false }),
+                &addr2_id,
+                json!({ "userId": user_id, "isDefault": false }),
             )
             .await
             .unwrap();
 
         let Json(resp) = update_buyer_address(
             State(state.clone()),
-            Extension(auth("test")),
+            Extension(auth(&user_id)),
             Json(UpdateBuyerAddressRequest {
-                user_id: Some("user_1".to_string()),
-                address_id: "addr_2".into(),
+                user_id: Some(user_id.clone()),
+                address_id: addr2_id.clone(),
                 street: "5 Oak St".into(),
                 city: "Toronto".into(),
                 province: "ON".into(),
@@ -2026,10 +2211,16 @@ mod tests {
         assert_eq!(resp.data["updated"], true);
         let addr2 = state
             .db
-            .get_document(collections::ADDRESSES, "addr_2")
+            .get_document(collections::ADDRESSES, &addr2_id)
             .await
             .unwrap();
         assert_eq!(addr2["isDefault"], true);
+        let addr1 = state
+            .db
+            .get_document(collections::ADDRESSES, &addr1_id)
+            .await
+            .unwrap();
+        assert_eq!(addr1["isDefault"], false);
     }
 
     // ── Coverage: delete_buyer_address ownership mismatch (lines 710-712) ──
@@ -2037,11 +2228,13 @@ mod tests {
     #[tokio::test]
     async fn test_delete_buyer_address_rejects_ownership_mismatch() {
         let state = setup_state().await;
+        let addr_id = uuid::Uuid::new_v4().to_string();
+        let user_id = uuid::Uuid::new_v4().to_string();
         state
             .db
             .upsert_document(
                 collections::ADDRESSES,
-                "addr_1",
+                &addr_id,
                 json!({ "userId": "other_user" }),
             )
             .await
@@ -2049,10 +2242,10 @@ mod tests {
 
         let err = delete_buyer_address(
             State(state),
-            Extension(auth("test")),
+            Extension(auth(&user_id)),
             Json(DeleteBuyerAddressRequest {
-                user_id: Some("user_1".to_string()),
-                address_id: "addr_1".into(),
+                user_id: Some(user_id.clone()),
+                address_id: addr_id,
             }),
         )
         .await
@@ -2066,11 +2259,13 @@ mod tests {
     #[tokio::test]
     async fn test_set_default_buyer_address_rejects_ownership_mismatch() {
         let state = setup_state().await;
+        let addr_id = uuid::Uuid::new_v4().to_string();
+        let user_id = uuid::Uuid::new_v4().to_string();
         state
             .db
             .upsert_document(
                 collections::ADDRESSES,
-                "addr_1",
+                &addr_id,
                 json!({ "userId": "other_user" }),
             )
             .await
@@ -2078,10 +2273,10 @@ mod tests {
 
         let err = set_default_buyer_address(
             State(state),
-            Extension(auth("test")),
+            Extension(auth(&user_id)),
             Json(SetDefaultBuyerAddressRequest {
-                user_id: Some("user_1".to_string()),
-                address_id: "addr_1".into(),
+                user_id: Some(user_id.clone()),
+                address_id: addr_id,
             }),
         )
         .await
@@ -2097,9 +2292,11 @@ mod tests {
     #[tokio::test]
     async fn test_add_buyer_address_clears_existing_default() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let existing_addr = uuid::Uuid::new_v4().to_string();
         state
             .db
-            .upsert_document(collections::USERS, "user_1", json!({}))
+            .upsert_document(collections::USERS, &user_id, json!({}))
             .await
             .unwrap();
         // Create an existing default address
@@ -2107,9 +2304,9 @@ mod tests {
             .db
             .upsert_document(
                 collections::ADDRESSES,
-                "existing_addr",
+                &existing_addr,
                 json!({
-                    "userId": "user_1",
+                    "userId": &user_id,
                     "isDefault": true,
                 }),
             )
@@ -2118,9 +2315,9 @@ mod tests {
 
         let Json(resp) = add_buyer_address(
             State(state.clone()),
-            Extension(auth("test")),
+            Extension(auth(&user_id)),
             Json(AddBuyerAddressRequest {
-                user_id: Some("user_1".to_string()),
+                user_id: Some(user_id.clone()),
                 street: "1 Main St".into(),
                 city: "Toronto".into(),
                 province: "ON".into(),
@@ -2143,6 +2340,10 @@ mod tests {
     #[tokio::test]
     async fn test_delete_buyer_address_non_default_no_promotion() {
         let state = setup_state().await;
+        let _ = state
+            .db
+            .query_raw("DELETE FROM addresses WHERE id = 'addr_1'")
+            .await;
         state
             .db
             .upsert_document(
@@ -2151,7 +2352,7 @@ mod tests {
                 json!({
                     "userId": "user_1",
                     "isDefault": false,
-                    fields::CREATED_AT: "2026-01-01T00:00:00Z",
+                    db_fields::CREATED_AT: "2026-01-01T00:00:00Z",
                 }),
             )
             .await
@@ -2159,7 +2360,7 @@ mod tests {
 
         let Json(resp) = delete_buyer_address(
             State(state.clone()),
-            Extension(auth("test")),
+            Extension(auth("user_1")),
             Json(DeleteBuyerAddressRequest {
                 user_id: Some("user_1".to_string()),
                 address_id: "addr_1".into(),

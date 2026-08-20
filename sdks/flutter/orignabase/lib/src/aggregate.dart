@@ -1,8 +1,8 @@
 import 'query.dart';
 
-/// Aggregate query helpers for SurrealDB.
+/// Aggregate query helpers for PostgreSQL.
 ///
-/// Builds raw SurrealQL aggregate queries (COUNT, SUM, AVG) from
+/// Builds raw SQL aggregate queries (COUNT, SUM, AVG) from
 /// a collection name and optional filters.
 ///
 /// ```dart
@@ -43,11 +43,11 @@ class AggregateQuery {
   String _buildWhere() {
     if (_filters.isEmpty) return '';
     final conditions =
-        _filters.map((f) => _filterToSurrealCondition(f)).join(' AND ');
+        _filters.map((f) => _filterToSqlCondition(f)).join(' AND ');
     return 'WHERE $conditions';
   }
 
-  String _filterToSurrealCondition(QueryFilter f) {
+  String _filterToSqlCondition(QueryFilter f) {
     final op = switch (f.operator) {
       'eq' => '=',
       'ne' => '!=',

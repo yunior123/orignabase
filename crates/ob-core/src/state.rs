@@ -38,7 +38,10 @@ mod tests {
         let state = AppState::new(config, http_client);
         assert_eq!(state.config.host, "0.0.0.0");
         assert_eq!(state.config.port, 8080);
-        assert_eq!(state.config.database.endpoint, "localhost:8000");
+        assert_eq!(
+            state.config.database.url,
+            "postgres://orignabase:orignabase_dev@localhost:5432/orignabase"
+        );
     }
 
     #[test]

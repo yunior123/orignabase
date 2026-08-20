@@ -35,6 +35,7 @@ pub struct AddressPayload {
     pub label: String,
     pub street: String,
     pub city: String,
+    #[serde(alias = "province", rename = "state")]
     pub province: String,
     pub postal_code: String,
     pub country: String,
@@ -165,7 +166,7 @@ async fn add_buyer_address(
     let address_id = format!("addr_{}", uuid::Uuid::new_v4().simple());
     let mut address_doc = json!(req.address);
     address_doc[fields::UID] = req.user_id.clone().into();
-    address_doc["id"] = address_id.clone().into();
+    address_doc[fields::ID] = address_id.clone().into();
     address_doc[fields::CREATED_AT] = chrono::Utc::now().to_rfc3339().into();
 
     state
@@ -242,7 +243,7 @@ async fn set_default_buyer_address(
             collections::USERS,
             &req.user_id,
             json!({
-                "defaultAddressId": req.address_id
+                fields::DEFAULT_ADDRESS_ID: req.address_id
             }),
         )
         .await?;
@@ -306,13 +307,12 @@ mod tests {
     use super::*;
     use axum::extract::State;
     use ob_auth::middleware::AuthContext;
-    use std::sync::Mutex;
     use std::time::Duration;
+    use tokio::sync::Mutex;
 
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+    static ENV_MUTEX: Mutex<()> = Mutex::const_new(());
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn test_get_suggestions_success() {
         use ob_core::Config;
         use ob_database::DatabaseClient;
@@ -320,7 +320,7 @@ mod tests {
         use wiremock::matchers::{method, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().await;
         let server = MockServer::start().await;
         unsafe { std::env::set_var("GEOAPIFY_API_URL", server.uri()) };
 
@@ -436,7 +436,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn test_get_suggestions_api_error() {
         use ob_core::Config;
         use ob_database::DatabaseClient;
@@ -444,7 +443,7 @@ mod tests {
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().await;
         let server = MockServer::start().await;
         unsafe { std::env::set_var("GEOAPIFY_API_URL", server.uri()) };
 
@@ -487,7 +486,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn test_get_suggestions_timeout() {
         use ob_core::Config;
         use ob_database::DatabaseClient;
@@ -495,7 +493,7 @@ mod tests {
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().await;
         let server = MockServer::start().await;
         unsafe { std::env::set_var("GEOAPIFY_API_URL", server.uri()) };
 
@@ -728,6 +726,13 @@ mod tests {
         let state = setup_state().await;
         // First create an address
         let address_id = "addr_test123";
+        // Clean up any leftover from previous test runs
+        let _ = state
+            .db
+            .query_raw(&format!(
+                "DELETE FROM buyer_addresses WHERE id = '{address_id}'"
+            ))
+            .await;
         state
             .db
             .create_document(
@@ -738,7 +743,7 @@ mod tests {
                     "label": "Home",
                     "street": "123 Main",
                     "city": "Toronto",
-                    "province": "ON",
+                    "state": "ON",
                     "postalCode": "M5V 2T6",
                     "country": "CA",
                 }),
@@ -749,7 +754,7 @@ mod tests {
         let auth = auth_for("user_1");
         let req = UpdateBuyerAddressRequest {
             user_id: "user_1".into(),
-            address_id: address_id.into(),
+            address_id: address_id.to_string(),
             address: make_valid_address(),
         };
 
@@ -791,9 +796,10 @@ mod tests {
 
     // Lines 207-224: delete_buyer_address
     #[tokio::test]
+    #[serial_test::serial]
     async fn test_delete_buyer_address_success() {
         let state = setup_state().await;
-        let address_id = "addr_del123";
+        let address_id = format!("addr_del_{}", uuid::Uuid::new_v4().simple());
         state
             .db
             .create_document(
@@ -809,7 +815,7 @@ mod tests {
         let auth = auth_for("user_1");
         let req = DeleteBuyerAddressRequest {
             user_id: "user_1".into(),
-            address_id: address_id.into(),
+            address_id,
         };
 
         let result = delete_buyer_address(State(state), Extension(auth), Json(req)).await;
@@ -850,6 +856,11 @@ mod tests {
     #[tokio::test]
     async fn test_set_default_buyer_address_success() {
         let state = setup_state().await;
+        // Clean up any leftover from previous test runs
+        let _ = state
+            .db
+            .query_raw("DELETE FROM users WHERE id = 'user_1'")
+            .await;
         // Create user doc
         state
             .db

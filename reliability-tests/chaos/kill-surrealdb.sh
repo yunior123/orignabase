@@ -4,16 +4,16 @@ BASE_URL="${1:-https://api.orignagta.ca}"
 SSH_HOST="${2:-root@204.168.137.16}"
 SSH_KEY="${3:-$HOME/.ssh/id_ed25519}"
 
-echo "=== Chaos: Kill SurrealDB ==="
+echo "=== Chaos: Kill PostgreSQL ==="
 
 # 1. Verify healthy
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL/health")
 [ "$HTTP_CODE" = "200" ] || { echo "FAIL: Not healthy before test"; exit 1; }
 echo "Pre-check: healthy"
 
-# 2. Kill SurrealDB container
-ssh -i "$SSH_KEY" "$SSH_HOST" "docker stop surrealdb" || true
-echo "SurrealDB stopped"
+# 2. Stop PostgreSQL container
+ssh -i "$SSH_KEY" "$SSH_HOST" "docker stop orignabase-postgres-1" || true
+echo "PostgreSQL stopped"
 sleep 3
 
 # 3. Verify degraded (503, not 500 or panic)
@@ -25,9 +25,9 @@ echo "During outage: /_admin/collections → $HTTP_CODE"
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL/health")
 echo "During outage: /health → $HTTP_CODE"
 
-# 4. Restart SurrealDB
-ssh -i "$SSH_KEY" "$SSH_HOST" "docker start surrealdb"
-echo "SurrealDB restarted"
+# 4. Restart PostgreSQL
+ssh -i "$SSH_KEY" "$SSH_HOST" "docker start orignabase-postgres-1"
+echo "PostgreSQL restarted"
 sleep 10
 
 # 5. Verify recovery

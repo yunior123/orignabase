@@ -35,26 +35,39 @@ class CollectionRef extends Query {
   Stream<DocumentChange> snapshots() {
     final stream = client.realtime.subscribe(collectionName);
     final controller = StreamController<DocumentChange>.broadcast();
-    stream.listen(
-      controller.add,
-      onError: controller.addError,
-      onDone: controller.close,
-    );
+    StreamSubscription<DocumentChange>? innerSub;
+    controller.onListen = () {
+      innerSub = stream.listen(
+        controller.add,
+        onError: controller.addError,
+        onDone: controller.close,
+      );
+    };
+    // P1-24: Cancel the inner subscription and close the controller when the
+    // last listener unsubscribes, preventing a StreamController leak.
+    controller.onCancel = () {
+      innerSub?.cancel();
+      controller.close();
+    };
     return controller.stream;
   }
 
   /// Add a new document to the collection.
   Future<Document> add(Map<String, dynamic> data) async {
     final response = await client.graphql(
-      'mutation { create(collection: "$collectionName", data: ${toGraphQLValue(data)}) }',
+      'mutation { create(collection: "${escapeGraphQLId(collectionName)}", data: ${toGraphQLValue(data)}) }',
     );
 
     final result = response['data']?['create'];
     if (result is Map<String, dynamic>) {
       return Document.fromMap(collectionName, result);
     }
-    // Return with data if no structured response
-    return Document(id: '', collection: collectionName, data: data);
+    // Server returned a non-map response — the document was likely created
+    // but we don't have a valid ID. Throw so callers don't get a Document
+    // with exists == false that silently hides the problem.
+    throw OrignaBaseException(
+      'Server did not return a document after create',
+    );
   }
 }
 
@@ -77,7 +90,7 @@ class DocumentRef {
   Future<Document?> get() async {
     try {
       final response = await _client.graphql(
-        'query { get(collection: "$collection", id: "$id") }',
+        'query { get(collection: "${escapeGraphQLId(collection)}", id: "${escapeGraphQLId(id)}") }',
       );
 
       final result = response['data']?['get'];
@@ -111,7 +124,7 @@ class DocumentRef {
     // Use updateWithFieldValues mutation when FieldValue markers are present
     final mutation = hasFieldValues ? 'updateWithFieldValues' : 'update';
     final response = await _client.graphql(
-      'mutation { $mutation(collection: "$collection", id: "$id", data: ${toGraphQLValue(processed)}) }',
+      'mutation { $mutation(collection: "${escapeGraphQLId(collection)}", id: "${escapeGraphQLId(id)}", data: ${toGraphQLValue(processed)}) }',
     );
 
     final result = response['data']?[mutation];
@@ -124,7 +137,7 @@ class DocumentRef {
   /// Create or replace the document at this explicit ID.
   Future<Document?> set(Map<String, dynamic> data) async {
     final response = await _client.graphql(
-      'mutation { set(collection: "$collection", id: "$id", data: ${toGraphQLValue(data)}) }',
+      'mutation { set(collection: "${escapeGraphQLId(collection)}", id: "${escapeGraphQLId(id)}", data: ${toGraphQLValue(data)}) }',
     );
 
     final result = response['data']?['set'];
@@ -137,7 +150,7 @@ class DocumentRef {
   /// Delete the document.
   Future<void> delete() async {
     await _client.graphql(
-      'mutation { delete(collection: "$collection", id: "$id") }',
+      'mutation { delete(collection: "${escapeGraphQLId(collection)}", id: "${escapeGraphQLId(id)}") }',
     );
   }
 

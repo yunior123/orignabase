@@ -66,7 +66,7 @@ Future<void> authExamples() async {
   });
 
   // Sign out
-  ob.auth.signOut();
+  await ob.auth.signOut();
 }
 
 // ─── PRODUCTS CRUD (equivalent to Firestore products collection) ─────
@@ -141,10 +141,8 @@ Future<void> compoundQueries() async {
   print('Electronics: ${electronics.size}');
 
   // Search by prefix (like origna_gta's search bar)
-  final searchResults = await products
-      .where('title', startsWith: 'Premium')
-      .limit(10)
-      .get();
+  final searchResults =
+      await products.where('title', startsWith: 'Premium').limit(10).get();
   print('Search results: ${searchResults.size}');
 
   // Field projection (only fetch needed fields — saves bandwidth)
@@ -162,10 +160,8 @@ Future<void> cursorPagination() async {
   final products = ob.collection('products');
 
   // First page
-  final page1 = await products
-      .orderBy('created_at', descending: true)
-      .limit(20)
-      .get();
+  final page1 =
+      await products.orderBy('created_at', descending: true).limit(20).get();
   print('Page 1: ${page1.size} docs, hasMore: ${page1.hasMore}');
 
   // Next page (cursor-based — like Firestore's startAfterDocument)
@@ -399,7 +395,8 @@ Future<void> performanceMetrics() async {
   // Query aggregated metrics (admin)
   final stats = await metrics.query();
   for (final stat in stats) {
-    print('${stat.name}: avg=${stat.avg}ms, min=${stat.min}, max=${stat.max}, count=${stat.count}');
+    print(
+        '${stat.name}: avg=${stat.avg}ms, min=${stat.min}, max=${stat.max}, count=${stat.count}');
   }
 }
 

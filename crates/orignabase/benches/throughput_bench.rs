@@ -4,6 +4,7 @@
 //! Run with: `cargo bench --bench throughput_bench`
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use ob_database::fields;
 use serde_json::{Value, json};
 
 fn base_url() -> String {
@@ -55,7 +56,7 @@ async fn create_doc(
     let query = format!(r#"mutation {{ create(collection: "{collection}", data: {escaped}) }}"#);
     let body = graphql_req(client, token, &query).await;
     let result = &body["data"]["create"];
-    result["id"]
+    result[fields::ID]
         .as_str()
         .or_else(|| result["_id"].as_str())
         .unwrap_or("")

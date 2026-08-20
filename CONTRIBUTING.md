@@ -4,7 +4,7 @@
 
 1. Fork the repository
 2. Clone your fork
-3. Install Rust 1.85+ and SurrealDB v2
+3. Install Rust 1.85+ and PostgreSQL
 4. Run `cargo test --workspace` to verify setup
 5. Create a branch for your changes
 
@@ -20,7 +20,7 @@ cargo clippy --workspace --all-targets
 # Format code
 cargo fmt --all
 
-# Run the server (requires SurrealDB on localhost:8000)
+# Run the server (requires PostgreSQL on localhost:5432)
 cargo run -- serve
 ```
 

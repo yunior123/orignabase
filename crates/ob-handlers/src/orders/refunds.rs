@@ -1,20 +1,26 @@
 //! Order refund and cancellation handlers.
 //! Ported from: functions/handlers/orders.py::refund_order_item, cancel_order
 
-use axum::{Json, Router, extract::State, routing::post};
+use axum::{Extension, Json, Router, extract::State, routing::post};
 use chrono::Utc;
+use ob_auth::middleware::AuthContext;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{error, info, warn};
 
 use crate::HandlersState;
-use crate::shared::schema::{business_rules, collections, fields};
+use crate::shared::schema::{OrderStatus, business_rules, collections, fields};
 use crate::shared::validation::{sanitize_html, validate_uid};
+use ob_database::fields as db_fields;
 
 // ---------------------------------------------------------------------------
 // Request / Response types
 // ---------------------------------------------------------------------------
 
+/// Request body for POST /api/orders/refund-item.
+///
+/// Requires JWT auth. Seller of the item or admin only.
+/// Validates cumulative refund <= totalAmountCents before Stripe call.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefundItemRequest {
@@ -36,6 +42,10 @@ pub struct RefundItemResponse {
     pub already_refunded: Option<bool>,
 }
 
+/// Request body for POST /api/orders/cancel.
+///
+/// Buyer can cancel in `pending` only. Seller/admin can cancel in `pending` or `confirmed`.
+/// Triggers Stripe refund if payment was captured. Requires a reason from sellers.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CancelOrderRequest {
@@ -56,6 +66,7 @@ pub struct CancelOrderResponse {
 // Router
 // ---------------------------------------------------------------------------
 
+/// Create the refunds router with endpoints for handling return requests and refunds.
 pub fn router(state: HandlersState) -> Router {
     Router::new()
         .route("/api/orders/refund-item", post(refund_order_item))
@@ -108,48 +119,53 @@ pub(crate) fn calculate_refund_amount_cents(
     order: &Value,
     item: &Value,
 ) -> Result<i64, ob_core::Error> {
-    let item_price_cents =
-        (item.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0) * 100.0).round() as i64;
-    let item_quantity = item.get("quantity").and_then(|v| v.as_i64()).unwrap_or(1);
+    let item_price_cents = i64_field(item, db_fields::PRICE_CENTS);
+    let item_quantity = item
+        .get(fields::QUANTITY)
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1);
     let mut item_subtotal_cents = item_price_cents * item_quantity;
 
-    let order_subtotal_pre = i64_field(order, "subtotalCents");
-    let order_discount = i64_field(order, "discountAmountCents");
+    let order_subtotal_pre = i64_field(order, db_fields::SUBTOTAL_CENTS);
+    let order_discount = i64_field(order, fields::DISCOUNT_AMOUNT_CENTS);
     if order_subtotal_pre > 0 && order_discount > 0 {
         let discounted_subtotal = (order_subtotal_pre - order_discount).max(0);
-        let ratio = discounted_subtotal as f64 / order_subtotal_pre as f64;
-        item_subtotal_cents = (item_subtotal_cents as f64 * ratio).round() as i64;
+        // Integer-only scaled arithmetic with banker's rounding
+        item_subtotal_cents = (item_subtotal_cents * discounted_subtotal + order_subtotal_pre / 2)
+            / order_subtotal_pre;
     }
 
-    let order_subtotal_cents = i64_field(order, "subtotalCents");
+    let order_subtotal_cents = i64_field(order, db_fields::SUBTOTAL_CENTS);
     if order_subtotal_cents <= 0 {
         return Err(ob_core::Error::Validation(
             "Order subtotal must be positive to calculate proportional refund".into(),
         ));
     }
 
-    let item_shipping_snapshot = item.get("itemShippingCents").and_then(|v| v.as_i64());
+    let item_shipping_snapshot = item
+        .get(fields::ITEM_SHIPPING_CENTS)
+        .and_then(|v| v.as_i64());
     let shipping_refund_cents = if let Some(snap) = item_shipping_snapshot {
         snap
     } else {
         let order_shipping = i64_field(order, fields::SHIPPING_COST_CENTS);
-        let proportion = item_subtotal_cents as f64 / order_subtotal_cents as f64;
-        (order_shipping as f64 * proportion).round() as i64
+        // Integer-only proportional shipping with banker's rounding
+        (order_shipping * item_subtotal_cents + order_subtotal_cents / 2) / order_subtotal_cents
     };
 
-    let order_tax = i64_field(order, "taxAmountCents");
-    let proportion = item_subtotal_cents as f64 / order_subtotal_cents as f64;
-    let proportional_tax = (order_tax as f64 * proportion).round() as i64;
+    let order_tax = i64_field(order, fields::TAX_AMOUNT_CENTS);
+    // Integer-only proportional tax with banker's rounding
+    let proportional_tax =
+        (order_tax * item_subtotal_cents + order_subtotal_cents / 2) / order_subtotal_cents;
 
     Ok(item_subtotal_cents + proportional_tax + shipping_refund_cents)
 }
 
 async fn is_user_admin(state: &HandlersState, user_id: &str) -> Result<bool, ob_core::Error> {
-    let user = state
-        .db
-        .get_document(collections::USERS, user_id)
-        .await
-        .map_err(|_| ob_core::Error::NotFound("User not found".into()))?;
+    let user = match state.db.get_document(collections::USERS, user_id).await {
+        Ok(u) => u,
+        Err(_) => return Ok(false), // user not in DB → not admin
+    };
     let roles = user
         .get(fields::ROLES)
         .and_then(|v| v.as_array())
@@ -159,14 +175,12 @@ async fn is_user_admin(state: &HandlersState, user_id: &str) -> Result<bool, ob_
 }
 
 fn is_valid_order_transition(from: &str, to: &str) -> bool {
-    // Re-use the transition table from status.rs logic
+    // Cancellation transitions allowed from these states (deduplicated)
     let pairs = [
-        ("PENDING_PAYMENT", "CANCELLED"),
-        ("PAYMENT_AUTHORIZED", "CANCELLED"),
-        ("AWAITING_SHIPPING_APPROVAL", "CANCELLED"),
-        ("PROCESSING", "CANCELLED"),
-        ("PENDING", "CANCELLED"),
-        ("CONFIRMED", "CANCELLED"),
+        ("pending", "cancelled"),
+        ("confirmed", "cancelled"),
+        ("awaiting_shipping_approval", "cancelled"),
+        ("processing", "cancelled"),
     ];
     pairs.iter().any(|(f, t)| *f == from && *t == to)
 }
@@ -224,7 +238,7 @@ pub(crate) async fn stripe_refund(
         .map_err(|e| ob_core::Error::Internal(format!("Stripe response parse failed: {e}")))?;
 
     let refund_id = body
-        .get("id")
+        .get(db_fields::ID)
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
@@ -270,17 +284,25 @@ pub(crate) async fn stripe_cancel_pi(
 // refund_order_item
 // ---------------------------------------------------------------------------
 
+/// Refunds a single order item for the seller or an admin after validating
+/// permissions, refund eligibility, and the proportional refund amount.
+///
+/// When the underlying Stripe refund succeeds, the handler records the refund
+/// metadata on the order and returns the refunded amount in cents.
 async fn refund_order_item(
     State(state): State<HandlersState>,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<RefundItemRequest>,
 ) -> Result<Json<RefundItemResponse>, ob_core::Error> {
     validate_uid("orderId", &req.order_id)?;
     validate_uid("productId", &req.product_id)?;
-    validate_uid("userId", &req.user_id)?;
+
+    // SECURITY: Derive user_id from JWT, never from request body
+    let user_id = auth.user_id.clone();
 
     crate::shared::rate_limiter::check_user_rate_limit(
         &state.db,
-        &req.user_id,
+        &user_id,
         "refund_order_item",
         5,
         1,
@@ -301,7 +323,7 @@ async fn refund_order_item(
         .map_err(|_| ob_core::Error::NotFound("Order not found".into()))?;
 
     // Permission check: seller of item or admin
-    let is_admin = is_user_admin(&state, &req.user_id).await?;
+    let is_admin = is_user_admin(&state, &user_id).await?;
     let items = items_array(&order);
 
     let item_data = items
@@ -318,8 +340,8 @@ async fn refund_order_item(
         }
     };
 
-    let item_seller = str_field(item, fields::SELLER_ID);
-    let is_item_seller = item_seller == req.user_id;
+    let item_seller = str_field(item, db_fields::SELLER_ID);
+    let is_item_seller = item_seller == user_id;
 
     if !is_admin && !is_item_seller {
         return Err(ob_core::Error::Forbidden(
@@ -329,15 +351,15 @@ async fn refund_order_item(
 
     // Payment must be captured
     let payment_status_str = str_field(&order, fields::PAYMENT_STATUS);
-    if payment_status_str != "CAPTURED" {
+    if payment_status_str != "captured" {
         return Err(ob_core::Error::Validation(
             "Cannot refund uncaptured payment".into(),
         ));
     }
 
     // Payout processing race condition check
-    let payout_status = str_field(&order, "payoutStatus");
-    if payout_status == "PROCESSING" {
+    let payout_status = str_field(&order, fields::PAYOUT_STATUS);
+    if payout_status == "processing" {
         return Err(ob_core::Error::Validation(
             "Cannot refund item while payout is currently processing. Please try again later."
                 .into(),
@@ -345,7 +367,7 @@ async fn refund_order_item(
     }
 
     // Already refunded check
-    if str_field(item, "status") == "refunded" {
+    if str_field(item, db_fields::STATUS) == OrderStatus::Refunded.as_str() {
         return Ok(Json(RefundItemResponse {
             success: true,
             refund_amount_cents: 0,
@@ -356,8 +378,8 @@ async fn refund_order_item(
 
     // Return window check (non-admin)
     if !is_admin
-        && str_field(item, "status") == "delivered"
-        && let Some(delivered_at) = item.get("deliveredAt")
+        && str_field(item, db_fields::STATUS) == OrderStatus::Delivered.as_str()
+        && let Some(delivered_at) = item.get(fields::DELIVERED_AT)
         && delivered_at_expired(delivered_at, Utc::now())
     {
         return Err(ob_core::Error::Validation(format!(
@@ -366,43 +388,181 @@ async fn refund_order_item(
         )));
     }
 
-    let item_quantity = item.get("quantity").and_then(|v| v.as_i64()).unwrap_or(1);
+    let item_quantity = item
+        .get(fields::QUANTITY)
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1);
     let refund_amount_cents = calculate_refund_amount_cents(&order, item)?;
 
+    // SECURITY: Atomically reserve the refund amount before calling Stripe.
+    // This UPDATE ... WHERE pattern is a single atomic operation in PostgreSQL — it
+    // only succeeds if cumulativeRefundedCents + amt <= totalAmountCents at the
+    // moment of the write, closing the TOCTOU race between concurrent refund requests.
+    let order_id_stripped = req
+        .order_id
+        .strip_prefix(&format!("{}:", collections::ORDERS))
+        .unwrap_or(&req.order_id);
+    // ATOMIC refund reservation via CAS retry loop (max 3 attempts).
+    // Each CAS is a single atomic UPDATE ... WHERE in PostgreSQL — concurrent
+    // refund requests cannot both succeed if they would exceed totalAmountCents.
+    let reserved_rows = 'cas: {
+        for attempt in 1..=3 {
+            let cur_order = state
+                .db
+                .get_document(collections::ORDERS, order_id_stripped)
+                .await
+                .map_err(|e| ob_core::Error::Database(format!("Failed to read order: {e}")))?;
+            let cur_cumulative = cur_order
+                .get(fields::CUMULATIVE_REFUNDED_CENTS)
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let total_cents = cur_order
+                .get(db_fields::TOTAL_AMOUNT_CENTS)
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let new_cumulative = cur_cumulative + refund_amount_cents;
+
+            if new_cumulative > total_cents {
+                break 'cas vec![];
+            }
+
+            // Ensure field exists before CAS (NULL defeats the WHERE check).
+            // This is idempotent — setting 0 when already 0 is a no-op.
+            if cur_cumulative == 0
+                && (cur_order.get(fields::CUMULATIVE_REFUNDED_CENTS).is_none()
+                    || cur_order.get(fields::CUMULATIVE_REFUNDED_CENTS) == Some(&json!(null)))
+            {
+                let _ = state
+                    .db
+                    .update_document(
+                        collections::ORDERS,
+                        order_id_stripped,
+                        json!({ fields::CUMULATIVE_REFUNDED_CENTS: 0 }),
+                    )
+                    .await;
+            }
+
+            // CAS: update only if cumulativeRefundedCents still equals cur_cumulative.
+            let cas_result = state
+                .db
+                .update_document_cas(
+                    collections::ORDERS,
+                    order_id_stripped,
+                    json!({ fields::CUMULATIVE_REFUNDED_CENTS: new_cumulative }),
+                    fields::CUMULATIVE_REFUNDED_CENTS,
+                    &json!(cur_cumulative),
+                )
+                .await
+                .map_err(|e| ob_core::Error::Database(format!("Failed to reserve refund: {e}")))?;
+
+            match cas_result {
+                Some(_) => break 'cas vec![json!({"ok": true})],
+                None if attempt < 3 => continue, // Retry on concurrent modification
+                None => {
+                    return Err(ob_core::Error::Validation(
+                        "Concurrent refund modification detected. Please retry.".into(),
+                    ));
+                }
+            }
+        }
+        vec![] // unreachable but satisfies type checker
+    };
+    if reserved_rows.is_empty() {
+        // WHERE guard not satisfied: cumulative + amt would exceed total
+        let current = state
+            .db
+            .get_document(collections::ORDERS, &req.order_id)
+            .await
+            .ok();
+        let current_cumulative = current
+            .as_ref()
+            .and_then(|o| o.get(fields::CUMULATIVE_REFUNDED_CENTS))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let total_amount = current
+            .as_ref()
+            .and_then(|o| o.get(db_fields::TOTAL_AMOUNT_CENTS))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        return Err(ob_core::Error::Validation(format!(
+            "Cumulative refund ({} cents) would exceed order total ({} cents)",
+            current_cumulative + refund_amount_cents,
+            total_amount
+        )));
+    }
+
     // Stripe refund
-    let payment_intent_id = str_field(&order, "paymentIntentId");
+    let payment_intent_id = str_field(&order, fields::PAYMENT_INTENT_ID);
     if payment_intent_id.is_empty() {
         return Err(ob_core::Error::Validation("No payment intent found".into()));
     }
 
     let idempotency_key = format!("refund_{}_{}", req.order_id, req.product_id);
-    let refund_id = stripe_refund(
+    let stripe_result = stripe_refund(
         &state,
         payment_intent_id,
         Some(refund_amount_cents),
         "requested_by_customer",
         &idempotency_key,
-        &[("orderId", &req.order_id), ("productId", &req.product_id)],
+        &[
+            (fields::ORDER_ID, &req.order_id),
+            (fields::PRODUCT_ID, &req.product_id),
+        ],
     )
-    .await?;
+    .await;
+    // Rollback the atomic reservation on Stripe failure to avoid a
+    // permanently-reduced refund cap for an amount that was never charged.
+    let refund_id = match stripe_result {
+        Ok(id) => id,
+        Err(stripe_err) => {
+            // Rollback: subtract the reserved amount
+            let rb_order = state
+                .db
+                .get_document(collections::ORDERS, order_id_stripped)
+                .await
+                .unwrap_or_default();
+            let rb_cumulative = rb_order
+                .get(fields::CUMULATIVE_REFUNDED_CENTS)
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            if let Err(rb_err) = state
+                .db
+                .update_document(
+                    collections::ORDERS,
+                    order_id_stripped,
+                    json!({ fields::CUMULATIVE_REFUNDED_CENTS: (rb_cumulative - refund_amount_cents).max(0) }),
+                )
+                .await
+            {
+                error!(
+                    order_id = %req.order_id,
+                    amount_cents = refund_amount_cents,
+                    "CRITICAL: refund reservation rollback failed after Stripe error — manual correction needed: {rb_err}"
+                );
+            }
+            return Err(stripe_err);
+        }
+    };
 
     // Update item status to refunded
     let now = Utc::now().to_rfc3339();
     let mut updated_items = items.clone();
     for it in updated_items.iter_mut() {
         if str_field(it, fields::PRODUCT_ID) == req.product_id {
-            it["status"] = json!("refunded");
-            it["refundedAt"] = json!(now);
-            it["refundReason"] = json!(reason);
-            it["refundAmountCents"] = json!(refund_amount_cents);
+            it[db_fields::STATUS] = json!(OrderStatus::Refunded.as_str());
+            it[fields::REFUNDED_AT] = json!(now);
+            it[fields::REFUND_REASON] = json!(reason);
+            it[fields::REFUND_AMOUNT_CENTS] = json!(refund_amount_cents);
             if let Some(ref rid) = refund_id {
-                it["refundId"] = json!(rid);
+                it[fields::REFUND_ID] = json!(rid);
             }
             break;
         }
     }
 
-    let cumulative_refunded = i64_field(&order, "cumulativeRefundedCents") + refund_amount_cents;
+    // cumulativeRefundedCents was already set atomically before the Stripe call.
+    // Do NOT write it again here — that would overwrite the reserved value and
+    // re-open the TOCTOU window for concurrent refunds.
     state
         .db
         .update_document(
@@ -410,28 +570,27 @@ async fn refund_order_item(
             &req.order_id,
             json!({
                 fields::ITEMS: updated_items,
-                "cumulativeRefundedCents": cumulative_refunded,
-                fields::UPDATED_AT: now,
+                db_fields::UPDATED_AT: now,
             }),
         )
         .await
         .map_err(|e| ob_core::Error::Database(format!("Failed to update refunded order: {e}")))?;
 
-    let is_digital = bool_field(item, "isDigital");
-    let item_type = str_field(item, "productType");
+    let is_digital = bool_field(item, fields::IS_DIGITAL);
+    let item_type = str_field(item, fields::PRODUCT_TYPE);
     let is_digital_by_type = matches!(item_type, "software" | "book" | "digital");
     if is_digital || is_digital_by_type {
         // Revoke digital licenses
         state
             .db
-            .query_bind(
-                &format!("UPDATE {} SET status = $status, revokedAt = $revokedAt WHERE orderId = $orderId AND productId = $productId AND status = 'active'", collections::LICENSES),
-                json!({
-                    "status": "revoked",
-                    "revokedAt": now,
-                    "orderId": req.order_id,
-                    "productId": req.product_id
-                })
+            .query_raw(
+                &format!(
+                    "UPDATE {} SET data = data || '{{\"status\":\"revoked\",\"revokedAt\":\"{}\"}}'::jsonb, updated_at = now() WHERE data->>'orderId' = '{}' AND data->>'productId' = '{}' AND data->>'status' = 'active'",
+                    collections::LICENSES,
+                    ob_core::escape_sql_string(&now),
+                    ob_core::escape_sql_string(&req.order_id),
+                    ob_core::escape_sql_string(&req.product_id)
+                ),
             )
             .await
             .map_err(|e| {
@@ -441,23 +600,42 @@ async fn refund_order_item(
             })?;
         info!(order_id = %req.order_id, product_id = %req.product_id, "Digital licenses revoked for refunded item");
     } else {
-        // Restore stock for physical items
+        // Restore stock for physical items — CAS to prevent lost updates from
+        // concurrent refunds/cancellations of orders with the same product.
         let product_id = &req.product_id;
-        state
-            .db
-            .query_bind(
-                "UPDATE type::thing($table, $product_id) SET stockQuantity += $quantity, updatedAt = $updatedAt",
-                json!({
-                    "table": collections::PRODUCTS,
-                    "product_id": product_id,
-                    "quantity": item_quantity,
-                    "updatedAt": now
-                })
-            )
-            .await
-            .map_err(|e| {
-                ob_core::Error::Database(format!("Failed to restore stock for refunded item: {e}"))
-            })?;
+        for _attempt in 0..3 {
+            let cur_product = state
+                .db
+                .get_document(collections::PRODUCTS, product_id)
+                .await
+                .unwrap_or_default();
+            let cur_stock = cur_product
+                .get(fields::STOCK_QUANTITY)
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let cas_result = state
+                .db
+                .update_document_cas(
+                    collections::PRODUCTS,
+                    product_id,
+                    json!({
+                        fields::STOCK_QUANTITY: cur_stock + item_quantity as i64,
+                        db_fields::UPDATED_AT: now
+                    }),
+                    fields::STOCK_QUANTITY,
+                    &json!(cur_stock),
+                )
+                .await
+                .map_err(|e| {
+                    ob_core::Error::Database(format!(
+                        "Failed to restore stock for refunded item: {e}"
+                    ))
+                })?;
+            if cas_result.is_some() {
+                break;
+            }
+            // CAS failed — stock changed concurrently, retry with fresh read
+        }
     }
 
     // Log the event
@@ -466,12 +644,12 @@ async fn refund_order_item(
         .create_document(
             collections::ORDER_EVENTS,
             json!({
-                "orderId": req.order_id,
-                "userId": req.user_id,
-                "eventType": "item_refunded",
-                "message": format!("Item {} refunded for {} cents", req.product_id, refund_amount_cents),
-                "metadata": { "productId": req.product_id, "refundAmountCents": refund_amount_cents },
-                "createdAt": now,
+                fields::ORDER_ID: req.order_id,
+                db_fields::USER_ID: user_id,
+                fields::EVENT_TYPE: "item_refunded",
+                fields::MESSAGE: format!("Item {} refunded for {} cents", req.product_id, refund_amount_cents),
+                fields::DATA: { fields::PRODUCT_ID: req.product_id, fields::REFUND_AMOUNT_CENTS: refund_amount_cents },
+                db_fields::CREATED_AT: now,
             }),
         )
         .await
@@ -496,21 +674,24 @@ async fn refund_order_item(
 // cancel_order
 // ---------------------------------------------------------------------------
 
+/// Cancels an order on behalf of the buyer, seller, or admin subject to the
+/// current order state and actor permissions.
+///
+/// Authorized-but-uncaptured payments are canceled in Stripe, captured payments
+/// are refunded, and the order document is updated with the cancellation audit
+/// trail and resulting payment state.
 async fn cancel_order(
     State(state): State<HandlersState>,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<CancelOrderRequest>,
 ) -> Result<Json<CancelOrderResponse>, ob_core::Error> {
+    // SECURITY: derive user_id from JWT, never trust client-supplied value
+    let user_id =
+        crate::shared::auth::resolve_self_user_id(&auth, Some(req.user_id.as_str()), "userId")?;
     validate_uid("orderId", &req.order_id)?;
-    validate_uid("userId", &req.user_id)?;
 
-    crate::shared::rate_limiter::check_user_rate_limit(
-        &state.db,
-        &req.user_id,
-        "cancel_order",
-        5,
-        1,
-    )
-    .await?;
+    crate::shared::rate_limiter::check_user_rate_limit(&state.db, &user_id, "cancel_order", 5, 1)
+        .await?;
 
     let reason = req
         .reason
@@ -525,19 +706,24 @@ async fn cancel_order(
         .await
         .map_err(|_| ob_core::Error::NotFound("Order not found".into()))?;
 
-    if bool_field(&order, "archived") {
+    if bool_field(&order, fields::ARCHIVED) {
         return Err(ob_core::Error::Validation(
             "Cannot cancel archived order".into(),
         ));
     }
 
-    // Permission check
-    let is_admin = is_user_admin(&state, &req.user_id).await?;
-    let is_buyer = str_field(&order, "userId") == req.user_id;
+    // Permission check — using JWT-authenticated user_id
+    let is_admin = auth.roles.iter().any(|r| r == "admin");
+    let order_buyer_id = order
+        .get(db_fields::BUYER_ID)
+        .and_then(|v| v.as_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| str_field(&order, db_fields::USER_ID));
+    let is_buyer = order_buyer_id == user_id;
     let items = items_array(&order);
     let seller_items: Vec<&Value> = items
         .iter()
-        .filter(|it| str_field(it, fields::SELLER_ID) == req.user_id)
+        .filter(|it| str_field(it, db_fields::SELLER_ID) == user_id)
         .collect();
     let is_seller = !seller_items.is_empty();
 
@@ -555,20 +741,15 @@ async fn cancel_order(
     }
 
     // State machine validation
-    let current_status = str_field(&order, "orderStatus");
-    if !is_valid_order_transition(current_status, "CANCELLED") {
+    let current_status = str_field(&order, fields::ORDER_STATUS);
+    if !is_valid_order_transition(current_status, "cancelled") {
         return Err(ob_core::Error::Validation(format!(
             "Cannot cancel order with status: {current_status}"
         )));
     }
 
     // Buyers can only cancel pre-shipment
-    let buyer_cancellable = [
-        "PENDING_PAYMENT",
-        "PENDING",
-        "CONFIRMED",
-        "PAYMENT_AUTHORIZED",
-    ];
+    let buyer_cancellable = ["pending", "confirmed"];
     if is_buyer && !is_admin && !is_seller && !buyer_cancellable.contains(&current_status) {
         return Err(ob_core::Error::Validation(
             "Order cannot be cancelled at this stage. Contact support if there is an issue.".into(),
@@ -576,13 +757,13 @@ async fn cancel_order(
     }
 
     let payment_status = str_field(&order, fields::PAYMENT_STATUS);
-    let payment_intent_id = str_field(&order, "paymentIntentId");
+    let payment_intent_id = str_field(&order, fields::PAYMENT_INTENT_ID);
     let now = Utc::now().to_rfc3339();
 
     let mut refunded = false;
 
     // Handle payment based on current status
-    let new_payment_status = if payment_status == "CAPTURED" && !payment_intent_id.is_empty() {
+    let new_payment_status = if payment_status == "captured" && !payment_intent_id.is_empty() {
         // Full refund
         let idempotency_key = format!("refund_{}", req.order_id);
         match stripe_refund(
@@ -591,13 +772,13 @@ async fn cancel_order(
             None, // full refund
             "requested_by_customer",
             &idempotency_key,
-            &[("orderId", &req.order_id)],
+            &[(fields::ORDER_ID, &req.order_id)],
         )
         .await
         {
             Ok(_) => {
                 refunded = true;
-                "REFUNDED"
+                "refunded"
             }
             Err(e) => {
                 // Quarantine order for manual review instead of failing hard
@@ -607,9 +788,9 @@ async fn cancel_order(
                         collections::ORDERS,
                         &req.order_id,
                         json!({
-                            "paymentStatus": "CANCEL_FAILED",
-                            "requiresManualReview": true,
-                            fields::UPDATED_AT: now,
+                            fields::PAYMENT_STATUS: "CANCEL_FAILED",
+                            fields::REQUIRES_MANUAL_REVIEW: true,
+                            db_fields::UPDATED_AT: now,
                         }),
                     )
                     .await;
@@ -617,10 +798,10 @@ async fn cancel_order(
                 return Err(e);
             }
         }
-    } else if payment_status == "AUTHORIZED" && !payment_intent_id.is_empty() {
+    } else if payment_status == "authorized" && !payment_intent_id.is_empty() {
         // Cancel the PaymentIntent to release buyer funds
         match stripe_cancel_pi(&state, payment_intent_id).await {
-            Ok(()) => "CANCELLED",
+            Ok(()) => "cancelled",
             Err(e) => {
                 let _ = state
                     .db
@@ -628,9 +809,9 @@ async fn cancel_order(
                         collections::ORDERS,
                         &req.order_id,
                         json!({
-                            "paymentStatus": "CANCEL_FAILED",
-                            "requiresManualReview": true,
-                            fields::UPDATED_AT: now,
+                            fields::PAYMENT_STATUS: "CANCEL_FAILED",
+                            fields::REQUIRES_MANUAL_REVIEW: true,
+                            db_fields::UPDATED_AT: now,
                         }),
                     )
                     .await;
@@ -639,56 +820,84 @@ async fn cancel_order(
             }
         }
     } else {
-        "CANCELLED"
+        "cancelled"
     };
 
-    state
+    // CAS guard: only cancel if orderStatus hasn't changed since we validated it.
+    // Prevents race where a webhook (e.g. payment confirmation) changes status concurrently.
+    let cas_result = state
         .db
-        .update_document(
+        .update_document_cas(
             collections::ORDERS,
             &req.order_id,
             json!({
-                "orderStatus": "CANCELLED",
+                fields::ORDER_STATUS: "cancelled",
                 fields::PAYMENT_STATUS: new_payment_status,
-                "cancelledBy": req.user_id,
-                "cancelledAt": now,
-                "cancellationReason": reason,
-                "stockRestored": true,
-                fields::UPDATED_AT: now,
+                fields::CANCELLED_BY: user_id,
+                fields::CANCELLED_AT: now,
+                fields::CANCELLATION_REASON: reason,
+                fields::STOCK_RESTORED: true,
+                db_fields::UPDATED_AT: now,
             }),
+            fields::ORDER_STATUS,
+            &json!(current_status),
         )
         .await
         .map_err(|e| ob_core::Error::Database(format!("Failed to update cancelled order: {e}")))?;
+    if cas_result.is_none() {
+        return Err(ob_core::Error::Validation(
+            "Order status changed concurrently — please retry cancellation".into(),
+        ));
+    }
 
     // Restore stock for all physical items (guard against double-restore).
-    let stock_restored = bool_field(&order, "stockRestored");
+    let stock_restored = bool_field(&order, fields::STOCK_RESTORED);
     if stock_restored {
         info!(order_id = %req.order_id, "Stock already restored, skipping");
     } else {
         for item in &items {
-            if bool_field(item, "isDigital") {
+            if bool_field(item, fields::IS_DIGITAL) {
                 continue;
             }
             let pid = str_field(item, fields::PRODUCT_ID);
-            let qty = item.get("quantity").and_then(|v| v.as_i64()).unwrap_or(1);
+            let qty = item
+                .get(fields::QUANTITY)
+                .and_then(|v| v.as_i64())
+                .unwrap_or(1);
             if !pid.is_empty() && qty > 0 {
-                state
-                    .db
-                    .query_bind(
-                        "UPDATE type::thing($table, $product_id) SET stockQuantity += $quantity, updatedAt = $updatedAt",
-                        json!({
-                            "table": collections::PRODUCTS,
-                            "product_id": pid,
-                            "quantity": qty,
-                            "updatedAt": now
-                        })
-                    )
-                    .await
-                    .map_err(|e| {
-                        ob_core::Error::Database(format!(
-                            "Failed to restore stock for product {pid}: {e}"
-                        ))
-                    })?;
+                // CAS retry loop to prevent lost-update on concurrent stock restores
+                for _attempt in 0..3 {
+                    let cur_product = state
+                        .db
+                        .get_document(collections::PRODUCTS, pid)
+                        .await
+                        .unwrap_or_default();
+                    let cur_stock = cur_product
+                        .get(fields::STOCK_QUANTITY)
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    let cas_result = state
+                        .db
+                        .update_document_cas(
+                            collections::PRODUCTS,
+                            pid,
+                            json!({
+                                fields::STOCK_QUANTITY: cur_stock + qty,
+                                db_fields::UPDATED_AT: now
+                            }),
+                            fields::STOCK_QUANTITY,
+                            &json!(cur_stock),
+                        )
+                        .await
+                        .map_err(|e| {
+                            ob_core::Error::Database(format!(
+                                "Failed to restore stock for product {pid}: {e}"
+                            ))
+                        })?;
+                    if cas_result.is_some() {
+                        break;
+                    }
+                }
             }
         }
     }
@@ -698,12 +907,12 @@ async fn cancel_order(
         .create_document(
             collections::ORDER_EVENTS,
             json!({
-                "orderId": req.order_id,
-                "userId": req.user_id,
-                "eventType": "order_cancelled",
-                "message": format!("Order cancelled. Refunded: {}", refunded),
-                "metadata": { "refunded": refunded },
-                "createdAt": now,
+                fields::ORDER_ID: req.order_id,
+                db_fields::USER_ID: user_id,
+                fields::EVENT_TYPE: "order_cancelled",
+                fields::MESSAGE: format!("Order cancelled. Refunded: {}", refunded),
+                fields::DATA: { "refunded": refunded },
+                db_fields::CREATED_AT: now,
             }),
         )
         .await
@@ -736,6 +945,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     async fn setup_state_with_config(config: Config, stripe_base_url: String) -> HandlersState {
+        unsafe { std::env::set_var("OB_TEST_MODE", "1") };
         HandlersState {
             config: Arc::new(config),
             db: DatabaseClient::new_mem().await,
@@ -761,6 +971,16 @@ mod tests {
             .unwrap();
     }
 
+    fn auth(user_id: &str, roles: &[&str]) -> AuthContext {
+        AuthContext {
+            user_id: user_id.to_string(),
+            roles: roles.iter().map(|s| s.to_string()).collect(),
+            authenticated: true,
+            email_verified: false,
+            custom_claims: serde_json::Value::Null,
+        }
+    }
+
     async fn stripe_state(server: &MockServer) -> HandlersState {
         let mut config = Config::load(None).unwrap();
         config
@@ -772,7 +992,7 @@ mod tests {
 
     #[test]
     fn test_refund_request_deserialize() {
-        let s = r#"{"orderId":"o1","productId":"p1","userId":"u1","reason":"defective"}"#;
+        let s = r#"{"orderId":"o1","productId":"p1","userId":"u1","reason":"defective"}"#; // ignore-magic
         let req: RefundItemRequest = serde_json::from_str(s).unwrap();
         assert_eq!(req.order_id, "o1");
         assert_eq!(req.reason, Some("defective".to_string()));
@@ -780,7 +1000,7 @@ mod tests {
 
     #[test]
     fn test_cancel_request_deserialize() {
-        let s = r#"{"orderId":"o1","userId":"u1"}"#;
+        let s = r#"{"orderId":"o1","userId":"u1"}"#; // ignore-magic
         let req: CancelOrderRequest = serde_json::from_str(s).unwrap();
         assert_eq!(req.order_id, "o1");
         assert!(req.reason.is_none());
@@ -795,8 +1015,8 @@ mod tests {
             already_refunded: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["refundAmountCents"], 1500);
-        assert_eq!(json["refundId"], "re_123");
+        assert_eq!(json[fields::REFUND_AMOUNT_CENTS], 1500);
+        assert_eq!(json[fields::REFUND_ID], "re_123");
         assert!(json.get("alreadyRefunded").is_none());
     }
 
@@ -812,16 +1032,16 @@ mod tests {
 
     #[test]
     fn test_valid_cancel_transitions() {
-        assert!(is_valid_order_transition("PENDING_PAYMENT", "CANCELLED"));
-        assert!(is_valid_order_transition("PAYMENT_AUTHORIZED", "CANCELLED"));
-        assert!(is_valid_order_transition("PROCESSING", "CANCELLED"));
+        assert!(is_valid_order_transition("pending", "cancelled"));
+        assert!(is_valid_order_transition("confirmed", "cancelled"));
+        assert!(is_valid_order_transition("processing", "cancelled"));
     }
 
     #[test]
     fn test_invalid_cancel_transitions() {
-        assert!(!is_valid_order_transition("DELIVERED", "CANCELLED"));
-        assert!(!is_valid_order_transition("SHIPPED", "CANCELLED"));
-        assert!(!is_valid_order_transition("REFUNDED", "CANCELLED"));
+        assert!(!is_valid_order_transition("delivered", "cancelled"));
+        assert!(!is_valid_order_transition("shipped", "cancelled"));
+        assert!(!is_valid_order_transition("refunded", "cancelled"));
     }
 
     #[test]
@@ -871,15 +1091,15 @@ mod tests {
     #[test]
     fn test_refund_amount_prefers_item_shipping_snapshot() {
         let order = json!({
-            "subtotalCents": 4000,
-            "discountAmountCents": 400,
+            db_fields::SUBTOTAL_CENTS: 4000,
+            fields::DISCOUNT_AMOUNT_CENTS: 400,
             fields::SHIPPING_COST_CENTS: 1000,
-            "taxAmountCents": 390,
+            fields::TAX_AMOUNT_CENTS: 390,
         });
         let item = json!({
-            "price": 20.0,
-            "quantity": 1,
-            "itemShippingCents": 250,
+            db_fields::PRICE_CENTS: 2000,
+            fields::QUANTITY: 1,
+            fields::ITEM_SHIPPING_CENTS: 250,
         });
 
         let refund = calculate_refund_amount_cents(&order, &item).unwrap();
@@ -892,14 +1112,14 @@ mod tests {
     #[test]
     fn test_refund_amount_zero_subtotal_is_rejected() {
         let order = json!({
-            "subtotalCents": 0,
+            db_fields::SUBTOTAL_CENTS: 0,
             fields::SHIPPING_COST_CENTS: 200,
-            "taxAmountCents": 100,
+            fields::TAX_AMOUNT_CENTS: 100,
         });
         let item = json!({
-            "price": 10.0,
-            "quantity": 1,
-            "itemShippingCents": 50,
+            db_fields::PRICE_CENTS: 1000,
+            fields::QUANTITY: 1,
+            fields::ITEM_SHIPPING_CENTS: 50,
         });
 
         let err = calculate_refund_amount_cents(&order, &item).unwrap_err();
@@ -909,13 +1129,13 @@ mod tests {
     #[test]
     fn test_refund_amount_with_proportional_shipping_and_tax() {
         let order = json!({
-            "subtotalCents": 10000,
+            db_fields::SUBTOTAL_CENTS: 10000,
             fields::SHIPPING_COST_CENTS: 1000,
-            "taxAmountCents": 1300,
+            fields::TAX_AMOUNT_CENTS: 1300,
         });
         let item = json!({
-            "price": 50.0,
-            "quantity": 1,
+            db_fields::PRICE_CENTS: 5000,
+            fields::QUANTITY: 1,
         });
 
         let refund = calculate_refund_amount_cents(&order, &item).unwrap();
@@ -929,13 +1149,13 @@ mod tests {
     #[test]
     fn test_refund_amount_multi_quantity() {
         let order = json!({
-            "subtotalCents": 10000,
+            db_fields::SUBTOTAL_CENTS: 10000,
             fields::SHIPPING_COST_CENTS: 500,
-            "taxAmountCents": 1300,
+            fields::TAX_AMOUNT_CENTS: 1300,
         });
         let item = json!({
-            "price": 25.0,  // $25 each
-            "quantity": 2,   // 2 items = $50 subtotal = 50% of order
+            db_fields::PRICE_CENTS: 2500,  // $25 each
+            fields::QUANTITY: 2,       // 2 items = $50 subtotal = 50% of order
         });
 
         let refund = calculate_refund_amount_cents(&order, &item).unwrap();
@@ -948,13 +1168,13 @@ mod tests {
     #[test]
     fn test_refund_amount_single_item_gets_full_shipping_and_tax() {
         let order = json!({
-            "subtotalCents": 5000,
+            db_fields::SUBTOTAL_CENTS: 5000,
             fields::SHIPPING_COST_CENTS: 800,
-            "taxAmountCents": 650,
+            fields::TAX_AMOUNT_CENTS: 650,
         });
         let item = json!({
-            "price": 50.0,
-            "quantity": 1,
+            db_fields::PRICE_CENTS: 5000,
+            fields::QUANTITY: 1,
         });
 
         let refund = calculate_refund_amount_cents(&order, &item).unwrap();
@@ -965,14 +1185,14 @@ mod tests {
     #[test]
     fn test_refund_amount_with_100_percent_discount() {
         let order = json!({
-            "subtotalCents": 5000,
-            "discountAmountCents": 5000,  // 100% discount
+            db_fields::SUBTOTAL_CENTS: 5000,
+            fields::DISCOUNT_AMOUNT_CENTS: 5000,  // 100% discount
             fields::SHIPPING_COST_CENTS: 500,
-            "taxAmountCents": 0,
+            fields::TAX_AMOUNT_CENTS: 0,
         });
         let item = json!({
-            "price": 50.0,
-            "quantity": 1,
+            db_fields::PRICE_CENTS: 5000,
+            fields::QUANTITY: 1,
         });
 
         // After discount: item_subtotal = round(5000 * 0.0) = 0
@@ -985,13 +1205,13 @@ mod tests {
     #[test]
     fn test_refund_amount_no_discount_no_shipping() {
         let order = json!({
-            "subtotalCents": 3000,
+            db_fields::SUBTOTAL_CENTS: 3000,
             fields::SHIPPING_COST_CENTS: 0,
-            "taxAmountCents": 390,
+            fields::TAX_AMOUNT_CENTS: 390,
         });
         let item = json!({
-            "price": 30.0,
-            "quantity": 1,
+            db_fields::PRICE_CENTS: 3000,
+            fields::QUANTITY: 1,
         });
 
         let refund = calculate_refund_amount_cents(&order, &item).unwrap();
@@ -1002,31 +1222,31 @@ mod tests {
     #[test]
     fn test_refund_amount_zero_tax() {
         let order = json!({
-            "subtotalCents": 5000,
+            db_fields::SUBTOTAL_CENTS: 5000,
             fields::SHIPPING_COST_CENTS: 1000,
-            "taxAmountCents": 0,
+            fields::TAX_AMOUNT_CENTS: 0,
         });
         let item = json!({
-            "price": 25.0,
-            "quantity": 1,
+            db_fields::PRICE_CENTS: 2500,
+            fields::QUANTITY: 1,
         });
 
         let refund = calculate_refund_amount_cents(&order, &item).unwrap();
         // proportion = 2500/5000 = 0.5, shipping = 500, tax = 0
-        assert_eq!(refund, (2500 + 500));
+        assert_eq!(refund, 2500 + 500);
     }
 
     #[test]
     fn test_refund_amount_rounding_precision() {
         // Scenario with values that produce fractional cents
         let order = json!({
-            "subtotalCents": 3333,
+            db_fields::SUBTOTAL_CENTS: 3333,
             fields::SHIPPING_COST_CENTS: 999,
-            "taxAmountCents": 433,
+            fields::TAX_AMOUNT_CENTS: 433,
         });
         let item = json!({
-            "price": 11.11,
-            "quantity": 1,
+            db_fields::PRICE_CENTS: 1111,
+            fields::QUANTITY: 1,
         });
 
         let refund = calculate_refund_amount_cents(&order, &item);
@@ -1037,13 +1257,13 @@ mod tests {
     #[test]
     fn test_refund_amount_zero_price_item() {
         let order = json!({
-            "subtotalCents": 5000,
+            db_fields::SUBTOTAL_CENTS: 5000,
             fields::SHIPPING_COST_CENTS: 500,
-            "taxAmountCents": 650,
+            fields::TAX_AMOUNT_CENTS: 650,
         });
         let item = json!({
-            "price": 0.0,
-            "quantity": 1,
+            db_fields::PRICE_CENTS: 0,
+            fields::QUANTITY: 1,
         });
 
         let refund = calculate_refund_amount_cents(&order, &item).unwrap();
@@ -1053,9 +1273,9 @@ mod tests {
     #[test]
     fn test_refund_amount_missing_item_fields_defaults() {
         let order = json!({
-            "subtotalCents": 5000,
+            db_fields::SUBTOTAL_CENTS: 5000,
             fields::SHIPPING_COST_CENTS: 500,
-            "taxAmountCents": 650,
+            fields::TAX_AMOUNT_CENTS: 650,
         });
         // Missing price and quantity — should default to 0 and 1
         let item = json!({});
@@ -1117,16 +1337,16 @@ mod tests {
     #[test]
     fn test_cancel_transition_all_valid_states() {
         let cancellable = [
-            "PENDING_PAYMENT",
-            "PAYMENT_AUTHORIZED",
-            "AWAITING_SHIPPING_APPROVAL",
-            "PROCESSING",
-            "PENDING",
-            "CONFIRMED",
+            "pending",
+            "confirmed",
+            "awaiting_shipping_approval",
+            "processing",
+            "pending",
+            "confirmed",
         ];
         for status in &cancellable {
             assert!(
-                is_valid_order_transition(status, "CANCELLED"),
+                is_valid_order_transition(status, "cancelled"),
                 "{status} should be cancellable"
             );
         }
@@ -1135,15 +1355,15 @@ mod tests {
     #[test]
     fn test_cancel_transition_all_invalid_states() {
         let not_cancellable = [
-            "SHIPPED",
-            "DELIVERED",
-            "REFUNDED",
-            "CANCELLED",
-            "RETURN_REQUESTED",
+            "shipped",
+            "delivered",
+            "refunded",
+            "cancelled",
+            "return_requested",
         ];
         for status in &not_cancellable {
             assert!(
-                !is_valid_order_transition(status, "CANCELLED"),
+                !is_valid_order_transition(status, "cancelled"),
                 "{status} should NOT be cancellable"
             );
         }
@@ -1151,7 +1371,7 @@ mod tests {
 
     #[test]
     fn test_cancel_transition_empty_status() {
-        assert!(!is_valid_order_transition("", "CANCELLED"));
+        assert!(!is_valid_order_transition("", "cancelled"));
     }
 
     // -----------------------------------------------------------------------
@@ -1160,7 +1380,7 @@ mod tests {
 
     #[test]
     fn test_refund_request_missing_optional_reason() {
-        let s = r#"{"orderId":"o1","productId":"p1","userId":"u1"}"#;
+        let s = r#"{"orderId":"o1","productId":"p1","userId":"u1"}"#; // ignore-magic
         let req: RefundItemRequest = serde_json::from_str(s).unwrap();
         assert!(req.reason.is_none());
     }
@@ -1168,32 +1388,32 @@ mod tests {
     #[test]
     fn test_refund_request_missing_required_fields() {
         // Missing productId
-        let s = r#"{"orderId":"o1","userId":"u1"}"#;
+        let s = r#"{"orderId":"o1","userId":"u1"}"#; // ignore-magic
         assert!(serde_json::from_str::<RefundItemRequest>(s).is_err());
 
         // Missing orderId
-        let s = r#"{"productId":"p1","userId":"u1"}"#;
+        let s = r#"{"productId":"p1","userId":"u1"}"#; // ignore-magic
         assert!(serde_json::from_str::<RefundItemRequest>(s).is_err());
 
         // Missing userId
-        let s = r#"{"orderId":"o1","productId":"p1"}"#;
+        let s = r#"{"orderId":"o1","productId":"p1"}"#; // ignore-magic
         assert!(serde_json::from_str::<RefundItemRequest>(s).is_err());
 
         // Empty object
-        let s = r#"{}"#;
+        let s = r#"{}"#; // ignore-magic
         assert!(serde_json::from_str::<RefundItemRequest>(s).is_err());
     }
 
     #[test]
     fn test_cancel_request_with_reason() {
-        let s = r#"{"orderId":"o1","userId":"u1","reason":"changed my mind"}"#;
+        let s = r#"{"orderId":"o1","userId":"u1","reason":"changed my mind"}"#; // ignore-magic
         let req: CancelOrderRequest = serde_json::from_str(s).unwrap();
         assert_eq!(req.reason, Some("changed my mind".to_string()));
     }
 
     #[test]
     fn test_cancel_request_missing_required_fields() {
-        let s = r#"{"orderId":"o1"}"#;
+        let s = r#"{"orderId":"o1"}"#; // ignore-magic
         assert!(serde_json::from_str::<CancelOrderRequest>(s).is_err());
     }
 
@@ -1206,8 +1426,8 @@ mod tests {
             already_refunded: Some(true),
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["refundAmountCents"], 0);
-        assert!(json.get("refundId").is_none());
+        assert_eq!(json[fields::REFUND_AMOUNT_CENTS], 0);
+        assert!(json.get(fields::REFUND_ID).is_none());
         assert_eq!(json["alreadyRefunded"], true);
     }
 
@@ -1220,7 +1440,7 @@ mod tests {
             already_refunded: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert!(json.get("refundId").is_none());
+        assert!(json.get(fields::REFUND_ID).is_none());
         assert!(json.get("alreadyRefunded").is_none());
     }
 
@@ -1230,7 +1450,7 @@ mod tests {
 
     #[test]
     fn test_i64_field_missing_and_non_numeric() {
-        let v = json!({"amount": 100, "name": "test"});
+        let v = json!({"amount": 100, db_fields::NAME: "test"});
         assert_eq!(i64_field(&v, "amount"), 100);
         assert_eq!(i64_field(&v, "missing"), 0);
         assert_eq!(i64_field(&v, "name"), 0); // string, not i64
@@ -1247,43 +1467,43 @@ mod tests {
 
     #[test]
     fn test_stock_restored_guard_detects_true() {
-        let order = json!({"stockRestored": true});
+        let order = json!({fields::STOCK_RESTORED: true});
         assert!(bool_field(&order, "stockRestored"));
     }
 
     #[test]
     fn test_stock_restored_guard_defaults_false() {
-        let order = json!({"orderStatus": "CANCELLED"});
+        let order = json!({fields::ORDER_STATUS: "cancelled"});
         assert!(!bool_field(&order, "stockRestored"));
     }
 
     #[test]
     fn test_stock_restored_guard_handles_non_bool() {
-        let order = json!({"stockRestored": "yes"});
+        let order = json!({fields::STOCK_RESTORED: "yes"});
         assert!(!bool_field(&order, "stockRestored"));
     }
 
     #[test]
     fn test_payout_processing_blocks_refund() {
-        let order = json!({"payoutStatus": "PROCESSING"});
-        assert_eq!(str_field(&order, "payoutStatus"), "PROCESSING");
+        let order = json!({fields::PAYOUT_STATUS: "processing"});
+        assert_eq!(str_field(&order, fields::PAYOUT_STATUS), "processing");
     }
 
     #[test]
     fn test_payout_completed_allows_refund() {
-        let order = json!({"payoutStatus": "COMPLETED"});
-        assert_ne!(str_field(&order, "payoutStatus"), "PROCESSING");
+        let order = json!({fields::PAYOUT_STATUS: "COMPLETED"});
+        assert_ne!(str_field(&order, fields::PAYOUT_STATUS), "processing");
     }
 
     #[test]
     fn test_payout_missing_allows_refund() {
-        let order = json!({"orderStatus": "CONFIRMED"});
-        assert_ne!(str_field(&order, "payoutStatus"), "PROCESSING");
+        let order = json!({fields::ORDER_STATUS: "confirmed"});
+        assert_ne!(str_field(&order, fields::PAYOUT_STATUS), "processing");
     }
 
     #[test]
     fn test_cumulative_refunded_cents_tracking() {
-        let order = json!({"cumulativeRefundedCents": 1500});
+        let order = json!({fields::CUMULATIVE_REFUNDED_CENTS: 1500});
         let existing = i64_field(&order, "cumulativeRefundedCents");
         let new_refund = 750_i64;
         assert_eq!(existing + new_refund, 2250);
@@ -1291,42 +1511,42 @@ mod tests {
 
     #[test]
     fn test_cumulative_refunded_cents_defaults_zero() {
-        let order = json!({"orderStatus": "CONFIRMED"});
+        let order = json!({fields::ORDER_STATUS: "confirmed"});
         assert_eq!(i64_field(&order, "cumulativeRefundedCents"), 0);
     }
 
     #[test]
     fn test_digital_license_revocation_by_is_digital() {
-        let item = json!({"isDigital": true, "productType": "physical"});
+        let item = json!({fields::IS_DIGITAL: true, fields::PRODUCT_TYPE: "physical"});
         assert!(bool_field(&item, "isDigital"));
     }
 
     #[test]
     fn test_digital_license_revocation_by_product_type_software() {
-        let item = json!({"isDigital": false, "productType": "software"});
-        let item_type = str_field(&item, "productType");
+        let item = json!({fields::IS_DIGITAL: false, fields::PRODUCT_TYPE: "software"});
+        let item_type = str_field(&item, fields::PRODUCT_TYPE);
         assert!(matches!(item_type, "software" | "book" | "digital"));
     }
 
     #[test]
     fn test_digital_license_revocation_by_product_type_book() {
-        let item = json!({"productType": "book"});
-        let item_type = str_field(&item, "productType");
+        let item = json!({fields::PRODUCT_TYPE: "book"});
+        let item_type = str_field(&item, fields::PRODUCT_TYPE);
         assert!(matches!(item_type, "software" | "book" | "digital"));
     }
 
     #[test]
     fn test_digital_license_revocation_by_product_type_digital() {
-        let item = json!({"productType": "digital"});
-        let item_type = str_field(&item, "productType");
+        let item = json!({fields::PRODUCT_TYPE: "digital"});
+        let item_type = str_field(&item, fields::PRODUCT_TYPE);
         assert!(matches!(item_type, "software" | "book" | "digital"));
     }
 
     #[test]
     fn test_physical_item_not_flagged_as_digital() {
-        let item = json!({"isDigital": false, "productType": "clothing"});
+        let item = json!({fields::IS_DIGITAL: false, fields::PRODUCT_TYPE: "clothing"});
         let is_digital = bool_field(&item, "isDigital");
-        let item_type = str_field(&item, "productType");
+        let item_type = str_field(&item, fields::PRODUCT_TYPE);
         let is_digital_by_type = matches!(item_type, "software" | "book" | "digital");
         assert!(!is_digital && !is_digital_by_type);
     }
@@ -1335,11 +1555,11 @@ mod tests {
     fn test_cancel_failed_quarantine_fields() {
         // Verify the quarantine payload shape
         let payload = json!({
-            "paymentStatus": "CANCEL_FAILED",
-            "requiresManualReview": true,
+            fields::PAYMENT_STATUS: "CANCEL_FAILED",
+            fields::REQUIRES_MANUAL_REVIEW: true,
         });
-        assert_eq!(str_field(&payload, "paymentStatus"), "CANCEL_FAILED");
-        assert!(bool_field(&payload, "requiresManualReview"));
+        assert_eq!(str_field(&payload, fields::PAYMENT_STATUS), "CANCEL_FAILED");
+        assert!(bool_field(&payload, fields::REQUIRES_MANUAL_REVIEW));
     }
 
     #[tokio::test]
@@ -1366,7 +1586,10 @@ mod tests {
             Some(1250),
             "requested_by_customer",
             "refund_order_1_item_1",
-            &[("orderId", "order_1"), ("productId", "prod_1")],
+            &[
+                (fields::ORDER_ID, "order_1"),
+                (fields::PRODUCT_ID, "prod_1"),
+            ],
         )
         .await
         .unwrap();
@@ -1381,7 +1604,7 @@ mod tests {
             .and(path("/payment_intents/pi_123/cancel"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "id": "pi_123",
-                "status": "canceled"
+                db_fields::STATUS: "canceled"
             })))
             .mount(&server)
             .await;
@@ -1403,7 +1626,7 @@ mod tests {
             .and(path("/payment_intents/pi_123/cancel"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "id": "pi_123",
-                "status": "canceled"
+                db_fields::STATUS: "canceled"
             })))
             .mount(&server)
             .await;
@@ -1433,7 +1656,7 @@ mod tests {
                 "prod_1",
                 json!({
                     fields::PRODUCT_ID: "prod_1",
-                    "stockQuantity": 5,
+                    fields::STOCK_QUANTITY: 5,
                 }),
             )
             .await
@@ -1444,16 +1667,16 @@ mod tests {
                 collections::ORDERS,
                 "order_1",
                 json!({
-                    "orderStatus": "PENDING_PAYMENT",
+                    fields::ORDER_STATUS: "pending",
                     "userId": "buyer_1",
-                    fields::PAYMENT_STATUS: "AUTHORIZED",
-                    "paymentIntentId": "pi_123",
-                    "stockRestored": false,
+                    fields::PAYMENT_STATUS: "authorized",
+                    fields::PAYMENT_INTENT_ID: "pi_123",
+                    fields::STOCK_RESTORED: false,
                     fields::ITEMS: [{
                         fields::PRODUCT_ID: "prod_1",
-                        fields::SELLER_ID: "seller_1",
-                        "quantity": 2,
-                        "isDigital": false
+                        db_fields::SELLER_ID: "seller_1",
+                        fields::QUANTITY: 2,
+                        fields::IS_DIGITAL: false
                     }]
                 }),
             )
@@ -1462,6 +1685,7 @@ mod tests {
 
         let Json(resp) = cancel_order(
             State(state.clone()),
+            Extension(auth("buyer_1", &["buyer"])),
             Json(CancelOrderRequest {
                 order_id: "order_1".into(),
                 user_id: "buyer_1".into(),
@@ -1484,9 +1708,9 @@ mod tests {
             .get_document(collections::PRODUCTS, "prod_1")
             .await
             .unwrap();
-        assert_eq!(order["orderStatus"], "CANCELLED");
-        assert_eq!(order[fields::PAYMENT_STATUS], "CANCELLED");
-        assert_eq!(product["stockQuantity"], 7);
+        assert_eq!(order[fields::ORDER_STATUS], "cancelled");
+        assert_eq!(order[fields::PAYMENT_STATUS], "cancelled");
+        assert_eq!(product[fields::STOCK_QUANTITY], 7);
     }
 
     #[tokio::test]
@@ -1501,15 +1725,19 @@ mod tests {
             .await;
 
         let state = stripe_state(&server).await;
-        seed_user(&state, "seller_1", &["seller"]).await;
+        let u = uuid::Uuid::new_v4().to_string();
+        let order_id = format!("order_ref_{u}");
+        let prod_id = format!("prod_ref_{u}");
+        let seller_id = format!("seller_ref_{u}");
+        seed_user(&state, &seller_id, &["seller"]).await;
         state
             .db
             .upsert_document(
                 collections::PRODUCTS,
-                "prod_1",
+                &prod_id,
                 json!({
-                    fields::PRODUCT_ID: "prod_1",
-                    "stockQuantity": 5,
+                    fields::PRODUCT_ID: prod_id,
+                    fields::STOCK_QUANTITY: 5,
                 }),
             )
             .await
@@ -1518,23 +1746,24 @@ mod tests {
             .db
             .upsert_document(
                 collections::ORDERS,
-                "order_1",
+                &order_id,
                 json!({
-                    fields::ORDER_ID: "order_1",
-                    fields::PAYMENT_STATUS: "CAPTURED",
-                    "paymentIntentId": "pi_refund_1",
-                    "subtotalCents": 2000,
-                    "shippingCostCents": 300,
-                    "taxAmountCents": 200,
-                    "cumulativeRefundedCents": 50,
+                    fields::ORDER_ID: order_id,
+                    fields::PAYMENT_STATUS: "captured",
+                    fields::PAYMENT_INTENT_ID: "pi_refund_1",
+                    db_fields::SUBTOTAL_CENTS: 2000,
+                    fields::SHIPPING_COST_CENTS: 300,
+                    fields::TAX_AMOUNT_CENTS: 200,
+                    db_fields::TOTAL_AMOUNT_CENTS: 2600,
+                    fields::CUMULATIVE_REFUNDED_CENTS: 50,
                     fields::ITEMS: [{
-                        fields::PRODUCT_ID: "prod_1",
-                        fields::SELLER_ID: "seller_1",
-                        "status": "delivered",
-                        "deliveredAt": Utc::now().to_rfc3339(),
-                        "price": 10.0,
-                        "quantity": 2,
-                        "isDigital": false
+                        fields::PRODUCT_ID: prod_id,
+                        db_fields::SELLER_ID: seller_id,
+                        db_fields::STATUS: "delivered",
+                        fields::DELIVERED_AT: Utc::now().to_rfc3339(),
+                        db_fields::PRICE_CENTS: 1000,
+                        fields::QUANTITY: 2,
+                        fields::IS_DIGITAL: false
                     }]
                 }),
             )
@@ -1543,10 +1772,11 @@ mod tests {
 
         let Json(resp) = refund_order_item(
             State(state.clone()),
+            Extension(auth(&seller_id, &[])),
             Json(RefundItemRequest {
-                order_id: "order_1".into(),
-                product_id: "prod_1".into(),
-                user_id: "seller_1".into(),
+                order_id: order_id.clone(),
+                product_id: prod_id.clone(),
+                user_id: seller_id.clone(),
                 reason: Some(" damaged <b>box</b> ".into()),
             }),
         )
@@ -1559,32 +1789,34 @@ mod tests {
 
         let order = state
             .db
-            .get_document(collections::ORDERS, "order_1")
+            .get_document(collections::ORDERS, &order_id)
             .await
             .unwrap();
         let product = state
             .db
-            .get_document(collections::PRODUCTS, "prod_1")
+            .get_document(collections::PRODUCTS, &prod_id)
             .await
             .unwrap();
         let item = &order[fields::ITEMS][0];
-        assert_eq!(item["status"], "refunded");
-        assert_eq!(item["refundAmountCents"], 2500);
-        assert_eq!(item["refundId"], "re_live_1");
-        assert_eq!(item["refundReason"], " damaged box ");
-        assert_eq!(order["cumulativeRefundedCents"], 2550);
-        assert_eq!(product["stockQuantity"], 7);
+        assert_eq!(item[db_fields::STATUS], "refunded");
+        assert_eq!(item[fields::REFUND_AMOUNT_CENTS], 2500);
+        assert_eq!(item[fields::REFUND_ID], "re_live_1");
+        assert_eq!(item[fields::REFUND_REASON], " damaged box ");
+        assert_eq!(order[fields::CUMULATIVE_REFUNDED_CENTS], 2550);
+        assert_eq!(product[fields::STOCK_QUANTITY], 7);
 
         let events = state
             .db
-            .query_bind_value(
-                "SELECT * FROM order_events WHERE orderId = $orderId AND eventType = $eventType",
-                json!({"orderId": "order_1", "eventType": "item_refunded"}),
+            .query_raw(
+                &format!("SELECT * FROM events WHERE data->>'orderId' = '{}' AND data->>'eventType' = 'item_refunded'", order_id),
             )
             .await
             .unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0]["metadata"]["productId"], "prod_1");
+        assert_eq!(
+            events[0][fields::DATA][fields::PRODUCT_ID],
+            prod_id.as_str()
+        );
     }
 
     #[tokio::test]
@@ -1599,15 +1831,20 @@ mod tests {
             .await;
 
         let state = stripe_state(&server).await;
-        seed_user(&state, "seller_1", &["seller"]).await;
+        let u = uuid::Uuid::new_v4().to_string();
+        let seller_id = format!("seller_dig_{u}");
+        let ebook_id = format!("ebook_{u}");
+        let license_id = format!("license_{u}");
+        let order_id = format!("order_dig_{u}");
+        seed_user(&state, &seller_id, &["seller"]).await;
         state
             .db
             .upsert_document(
                 collections::PRODUCTS,
-                "ebook_1",
+                &ebook_id,
                 json!({
-                    fields::PRODUCT_ID: "ebook_1",
-                    "stockQuantity": 5,
+                    fields::PRODUCT_ID: ebook_id,
+                    fields::STOCK_QUANTITY: 5,
                 }),
             )
             .await
@@ -1616,11 +1853,11 @@ mod tests {
             .db
             .upsert_document(
                 collections::LICENSES,
-                "license_1",
+                &license_id,
                 json!({
-                    "orderId": "order_digital",
-                    "productId": "ebook_1",
-                    "status": "active",
+                    fields::ORDER_ID: order_id,
+                    fields::PRODUCT_ID: ebook_id,
+                    db_fields::STATUS: "active",
                 }),
             )
             .await
@@ -1629,23 +1866,24 @@ mod tests {
             .db
             .upsert_document(
                 collections::ORDERS,
-                "order_digital",
+                &order_id,
                 json!({
-                    fields::ORDER_ID: "order_digital",
-                    fields::PAYMENT_STATUS: "CAPTURED",
-                    "paymentIntentId": "pi_digital_1",
-                    "subtotalCents": 1500,
-                    "shippingCostCents": 0,
-                    "taxAmountCents": 0,
+                    fields::ORDER_ID: order_id,
+                    fields::PAYMENT_STATUS: "captured",
+                    fields::PAYMENT_INTENT_ID: "pi_digital_1",
+                    db_fields::SUBTOTAL_CENTS: 1500,
+                    fields::SHIPPING_COST_CENTS: 0,
+                    fields::TAX_AMOUNT_CENTS: 0,
+                    db_fields::TOTAL_AMOUNT_CENTS: 1500,
                     fields::ITEMS: [{
-                        fields::PRODUCT_ID: "ebook_1",
-                        fields::SELLER_ID: "seller_1",
-                        "status": "delivered",
-                        "deliveredAt": Utc::now().to_rfc3339(),
-                        "price": 15.0,
-                        "quantity": 1,
-                        "isDigital": true,
-                        "productType": "digital"
+                        fields::PRODUCT_ID: ebook_id,
+                        db_fields::SELLER_ID: seller_id,
+                        db_fields::STATUS: "delivered",
+                        fields::DELIVERED_AT: Utc::now().to_rfc3339(),
+                        db_fields::PRICE_CENTS: 1500,
+                        fields::QUANTITY: 1,
+                        fields::IS_DIGITAL: true,
+                        fields::PRODUCT_TYPE: "digital"
                     }]
                 }),
             )
@@ -1654,10 +1892,11 @@ mod tests {
 
         let Json(resp) = refund_order_item(
             State(state.clone()),
+            Extension(auth(&seller_id, &[])),
             Json(RefundItemRequest {
-                order_id: "order_digital".into(),
-                product_id: "ebook_1".into(),
-                user_id: "seller_1".into(),
+                order_id: order_id.clone(),
+                product_id: ebook_id.clone(),
+                user_id: seller_id.clone(),
                 reason: None,
             }),
         )
@@ -1667,21 +1906,20 @@ mod tests {
         assert!(resp.success);
         let product = state
             .db
-            .get_document(collections::PRODUCTS, "ebook_1")
+            .get_document(collections::PRODUCTS, &ebook_id)
             .await
             .unwrap();
-        assert_eq!(product["stockQuantity"], 5);
+        assert_eq!(product[fields::STOCK_QUANTITY], 5);
 
         let licenses = state
             .db
-            .query_bind_value(
-                "SELECT * FROM licenses WHERE orderId = $orderId AND productId = $productId",
-                json!({"orderId": "order_digital", "productId": "ebook_1"}),
+            .query_raw(
+                &format!("SELECT * FROM licenses WHERE data->>'orderId' = '{}' AND data->>'productId' = '{}'", order_id, ebook_id),
             )
             .await
             .unwrap();
         assert_eq!(licenses.len(), 1);
-        assert_eq!(licenses[0]["status"], "revoked");
+        assert_eq!(licenses[0][db_fields::STATUS], "revoked");
         assert!(licenses[0].get("revokedAt").is_some());
     }
 
@@ -1696,15 +1934,16 @@ mod tests {
                 collections::ORDERS,
                 "order_already",
                 json!({
-                    fields::PAYMENT_STATUS: "CAPTURED",
-                    "paymentIntentId": "pi_existing",
-                    "subtotalCents": 1000,
+                    fields::PAYMENT_STATUS: "captured",
+                    fields::PAYMENT_INTENT_ID: "pi_existing",
+                    db_fields::SUBTOTAL_CENTS: 1000,
+                    db_fields::TOTAL_AMOUNT_CENTS: 1000,
                     fields::ITEMS: [{
                         fields::PRODUCT_ID: "prod_1",
-                        fields::SELLER_ID: "seller_1",
-                        "status": "refunded",
-                        "price": 10.0,
-                        "quantity": 1
+                        db_fields::SELLER_ID: "seller_1",
+                        db_fields::STATUS: "refunded",
+                        db_fields::PRICE_CENTS: 1000,
+                        fields::QUANTITY: 1
                     }]
                 }),
             )
@@ -1713,6 +1952,7 @@ mod tests {
 
         let Json(resp) = refund_order_item(
             State(state),
+            Extension(auth("seller_1", &[])),
             Json(RefundItemRequest {
                 order_id: "order_already".into(),
                 product_id: "prod_1".into(),
@@ -1740,15 +1980,19 @@ mod tests {
             .await;
 
         let state = stripe_state(&server).await;
-        seed_user(&state, "buyer_1", &["buyer"]).await;
+        let u = uuid::Uuid::new_v4().to_string();
+        let order_id = format!("order_cap_{u}");
+        let prod_id = format!("prod_cap_{u}");
+        let buyer_id = format!("buyer_cap_{u}");
+        seed_user(&state, &buyer_id, &["buyer"]).await;
         state
             .db
             .upsert_document(
                 collections::PRODUCTS,
-                "prod_1",
+                &prod_id,
                 json!({
-                    fields::PRODUCT_ID: "prod_1",
-                    "stockQuantity": 4,
+                    fields::PRODUCT_ID: prod_id,
+                    fields::STOCK_QUANTITY: 4,
                 }),
             )
             .await
@@ -1757,19 +2001,19 @@ mod tests {
             .db
             .upsert_document(
                 collections::ORDERS,
-                "order_cancel",
+                &order_id,
                 json!({
-                    fields::ORDER_ID: "order_cancel",
-                    "orderStatus": "PENDING_PAYMENT",
-                    "userId": "buyer_1",
-                    fields::PAYMENT_STATUS: "CAPTURED",
-                    "paymentIntentId": "pi_cancel_1",
-                    "stockRestored": false,
+                    fields::ORDER_ID: order_id,
+                    fields::ORDER_STATUS: "pending",
+                    "userId": buyer_id,
+                    fields::PAYMENT_STATUS: "captured",
+                    fields::PAYMENT_INTENT_ID: "pi_cancel_1",
+                    fields::STOCK_RESTORED: false,
                     fields::ITEMS: [{
-                        fields::PRODUCT_ID: "prod_1",
-                        fields::SELLER_ID: "seller_1",
-                        "quantity": 2,
-                        "isDigital": false
+                        fields::PRODUCT_ID: prod_id,
+                        db_fields::SELLER_ID: "seller_1",
+                        fields::QUANTITY: 2,
+                        fields::IS_DIGITAL: false
                     }]
                 }),
             )
@@ -1778,9 +2022,10 @@ mod tests {
 
         let Json(resp) = cancel_order(
             State(state.clone()),
+            Extension(auth(&buyer_id, &["buyer"])),
             Json(CancelOrderRequest {
-                order_id: "order_cancel".into(),
-                user_id: "buyer_1".into(),
+                order_id: order_id.clone(),
+                user_id: buyer_id.clone(),
                 reason: Some("need to reorder".into()),
             }),
         )
@@ -1792,29 +2037,29 @@ mod tests {
 
         let order = state
             .db
-            .get_document(collections::ORDERS, "order_cancel")
+            .get_document(collections::ORDERS, &order_id)
             .await
             .unwrap();
         let product = state
             .db
-            .get_document(collections::PRODUCTS, "prod_1")
+            .get_document(collections::PRODUCTS, &prod_id)
             .await
             .unwrap();
-        assert_eq!(order["orderStatus"], "CANCELLED");
-        assert_eq!(order[fields::PAYMENT_STATUS], "REFUNDED");
-        assert_eq!(order["cancelledBy"], "buyer_1");
-        assert_eq!(product["stockQuantity"], 6);
+        assert_eq!(order[fields::ORDER_STATUS], "cancelled");
+        assert_eq!(order[fields::PAYMENT_STATUS], "refunded");
+        assert_eq!(order["cancelledBy"], buyer_id.as_str());
+        assert_eq!(product[fields::STOCK_QUANTITY], 6);
 
         let events = state
             .db
-            .query_bind_value(
-                "SELECT * FROM order_events WHERE orderId = $orderId AND eventType = $eventType",
-                json!({"orderId": "order_cancel", "eventType": "order_cancelled"}),
-            )
+            .query_raw(&format!(
+                "SELECT * FROM events WHERE data->>'orderId' = '{}' AND data->>'eventType' = 'order_cancelled'",
+                order_id
+            ))
             .await
             .unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0]["metadata"]["refunded"], true);
+        assert_eq!(events[0][fields::DATA]["refunded"], true);
     }
 
     #[tokio::test]
@@ -1834,10 +2079,10 @@ mod tests {
                 collections::ORDERS,
                 "order_quarantine",
                 json!({
-                    "orderStatus": "PENDING_PAYMENT",
+                    fields::ORDER_STATUS: "pending",
                     "userId": "buyer_1",
-                    fields::PAYMENT_STATUS: "CAPTURED",
-                    "paymentIntentId": "pi_quarantine",
+                    fields::PAYMENT_STATUS: "captured",
+                    fields::PAYMENT_INTENT_ID: "pi_quarantine",
                     fields::ITEMS: []
                 }),
             )
@@ -1846,6 +2091,7 @@ mod tests {
 
         let err = cancel_order(
             State(state.clone()),
+            Extension(auth("buyer_1", &["buyer"])),
             Json(CancelOrderRequest {
                 order_id: "order_quarantine".into(),
                 user_id: "buyer_1".into(),
@@ -1863,6 +2109,77 @@ mod tests {
             .unwrap();
         assert_eq!(order[fields::PAYMENT_STATUS], "CANCEL_FAILED");
         assert_eq!(order["requiresManualReview"], true);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_order_allows_checkout_style_buyer_id_records() {
+        let server = MockServer::start().await;
+        let state = stripe_state(&server).await;
+        let buyer_id = format!("buyer_checkout_{}", uuid::Uuid::new_v4().simple());
+        let product_id = format!("prod_checkout_{}", uuid::Uuid::new_v4().simple());
+        seed_user(&state, &buyer_id, &["buyer"]).await;
+        state
+            .db
+            .upsert_document(
+                collections::PRODUCTS,
+                &product_id,
+                json!({
+                    fields::PRODUCT_ID: product_id,
+                    fields::STOCK_QUANTITY: 4,
+                }),
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .upsert_document(
+                collections::ORDERS,
+                "order_buyer_id_only",
+                json!({
+                    fields::ORDER_ID: "order_buyer_id_only",
+                    db_fields::BUYER_ID: buyer_id,
+                    fields::ORDER_STATUS: "pending",
+                    fields::PAYMENT_STATUS: "awaiting_payment",
+                    fields::STOCK_RESTORED: false,
+                    fields::ITEMS: [{
+                        fields::PRODUCT_ID: product_id,
+                        db_fields::SELLER_ID: "seller_checkout_style",
+                        fields::QUANTITY: 2,
+                        fields::IS_DIGITAL: false
+                    }]
+                }),
+            )
+            .await
+            .unwrap();
+
+        let Json(resp) = cancel_order(
+            State(state.clone()),
+            Extension(auth(&buyer_id, &["buyer"])),
+            Json(CancelOrderRequest {
+                order_id: "order_buyer_id_only".into(),
+                user_id: buyer_id.clone(),
+                reason: Some("buyer changed plan".into()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(resp.success);
+        assert!(!resp.refunded);
+
+        let order = state
+            .db
+            .get_document(collections::ORDERS, "order_buyer_id_only")
+            .await
+            .unwrap();
+        let product = state
+            .db
+            .get_document(collections::PRODUCTS, &product_id)
+            .await
+            .unwrap();
+        assert_eq!(order[fields::ORDER_STATUS], "cancelled");
+        assert_eq!(order[fields::CANCELLED_BY], buyer_id);
+        assert_eq!(product[fields::STOCK_QUANTITY], 6);
     }
 
     // -----------------------------------------------------------------------
@@ -1907,15 +2224,15 @@ mod tests {
                 collections::ORDERS,
                 "order_nf",
                 json!({
-                    fields::PAYMENT_STATUS: "CAPTURED",
-                    "paymentIntentId": "pi_1",
-                    "subtotalCents": 1000,
+                    fields::PAYMENT_STATUS: "captured",
+                    fields::PAYMENT_INTENT_ID: "pi_1",
+                    db_fields::SUBTOTAL_CENTS: 1000,
                     fields::ITEMS: [{
                         fields::PRODUCT_ID: "other_prod",
-                        fields::SELLER_ID: "seller_1",
-                        "status": "delivered",
-                        "price": 10.0,
-                        "quantity": 1
+                        db_fields::SELLER_ID: "seller_1",
+                        db_fields::STATUS: "delivered",
+                        db_fields::PRICE_CENTS: 1000,
+                        fields::QUANTITY: 1
                     }]
                 }),
             )
@@ -1924,6 +2241,7 @@ mod tests {
 
         let err = refund_order_item(
             State(state),
+            Extension(auth("seller_1", &[])),
             Json(RefundItemRequest {
                 order_id: "order_nf".into(),
                 product_id: "missing_prod".into(),
@@ -1951,15 +2269,15 @@ mod tests {
                 collections::ORDERS,
                 "order_perm",
                 json!({
-                    fields::PAYMENT_STATUS: "CAPTURED",
-                    "paymentIntentId": "pi_1",
-                    "subtotalCents": 1000,
+                    fields::PAYMENT_STATUS: "captured",
+                    fields::PAYMENT_INTENT_ID: "pi_1",
+                    db_fields::SUBTOTAL_CENTS: 1000,
                     fields::ITEMS: [{
                         fields::PRODUCT_ID: "prod_1",
-                        fields::SELLER_ID: "seller_1",
-                        "status": "delivered",
-                        "price": 10.0,
-                        "quantity": 1
+                        db_fields::SELLER_ID: "seller_1",
+                        db_fields::STATUS: "delivered",
+                        db_fields::PRICE_CENTS: 1000,
+                        fields::QUANTITY: 1
                     }]
                 }),
             )
@@ -1968,6 +2286,7 @@ mod tests {
 
         let err = refund_order_item(
             State(state),
+            Extension(auth("random_user", &[])),
             Json(RefundItemRequest {
                 order_id: "order_perm".into(),
                 product_id: "prod_1".into(),
@@ -1995,15 +2314,15 @@ mod tests {
                 collections::ORDERS,
                 "order_uncap",
                 json!({
-                    fields::PAYMENT_STATUS: "AUTHORIZED",
-                    "paymentIntentId": "pi_1",
-                    "subtotalCents": 1000,
+                    fields::PAYMENT_STATUS: "authorized",
+                    fields::PAYMENT_INTENT_ID: "pi_1",
+                    db_fields::SUBTOTAL_CENTS: 1000,
                     fields::ITEMS: [{
                         fields::PRODUCT_ID: "prod_1",
-                        fields::SELLER_ID: "seller_1",
-                        "status": "delivered",
-                        "price": 10.0,
-                        "quantity": 1
+                        db_fields::SELLER_ID: "seller_1",
+                        db_fields::STATUS: "delivered",
+                        db_fields::PRICE_CENTS: 1000,
+                        fields::QUANTITY: 1
                     }]
                 }),
             )
@@ -2012,6 +2331,7 @@ mod tests {
 
         let err = refund_order_item(
             State(state),
+            Extension(auth("seller_1", &[])),
             Json(RefundItemRequest {
                 order_id: "order_uncap".into(),
                 product_id: "prod_1".into(),
@@ -2039,16 +2359,16 @@ mod tests {
                 collections::ORDERS,
                 "order_payout",
                 json!({
-                    fields::PAYMENT_STATUS: "CAPTURED",
-                    "payoutStatus": "PROCESSING",
-                    "paymentIntentId": "pi_1",
-                    "subtotalCents": 1000,
+                    fields::PAYMENT_STATUS: "captured",
+                    fields::PAYOUT_STATUS: "processing",
+                    fields::PAYMENT_INTENT_ID: "pi_1",
+                    db_fields::SUBTOTAL_CENTS: 1000,
                     fields::ITEMS: [{
                         fields::PRODUCT_ID: "prod_1",
-                        fields::SELLER_ID: "seller_1",
-                        "status": "delivered",
-                        "price": 10.0,
-                        "quantity": 1
+                        db_fields::SELLER_ID: "seller_1",
+                        db_fields::STATUS: "delivered",
+                        db_fields::PRICE_CENTS: 1000,
+                        fields::QUANTITY: 1
                     }]
                 }),
             )
@@ -2057,6 +2377,7 @@ mod tests {
 
         let err = refund_order_item(
             State(state),
+            Extension(auth("seller_1", &[])),
             Json(RefundItemRequest {
                 order_id: "order_payout".into(),
                 product_id: "prod_1".into(),
@@ -2087,16 +2408,16 @@ mod tests {
                 collections::ORDERS,
                 "order_expired",
                 json!({
-                    fields::PAYMENT_STATUS: "CAPTURED",
-                    "paymentIntentId": "pi_1",
-                    "subtotalCents": 1000,
+                    fields::PAYMENT_STATUS: "captured",
+                    fields::PAYMENT_INTENT_ID: "pi_1",
+                    db_fields::SUBTOTAL_CENTS: 1000,
                     fields::ITEMS: [{
                         fields::PRODUCT_ID: "prod_1",
-                        fields::SELLER_ID: "seller_1",
-                        "status": "delivered",
-                        "deliveredAt": old_date,
-                        "price": 10.0,
-                        "quantity": 1
+                        db_fields::SELLER_ID: "seller_1",
+                        db_fields::STATUS: "delivered",
+                        fields::DELIVERED_AT: old_date,
+                        db_fields::PRICE_CENTS: 1000,
+                        fields::QUANTITY: 1
                     }]
                 }),
             )
@@ -2105,6 +2426,7 @@ mod tests {
 
         let err = refund_order_item(
             State(state),
+            Extension(auth("seller_1", &[])),
             Json(RefundItemRequest {
                 order_id: "order_expired".into(),
                 product_id: "prod_1".into(),
@@ -2125,21 +2447,26 @@ mod tests {
     async fn test_refund_order_item_no_payment_intent() {
         let server = MockServer::start().await;
         let state = stripe_state(&server).await;
-        seed_user(&state, "seller_1", &["seller"]).await;
+        let u = uuid::Uuid::new_v4().to_string();
+        let seller_id = format!("seller_nopi_{u}");
+        let prod_id = format!("prod_nopi_{u}");
+        let order_id = format!("order_nopi_{u}");
+        seed_user(&state, &seller_id, &["seller"]).await;
         state
             .db
             .upsert_document(
                 collections::ORDERS,
-                "order_nopi",
+                &order_id,
                 json!({
-                    fields::PAYMENT_STATUS: "CAPTURED",
-                    "subtotalCents": 1000,
+                    fields::PAYMENT_STATUS: "captured",
+                    db_fields::SUBTOTAL_CENTS: 1000,
+                    db_fields::TOTAL_AMOUNT_CENTS: 1000,
                     fields::ITEMS: [{
-                        fields::PRODUCT_ID: "prod_1",
-                        fields::SELLER_ID: "seller_1",
-                        "status": "shipped",
-                        "price": 10.0,
-                        "quantity": 1
+                        fields::PRODUCT_ID: prod_id,
+                        db_fields::SELLER_ID: seller_id,
+                        db_fields::STATUS: "shipped",
+                        db_fields::PRICE_CENTS: 1000,
+                        fields::QUANTITY: 1
                     }]
                 }),
             )
@@ -2148,10 +2475,11 @@ mod tests {
 
         let err = refund_order_item(
             State(state),
+            Extension(auth(&seller_id, &[])),
             Json(RefundItemRequest {
-                order_id: "order_nopi".into(),
-                product_id: "prod_1".into(),
-                user_id: "seller_1".into(),
+                order_id: order_id.clone(),
+                product_id: prod_id.clone(),
+                user_id: seller_id.clone(),
                 reason: None,
             }),
         )
@@ -2175,9 +2503,9 @@ mod tests {
                 collections::ORDERS,
                 "order_arch",
                 json!({
-                    "orderStatus": "PENDING_PAYMENT",
-                    "userId": "buyer_1",
-                    "archived": true,
+                    fields::ORDER_STATUS: "pending",
+                    db_fields::USER_ID: "buyer_1",
+                    fields::ARCHIVED: true,
                     fields::ITEMS: []
                 }),
             )
@@ -2186,6 +2514,7 @@ mod tests {
 
         let err = cancel_order(
             State(state),
+            Extension(auth("buyer_1", &["buyer"])),
             Json(CancelOrderRequest {
                 order_id: "order_arch".into(),
                 user_id: "buyer_1".into(),
@@ -2212,10 +2541,10 @@ mod tests {
                 collections::ORDERS,
                 "order_noauth",
                 json!({
-                    "orderStatus": "PENDING_PAYMENT",
+                    fields::ORDER_STATUS: "pending",
                     "userId": "buyer_1",
                     fields::ITEMS: [{
-                        fields::SELLER_ID: "seller_1",
+                        db_fields::SELLER_ID: "seller_1",
                     }]
                 }),
             )
@@ -2224,6 +2553,7 @@ mod tests {
 
         let err = cancel_order(
             State(state),
+            Extension(auth("random_user", &["viewer"])),
             Json(CancelOrderRequest {
                 order_id: "order_noauth".into(),
                 user_id: "random_user".into(),
@@ -2250,11 +2580,11 @@ mod tests {
                 collections::ORDERS,
                 "order_multi",
                 json!({
-                    "orderStatus": "PENDING_PAYMENT",
+                    fields::ORDER_STATUS: "pending",
                     "userId": "buyer_1",
                     fields::ITEMS: [
-                        { fields::SELLER_ID: "seller_1" },
-                        { fields::SELLER_ID: "seller_2" },
+                        { db_fields::SELLER_ID: "seller_1" },
+                        { db_fields::SELLER_ID: "seller_2" },
                     ]
                 }),
             )
@@ -2263,6 +2593,7 @@ mod tests {
 
         let err = cancel_order(
             State(state),
+            Extension(auth("seller_1", &["seller"])),
             Json(CancelOrderRequest {
                 order_id: "order_multi".into(),
                 user_id: "seller_1".into(),
@@ -2292,7 +2623,7 @@ mod tests {
                 collections::ORDERS,
                 "order_shipped",
                 json!({
-                    "orderStatus": "SHIPPED",
+                    fields::ORDER_STATUS: "shipped",
                     "userId": "buyer_1",
                     fields::ITEMS: []
                 }),
@@ -2302,6 +2633,7 @@ mod tests {
 
         let err = cancel_order(
             State(state),
+            Extension(auth("buyer_1", &["buyer"])),
             Json(CancelOrderRequest {
                 order_id: "order_shipped".into(),
                 user_id: "buyer_1".into(),
@@ -2328,7 +2660,7 @@ mod tests {
                 collections::ORDERS,
                 "order_proc",
                 json!({
-                    "orderStatus": "PROCESSING",
+                    fields::ORDER_STATUS: "processing",
                     "userId": "buyer_1",
                     fields::ITEMS: []
                 }),
@@ -2338,6 +2670,7 @@ mod tests {
 
         let err = cancel_order(
             State(state),
+            Extension(auth("buyer_1", &["buyer"])),
             Json(CancelOrderRequest {
                 order_id: "order_proc".into(),
                 user_id: "buyer_1".into(),
@@ -2373,10 +2706,10 @@ mod tests {
                 collections::ORDERS,
                 "order_pi_fail",
                 json!({
-                    "orderStatus": "PENDING_PAYMENT",
+                    fields::ORDER_STATUS: "pending",
                     "userId": "buyer_1",
-                    fields::PAYMENT_STATUS: "AUTHORIZED",
-                    "paymentIntentId": "pi_fail",
+                    fields::PAYMENT_STATUS: "authorized",
+                    fields::PAYMENT_INTENT_ID: "pi_fail",
                     fields::ITEMS: []
                 }),
             )
@@ -2385,6 +2718,7 @@ mod tests {
 
         let err = cancel_order(
             State(state.clone()),
+            Extension(auth("buyer_1", &["buyer"])),
             Json(CancelOrderRequest {
                 order_id: "order_pi_fail".into(),
                 user_id: "buyer_1".into(),
@@ -2423,15 +2757,15 @@ mod tests {
                 collections::ORDERS,
                 "order_nopay",
                 json!({
-                    "orderStatus": "PENDING_PAYMENT",
+                    fields::ORDER_STATUS: "pending",
                     "userId": "buyer_1",
-                    fields::PAYMENT_STATUS: "PENDING",
-                    "stockRestored": true,
+                    fields::PAYMENT_STATUS: "awaiting_payment",
+                    fields::STOCK_RESTORED: true,
                     fields::ITEMS: [{
                         fields::PRODUCT_ID: "prod_1",
-                        fields::SELLER_ID: "seller_1",
-                        "quantity": 1,
-                        "isDigital": false
+                        db_fields::SELLER_ID: "seller_1",
+                        fields::QUANTITY: 1,
+                        fields::IS_DIGITAL: false
                     }]
                 }),
             )
@@ -2440,6 +2774,7 @@ mod tests {
 
         let Json(resp) = cancel_order(
             State(state.clone()),
+            Extension(auth("buyer_1", &["buyer"])),
             Json(CancelOrderRequest {
                 order_id: "order_nopay".into(),
                 user_id: "buyer_1".into(),
@@ -2463,7 +2798,7 @@ mod tests {
             .upsert_document(
                 collections::PRODUCTS,
                 "phys_1",
-                json!({ fields::PRODUCT_ID: "phys_1", "stockQuantity": 5 }),
+                json!({ fields::PRODUCT_ID: "phys_1", fields::STOCK_QUANTITY: 5 }),
             )
             .await
             .unwrap();
@@ -2473,22 +2808,22 @@ mod tests {
                 collections::ORDERS,
                 "order_dig_cancel",
                 json!({
-                    "orderStatus": "PENDING_PAYMENT",
+                    fields::ORDER_STATUS: "pending",
                     "userId": "buyer_1",
-                    fields::PAYMENT_STATUS: "PENDING",
-                    "stockRestored": false,
+                    fields::PAYMENT_STATUS: "awaiting_payment",
+                    fields::STOCK_RESTORED: false,
                     fields::ITEMS: [
                         {
                             fields::PRODUCT_ID: "dig_1",
-                            fields::SELLER_ID: "seller_1",
-                            "quantity": 1,
-                            "isDigital": true
+                            db_fields::SELLER_ID: "seller_1",
+                            fields::QUANTITY: 1,
+                            fields::IS_DIGITAL: true
                         },
                         {
                             fields::PRODUCT_ID: "phys_1",
-                            fields::SELLER_ID: "seller_1",
-                            "quantity": 3,
-                            "isDigital": false
+                            db_fields::SELLER_ID: "seller_1",
+                            fields::QUANTITY: 3,
+                            fields::IS_DIGITAL: false
                         }
                     ]
                 }),
@@ -2498,6 +2833,7 @@ mod tests {
 
         let Json(resp) = cancel_order(
             State(state.clone()),
+            Extension(auth("buyer_1", &["buyer"])),
             Json(CancelOrderRequest {
                 order_id: "order_dig_cancel".into(),
                 user_id: "buyer_1".into(),
@@ -2513,6 +2849,6 @@ mod tests {
             .get_document(collections::PRODUCTS, "phys_1")
             .await
             .unwrap();
-        assert_eq!(product["stockQuantity"], 8); // 5 + 3
+        assert_eq!(product[fields::STOCK_QUANTITY], 8); // 5 + 3
     }
 }

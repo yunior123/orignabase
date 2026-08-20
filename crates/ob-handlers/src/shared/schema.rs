@@ -56,6 +56,10 @@ pub mod collections {
     pub const PLATFORM_DEBT: &str = "platform_debt";
     pub const MESSAGE_REPORTS: &str = "message_reports";
     pub const DISPUTES: &str = "disputes";
+    pub const PRODUCT_RECOMMENDATIONS: &str = "product_recommendations";
+    pub const USER_RECOMMENDATIONS: &str = "user_recommendations";
+    pub const PENDING_NOTIFICATIONS: &str = "_pending_notifications";
+    pub const PUSH_TOKENS: &str = "_push_tokens";
 }
 
 pub mod documents {
@@ -70,7 +74,7 @@ pub const APP_NAME: &str = "Origna Marketplace";
 pub const COUNTRY_CANADA: &str = "Canada";
 
 pub mod email_config {
-    pub const SUPPORT_EMAIL: &str = "support@orignaventures.ca";
+    pub const SUPPORT_EMAIL: &str = "support@orignagta.ca";
     pub const SENDER_NAME: &str = "Origna GTA";
     pub const SENDER_NAME_SECURITY: &str = "Origna GTA Security";
     pub const COPYRIGHT_TEXT: &str = "\u{00a9} 2026 Origna Ventures Inc. All rights reserved.";
@@ -78,7 +82,7 @@ pub mod email_config {
     pub const URL_PROD: &str = "https://orignagta.ca";
     pub const URL_STAGING: &str = "https://orignagta-staging.web.app";
     pub const URL_DEV: &str = "https://orignagta-dev.web.app";
-    pub const MAILJET_API_VERSION: &str = "v3.1";
+    pub const POSTAL_API_URL: &str = "https://mail.orignagta.ca/api/v1/send/message";
     pub const PHYSICAL_ADDRESS: &str =
         "Origna Ventures Inc., 136 Shaver Ave N, Toronto, ON M9B 4N8, Canada";
     pub const GST_HST_NUMBER: &str = "708286364RC0001";
@@ -108,13 +112,12 @@ pub mod app_config {
         "https://orignagta.ca",
         "https://www.orignagta.ca",
         "https://orignagta.web.app",
-        "https://orignagta.firebaseapp.com",
         "https://orignagta-dev.web.app",
-        "https://orignagta-dev.firebaseapp.com",
         "https://dev.orignagta.ca",
         "https://orignagta-staging.web.app",
-        "https://orignagta-staging.firebaseapp.com",
         "https://staging.orignagta.ca",
+        "https://orignaventures.ca",
+        "https://www.orignaventures.ca",
         "http://localhost:5005",
         "http://localhost:5001",
     ];
@@ -134,16 +137,20 @@ pub mod external_urls {
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "snake_case")]
 pub enum OrderStatus {
+    #[serde(rename = "pending")]
     PendingPayment,
+    #[serde(rename = "confirmed")]
     PaymentAuthorized,
     AwaitingShippingApproval,
     Processing,
     Shipped,
     Delivered,
+    InTransit,
     Cancelled,
     Refunded,
+    PartiallyRefunded,
     Disputed,
     Expired,
     Failed,
@@ -157,22 +164,24 @@ pub enum OrderStatus {
 impl OrderStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::PendingPayment => "PENDING_PAYMENT",
-            Self::PaymentAuthorized => "PAYMENT_AUTHORIZED",
-            Self::AwaitingShippingApproval => "AWAITING_SHIPPING_APPROVAL",
-            Self::Processing => "PROCESSING",
-            Self::Shipped => "SHIPPED",
-            Self::Delivered => "DELIVERED",
-            Self::Cancelled => "CANCELLED",
-            Self::Refunded => "REFUNDED",
-            Self::Disputed => "DISPUTED",
-            Self::Expired => "EXPIRED",
-            Self::Failed => "FAILED",
-            Self::ReturnRequested => "RETURN_REQUESTED",
-            Self::ReturnApproved => "RETURN_APPROVED",
-            Self::ReturnRejected => "RETURN_REJECTED",
-            Self::Returned => "RETURNED",
-            Self::Archived => "ARCHIVED",
+            Self::PendingPayment => "pending",
+            Self::PaymentAuthorized => "confirmed",
+            Self::AwaitingShippingApproval => "awaiting_shipping_approval",
+            Self::Processing => "processing",
+            Self::Shipped => "shipped",
+            Self::InTransit => "in_transit",
+            Self::Delivered => "delivered",
+            Self::Cancelled => "cancelled",
+            Self::Refunded => "refunded",
+            Self::PartiallyRefunded => "partially_refunded",
+            Self::Disputed => "disputed",
+            Self::Expired => "expired",
+            Self::Failed => "failed",
+            Self::ReturnRequested => "return_requested",
+            Self::ReturnApproved => "return_approved",
+            Self::ReturnRejected => "return_rejected",
+            Self::Returned => "returned",
+            Self::Archived => "archived",
         }
     }
 
@@ -180,19 +189,28 @@ impl OrderStatus {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Self::Delivered | Self::Cancelled | Self::Expired | Self::Failed | Self::Disputed
+            Self::Delivered
+                | Self::Cancelled
+                | Self::Expired
+                | Self::Failed
+                | Self::Disputed
+                | Self::Refunded
+                | Self::PartiallyRefunded
         )
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "snake_case")]
 pub enum PaymentStatus {
+    #[serde(rename = "awaiting_payment")]
     Pending,
     Authorized,
     Captured,
     Refunded,
+    #[serde(rename = "partially_refunded")]
     PartialRefund,
+    #[serde(rename = "payment_failed")]
     Failed,
     Cancelled,
     Disputed,
@@ -202,15 +220,15 @@ pub enum PaymentStatus {
 impl PaymentStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Pending => "PENDING",
-            Self::Authorized => "AUTHORIZED",
-            Self::Captured => "CAPTURED",
-            Self::Refunded => "REFUNDED",
-            Self::PartialRefund => "PARTIAL_REFUND",
-            Self::Failed => "FAILED",
-            Self::Cancelled => "CANCELLED",
-            Self::Disputed => "DISPUTED",
-            Self::Expired => "EXPIRED",
+            Self::Pending => "awaiting_payment",
+            Self::Authorized => "authorized",
+            Self::Captured => "captured",
+            Self::Refunded => "refunded",
+            Self::PartialRefund => "partially_refunded",
+            Self::Failed => "payment_failed",
+            Self::Cancelled => "cancelled",
+            Self::Disputed => "disputed",
+            Self::Expired => "expired",
         }
     }
 }
@@ -290,6 +308,66 @@ pub enum ProvinceCode {
 }
 
 // =============================================================================
+// LIFECYCLE STATUS VALUES
+// =============================================================================
+
+pub mod lifecycle_status {
+    pub const DRAFT: &str = "draft";
+    pub const ACTIVE: &str = "active";
+    pub const INACTIVE: &str = "inactive";
+    pub const DELETED: &str = "deleted";
+
+    pub const ALL: &[&str] = &[DRAFT, ACTIVE, INACTIVE, DELETED];
+}
+
+// =============================================================================
+// RETURN REQUEST STATUS VALUES
+// =============================================================================
+
+pub mod return_request_status {
+    pub const REQUESTED: &str = "requested";
+    pub const APPROVED: &str = "approved";
+    pub const REJECTED: &str = "rejected";
+    pub const LABEL_ISSUED: &str = "label_issued";
+    pub const RECEIVED: &str = "received";
+    pub const REFUNDED: &str = "refunded";
+    pub const COMPLETED: &str = "completed";
+    pub const ESCALATED: &str = "escalated";
+}
+
+/// Return request action values
+pub mod return_actions {
+    pub const APPROVE: &str = "approve";
+    pub const ISSUE_LABEL: &str = "issue_label";
+    pub const MARK_RECEIVED: &str = "mark_received";
+    pub const REJECT: &str = "reject";
+    pub const ESCALATE: &str = "escalate";
+}
+
+// =============================================================================
+// DELIVERY ITEM STATUS VALUES
+// =============================================================================
+// DELIVERY ITEM STATUS VALUES
+// =============================================================================
+
+pub mod delivery_status {
+    pub const PENDING: &str = "pending";
+    pub const SHIPPED: &str = "shipped";
+    pub const DELIVERED: &str = "delivered";
+    pub const REFUNDED: &str = "refunded";
+}
+
+// =============================================================================
+// PAYOUT STATUS VALUES
+// =============================================================================
+
+pub mod payout_status {
+    pub const PROCESSING: &str = "processing";
+    pub const FAILED: &str = "failed";
+    pub const COMPLETED: &str = "completed";
+}
+
+// =============================================================================
 // FIELD NAMES - Database document field names
 // =============================================================================
 
@@ -297,13 +375,21 @@ pub mod fields {
     // Common timestamps
     pub const SAVED_AT: &str = "savedAt";
     pub const CREATED_AT: &str = "createdAt";
+    pub const DATE_CREATED: &str = "dateCreated";
     pub const UPDATED_AT: &str = "updatedAt";
     pub const VERSION: &str = "version";
     pub const DELETED_AT: &str = "deletedAt";
     pub const DELETED_BY: &str = "deletedBy";
     pub const DELETED: &str = "deleted";
 
+    // Common record fields
+    pub const ID: &str = "id";
+
+    // Common / misc fields
+    pub const ACTION: &str = "action";
+
     // User fields
+    pub const USER_ID: &str = "userId";
     pub const UID: &str = "uid";
     pub const EMAIL: &str = "email";
     pub const NAME: &str = "name";
@@ -323,38 +409,53 @@ pub mod fields {
     pub const COMMISSION_RATE_BPS: &str = "commissionRateBps";
     pub const MFA_ENABLED: &str = "mfaEnabled";
     pub const EMAIL_CONSENT: &str = "emailConsent";
-    pub const LANGUAGE: &str = "language";
+    pub const LANGUAGE: &str = "preferredLanguage";
     pub const IS_PREMIUM: &str = "isPremium";
+    pub const DISPLAY_NAME: &str = "displayName";
+    pub const PHONE_NUMBER: &str = "phoneNumber";
+    pub const FIRST_NAME: &str = "firstName";
+    pub const LAST_NAME: &str = "lastName";
+    pub const BUSINESS_NAME: &str = "businessName";
+    pub const STORE_NAME: &str = "storeName";
+    pub const PRICE: &str = "price";
 
     // Product fields
     pub const PRODUCT_ID: &str = "productId";
+    pub const PRODUCT_IDS: &str = "productIds";
     pub const SELLER_ID: &str = "sellerId";
     pub const BUYER_ID: &str = "buyerId";
-    pub const TITLE: &str = "title";
+    pub const TITLE: &str = "name";
     pub const DESCRIPTION: &str = "description";
     pub const PRICE_CENTS: &str = "priceCents";
     pub const STOCK_QUANTITY: &str = "stockQuantity";
     pub const IMAGE_URLS: &str = "imageUrls";
-    pub const CATEGORY: &str = "category";
+    pub const IMAGE_URL: &str = "imageUrl";
+    pub const CATEGORY: &str = "categoryId";
     pub const IS_ACTIVE: &str = "isActive";
     pub const LIFECYCLE_STATUS: &str = "lifecycleStatus";
     pub const AVG_RATING: &str = "avgRating";
     pub const TOTAL_REVIEWS: &str = "totalReviews";
     pub const IS_PERISHABLE: &str = "isPerishable";
+    pub const IS_AGE_RESTRICTED: &str = "isAgeRestricted";
 
     // Order fields
     pub const ORDER_ID: &str = "orderId";
     pub const ORDER_STATUS: &str = "orderStatus";
     pub const RETURN_STATUS: &str = "returnStatus";
+    pub const RETURN_ID: &str = "returnId";
+    pub const RETURN_REASON: &str = "returnReason";
+    pub const RETURN_TRACKING_NUMBER: &str = "returnTrackingNumber";
+    pub const RETURN_ADMIN_NOTE: &str = "returnAdminNote";
+    pub const RETURN_REFUND_AMOUNT_CENTS: &str = "returnRefundAmountCents";
     pub const STATUS: &str = "status";
     pub const ITEMS: &str = "items";
     pub const TOTAL_AMOUNT_CENTS: &str = "totalAmountCents";
     pub const SUBTOTAL_CENTS: &str = "subtotalCents";
     pub const TAX_AMOUNT_CENTS: &str = "taxAmountCents";
     pub const SHIPPING_COST_CENTS: &str = "shippingCostCents";
-    pub const PLATFORM_FEE_CENTS: &str = "platformFeeCents";
+    pub const PLATFORM_FEE_CENTS: &str = "platformFeeTotalCents";
     pub const PAYMENT_INTENT_ID: &str = "paymentIntentId";
-    pub const CHECKOUT_SESSION_ID: &str = "checkoutSessionId";
+    pub const CHECKOUT_SESSION_ID: &str = "stripeSessionId";
     pub const PAYMENT_STATUS: &str = "paymentStatus";
     pub const CUMULATIVE_REFUNDED_CENTS: &str = "cumulativeRefundedCents";
     pub const PARTIAL_REFUND_AMOUNT_CENTS: &str = "partialRefundAmountCents";
@@ -368,6 +469,13 @@ pub mod fields {
     pub const SHIPPING_ADDRESS: &str = "shippingAddress";
     pub const TRACKING_NUMBER: &str = "trackingNumber";
     pub const SHIPPING_CARRIER: &str = "shippingCarrier";
+    pub const ITEM_SHIPPING_CENTS: &str = "itemShippingCents";
+
+    // Product Q&A fields
+    pub const QUESTION_ID: &str = "questionId";
+    pub const QUESTION_TEXT: &str = "questionText";
+    pub const ANSWER_TEXT: &str = "answerText";
+    pub const ANSWERED_AT: &str = "answeredAt";
 
     // Subscription fields
     pub const SUBSCRIPTION_ID: &str = "subscriptionId";
@@ -380,10 +488,22 @@ pub mod fields {
     pub const PARTICIPANTS: &str = "participants";
     pub const LAST_MESSAGE: &str = "lastMessage";
     pub const LAST_MESSAGE_AT: &str = "lastMessageAt";
-    pub const UNREAD_COUNT: &str = "unreadCount";
-    pub const MESSAGE_TEXT: &str = "messageText";
+    pub const BUYER_UNREAD_COUNT: &str = "buyerUnreadCount";
+    pub const SELLER_UNREAD_COUNT: &str = "sellerUnreadCount";
+    pub const MESSAGE_TEXT: &str = "text";
     pub const SENDER_ID: &str = "senderId";
     pub const READ: &str = "read";
+    pub const PRODUCT_TITLE: &str = "productTitle";
+    pub const PRODUCT_IMAGE_URL: &str = "productImageUrl";
+    pub const MESSAGE_COUNT: &str = "messageCount";
+    pub const LAST_MESSAGE_TEXT: &str = "lastMessageText";
+    pub const SENDER_DISPLAY_NAME: &str = "senderDisplayName";
+    pub const FIRST_BUYER_MESSAGE_AT: &str = "firstBuyerMessageAt";
+    pub const FIRST_SELLER_REPLY_AT: &str = "firstSellerReplyAt";
+    pub const FIRST_REPLY_HOURS: &str = "firstReplyHours";
+    pub const MESSAGE_ID: &str = "messageId";
+    pub const REPORTER_ID: &str = "reporterId";
+    pub const REPORT_ID: &str = "reportId";
 
     // Rating fields
     pub const RATING: &str = "rating";
@@ -391,13 +511,40 @@ pub mod fields {
     pub const HELPFUL_COUNT: &str = "helpfulCount";
 
     // Coupon fields
+    pub const COUPON_ID: &str = "couponId";
     pub const CODE: &str = "code";
     pub const COUPON_TYPE: &str = "couponType";
+    pub const DISCOUNT_TYPE: &str = "discountType";
+    pub const COUPON_CODE: &str = "couponCode";
+    pub const IDEMPOTENCY_KEY: &str = "idempotencyKey";
     pub const DISCOUNT_VALUE: &str = "discountValue";
     pub const MIN_ORDER_CENTS: &str = "minOrderCents";
-    pub const MAX_USES: &str = "maxUses";
+    pub const MAX_USES: &str = "maxUsesTotal";
     pub const USED_COUNT: &str = "usedCount";
     pub const EXPIRES_AT: &str = "expiresAt";
+    pub const REDEEMED_AT: &str = "redeemedAt";
+    pub const MAX_USES_PER_USER: &str = "maxUsesPerUser";
+    pub const CREATED_BY_ADMIN_ID: &str = "createdByAdminId";
+
+    // Item / product detail fields
+    pub const IS_DIGITAL: &str = "isDigital";
+    pub const PRODUCT_TYPE: &str = "productType";
+    pub const DELIVERY_SPEED: &str = "deliverySpeed";
+    pub const QUANTITY: &str = "quantity";
+    pub const DELIVERED_AT: &str = "deliveredAt";
+    pub const REFUNDED_AT: &str = "refundedAt";
+    pub const RESOLVED_AT: &str = "resolvedAt";
+    pub const REFUND_REASON: &str = "refundReason";
+    pub const REFUND_AMOUNT_CENTS: &str = "refundAmountCents";
+    pub const REFUND_ID: &str = "refundId";
+    pub const DISCOUNT_AMOUNT_CENTS: &str = "discountAmountCents";
+    pub const FULFILLMENT_WAREHOUSE_ID: &str = "fulfillmentWarehouseId";
+    pub const REQUESTED_AT: &str = "requestedAt";
+    pub const UNIT_PRICE_CENTS: &str = "unitPriceCents";
+    pub const SHIP_FROM_PROVINCE: &str = "shipFromProvince";
+    pub const SHIP_FROM_COUNTRY: &str = "shipFromCountry";
+    pub const IS_LOCAL_DELIVERY_ONLY: &str = "isLocalDeliveryOnly";
+    pub const DOWNLOAD_URL: &str = "downloadUrl";
 
     // License fields
     pub const LICENSE_KEY: &str = "licenseKey";
@@ -409,7 +556,7 @@ pub mod fields {
     pub const LABEL: &str = "label";
     pub const STREET: &str = "street";
     pub const CITY: &str = "city";
-    pub const PROVINCE: &str = "province";
+    pub const PROVINCE: &str = "state";
     pub const POSTAL_CODE: &str = "postalCode";
     pub const COUNTRY: &str = "country";
     pub const APARTMENT: &str = "apartment";
@@ -422,6 +569,351 @@ pub mod fields {
     pub const TOKEN: &str = "token";
     pub const PLATFORM: &str = "platform";
     pub const NOTIFICATION_TYPE: &str = "notificationType";
+
+    // Food & Nutrition fields
+    pub const NUTRITION_FACTS: &str = "nutritionFacts";
+    pub const FOOD_METADATA: &str = "foodMetadata";
+    pub const INGREDIENTS_EN: &str = "ingredientsEn";
+    pub const INGREDIENTS_FR: &str = "ingredientsFr";
+    pub const ALLERGENS: &str = "allergens";
+    pub const MAY_CONTAIN_ALLERGENS: &str = "mayContainAllergens";
+    pub const STORAGE_INSTRUCTIONS_EN: &str = "storageInstructionsEn";
+    pub const STORAGE_INSTRUCTIONS_FR: &str = "storageInstructionsFr";
+    pub const BEST_BEFORE_DAYS: &str = "bestBeforeDays";
+    pub const DIETARY_BADGES: &str = "dietaryBadges";
+    pub const SERVING_SIZE_AMOUNT: &str = "servingSizeAmount";
+    pub const SERVING_SIZE_UNIT: &str = "servingSizeUnit";
+    pub const SERVINGS_PER_CONTAINER: &str = "servingsPerContainer";
+    pub const CALORIES_KCAL: &str = "caloriesKcal";
+    pub const TOTAL_FAT_MG: &str = "totalFatMg";
+    pub const SATURATED_FAT_MG: &str = "saturatedFatMg";
+    pub const TRANS_FAT_MG: &str = "transFatMg";
+    pub const CHOLESTEROL_MG: &str = "cholesterolMg";
+    pub const SODIUM_MG: &str = "sodiumMg";
+    pub const TOTAL_CARBOHYDRATE_MG: &str = "totalCarbohydrateMg";
+    pub const FIBRE_MG: &str = "fibreMg";
+    pub const SUGARS_MG: &str = "sugarsMg";
+    pub const ADDED_SUGARS_MG: &str = "addedSugarsMg";
+    pub const PROTEIN_MG: &str = "proteinMg";
+    pub const VITAMIN_A_MCG: &str = "vitaminAMcg";
+    pub const VITAMIN_C_MG: &str = "vitaminCMg";
+    pub const CALCIUM_MG: &str = "calciumMg";
+    pub const IRON_MG: &str = "ironMg";
+    pub const POTASSIUM_MG: &str = "potassiumMg";
+    pub const VITAMIN_D_MCG: &str = "vitaminDMcg";
+    pub const FOP_HIGH_SODIUM: &str = "fopHighSodium";
+    pub const FOP_HIGH_SUGARS: &str = "fopHighSugars";
+    pub const FOP_HIGH_SATURATED_FAT: &str = "fopHighSaturatedFat";
+
+    // Product Specifications fields
+    pub const SPECS: &str = "specs";
+    pub const SPEC_KEY: &str = "key";
+    pub const SPEC_VALUE: &str = "value";
+    pub const SPEC_VALUE_TYPE: &str = "valueType";
+    pub const SPEC_UNIT: &str = "unit";
+    pub const SPEC_GROUP: &str = "group";
+    pub const SPEC_BRAND: &str = "brand";
+    pub const SPEC_COLOR: &str = "color";
+    pub const SPEC_MATERIAL: &str = "material";
+
+    // Product Recommendations fields
+    pub const BUNDLED_PRODUCT_IDS: &str = "bundledProductIds";
+    pub const RECOMMENDATIONS: &str = "recommendations";
+    pub const RECOMMENDATION_TYPE: &str = "recommendationType";
+    pub const SCORE: &str = "score";
+
+    // Cron-specific fields
+    pub const LOCKED_AT: &str = "lockedAt";
+    pub const LOCKED_BY: &str = "lockedBy";
+    pub const COMPLETED_AT: &str = "completedAt";
+    pub const JOB_NAME: &str = "jobName";
+    pub const ERROR_MESSAGE: &str = "errorMessage";
+    pub const RESOLVED: &str = "resolved";
+    pub const LAST_LOW_STOCK_ALERT_AT: &str = "lastLowStockAlertAt";
+    pub const LAST_CART_ABANDON_EMAIL_AT: &str = "lastCartAbandonEmailAt";
+    pub const IS_TRENDING: &str = "isTrending";
+    pub const MARKETING_OPT_IN: &str = "marketingOptIn";
+    pub const PAYOUT_STATUS: &str = "payoutStatus";
+    pub const PAYOUT_DATE: &str = "payoutDate";
+    pub const PAYOUT_ID: &str = "payoutId";
+    pub const FAILURE_CODE: &str = "failureCode";
+    pub const FAILURE_MESSAGE: &str = "failureMessage";
+    pub const COMPUTED_AT: &str = "computedAt";
+    pub const TRENDING_SCORE: &str = "trendingScore";
+    pub const TRENDING_AT: &str = "trendingAt";
+    pub const FAVORITE_COUNT: &str = "favoriteCount";
+    pub const VIEW_COUNT: &str = "viewCount";
+    pub const PURCHASE_COUNT: &str = "purchaseCount";
+    pub const PREMIUM_SINCE: &str = "premiumSince";
+    pub const PREMIUM_EXPIRES_AT: &str = "premiumExpiresAt";
+    pub const DISPUTE_RATE: &str = "disputeRate";
+    pub const REFUND_RATE: &str = "refundRate";
+    pub const CANCELLATION_RATE: &str = "cancellationRate";
+    pub const HAS_DISPUTE: &str = "hasDispute";
+    pub const NET_AMOUNT_CENTS: &str = "netAmountCents";
+    pub const AMOUNT_CENTS: &str = "amountCents";
+    pub const REFUNDED_AMOUNT_CENTS: &str = "refundedAmountCents";
+    pub const STOCK_RESTORED: &str = "stockRestored";
+    pub const ESCALATED_AT: &str = "escalatedAt";
+    pub const ESCALATION_REASON: &str = "escalationReason";
+    pub const LOW_STOCK_THRESHOLD: &str = "lowStockThreshold";
+    pub const TRACK_QUANTITY: &str = "trackQuantity";
+    pub const CANCEL_AT_PERIOD_END: &str = "cancelAtPeriodEnd";
+    pub const STRIPE_TRANSFER_ID: &str = "stripeTransferId";
+    pub const AUTO_CAPTURED: &str = "autoCaptured";
+    pub const MAX_RETRIES_EXCEEDED: &str = "maxRetriesExceeded";
+    pub const RETRY_COUNT: &str = "retryCount";
+    pub const EVENT_TYPE: &str = "eventType";
+    pub const FAILURE_REASON: &str = "failureReason";
+    pub const LAST_CHECKOUT_SESSION: &str = "lastCheckoutSession";
+    pub const LAST_CHECKOUT_TIMESTAMP: &str = "lastCheckoutTimestamp";
+    pub const ARCHIVED: &str = "archived";
+    pub const ARCHIVED_AT: &str = "archivedAt";
+    pub const CANCELLED_BY: &str = "cancelledBy";
+    pub const REQUIRES_MANUAL_REVIEW: &str = "requiresManualReview";
+    pub const BENEFITS_ACTIVE_AT: &str = "benefitsActiveAt";
+    pub const EARLY_CANCEL_COUNT: &str = "earlyCancelCount";
+    pub const CANCELS_AT: &str = "cancelsAt";
+    pub const SHIPPED_AT: &str = "shippedAt";
+    pub const CANCELLED_AT: &str = "cancelledAt";
+
+    // Legal / Consent fields
+    pub const TAX_EXEMPTION: &str = "taxExemption";
+    pub const TERMS_VERSION: &str = "termsVersion";
+    pub const PRIVACY_POLICY_VERSION: &str = "privacyPolicyVersion";
+    pub const CONSENT_TIMESTAMP: &str = "consentTimestamp";
+    pub const CONSENT_METHOD: &str = "consentMethod";
+    pub const DATA_PROCESSING_CONSENT: &str = "dataProcessingConsent";
+    pub const TERMS_ACCEPTED_AT: &str = "termsAcceptedAt";
+    pub const GST_NUMBER: &str = "gstNumber";
+    pub const PRIVACY_ACCEPTED_AT: &str = "privacyAcceptedAt";
+    pub const PUSH_ENABLED: &str = "pushEnabled";
+    pub const SUSPEND_REASON: &str = "suspendReason";
+
+    // Notification fields
+    pub const NOTIFICATION_TITLE: &str = "title";
+    pub const NOTIFICATION_BODY: &str = "body";
+    pub const NOTIFY_NEW_PRODUCTS: &str = "notifyNewProducts";
+    pub const NOTIFY_TRENDING: &str = "notifyTrending";
+
+    // Webhook event fields
+    pub const TYPE: &str = "type";
+    pub const TIMESTAMP: &str = "timestamp";
+    pub const TIMESTAMP_ISO: &str = "timestamp_iso";
+    pub const PROCESSED: &str = "processed";
+    pub const DATA: &str = "data";
+    pub const CREATED_AT_ISO: &str = "createdAtIso";
+
+    // Dispute fields
+    pub const DISPUTE_ID: &str = "disputeId";
+    pub const DISPUTE_STATUS: &str = "disputeStatus";
+    pub const CHARGE_ID: &str = "chargeId";
+    pub const REASON: &str = "reason";
+    pub const CURRENCY: &str = "currency";
+    pub const CLOSED_AT: &str = "closedAt";
+    pub const STRIPE_STATUS: &str = "stripeStatus";
+
+    // Payout lifecycle fields
+    pub const ARRIVAL_DATE: &str = "arrivalDate";
+    pub const PAYOUT_METHOD: &str = "payoutMethod";
+    pub const STRIPE_PAYOUT_STATUS: &str = "stripePayoutStatus";
+    pub const PAYOUT_COMPLETED_AT: &str = "payoutCompletedAt";
+
+    // Refund lifecycle fields
+    pub const STRIPE_REFUND_ID: &str = "stripeRefundId";
+    pub const STRIPE_REFUND_STATUS: &str = "stripeRefundStatus";
+    pub const REFUND_FAILURE_REASON: &str = "refundFailureReason";
+
+    // Dispute fund movement fields
+    pub const FUNDS_WITHDRAWN: &str = "fundsWithdrawn";
+    pub const FUNDS_WITHDRAWN_AT: &str = "fundsWithdrawnAt";
+    pub const FUNDS_REINSTATED: &str = "fundsReinstated";
+    pub const FUNDS_REINSTATED_AT: &str = "fundsReinstatedAt";
+    pub const BALANCE_TRANSACTION: &str = "balanceTransaction";
+
+    // Payout notification fields (MESSAGE kept for backward compat / other uses)
+    pub const MESSAGE: &str = "message";
+
+    // Mail log fields
+    pub const SENT_AT: &str = "sentAt";
+    pub const ERROR: &str = "error";
+
+    // Pending notification fields
+    pub const PENDING_SENT_AT: &str = "sent_at";
+    pub const PENDING_UPDATED_AT: &str = "updated_at";
+
+    // Order confirmation fields
+    pub const CONFIRMED_BY_CLIENT: &str = "confirmedByClient";
+    pub const AUTO_CONFIRMED: &str = "autoConfirmed";
+
+    // Address management fields
+    pub const DEFAULT_ADDRESS_ID: &str = "defaultAddressId";
+
+    // Digital product fields
+    pub const ACTIVATIONS: &str = "activations";
+    pub const ACTIVATED_AT: &str = "activatedAt";
+    pub const LAST_VERIFIED_AT: &str = "lastVerifiedAt";
+    pub const PRODUCT_NAME: &str = "productName";
+    pub const DEVICE_LIMIT: &str = "deviceLimit";
+    pub const DIGITAL_TYPE: &str = "digitalType";
+    pub const ACCESS_TOKEN: &str = "accessToken";
+    pub const BOOK_SOURCE_URL: &str = "bookSourceUrl";
+    pub const SOFTWARE_SOURCE_URL: &str = "softwareSourceUrl";
+    pub const USED: &str = "used";
+
+    // Notification / push fields (pending)
+    pub const NOTIFICATION_ID: &str = "notificationId";
+    pub const ATTEMPTS: &str = "attempts";
+    pub const DELIVERED_AT_PENDING: &str = "delivered_at";
+
+    // Item / batch fields
+    pub const ITEM_IDS: &str = "itemIds";
+    pub const VARIANT_KEY: &str = "variantKey";
+
+    // Seller metrics fields
+    pub const TOTAL_ITEMS_30D: &str = "totalItems30d";
+    pub const BREACHES: &str = "breaches";
+    pub const SEVERITY: &str = "severity";
+
+    // Stock notification fields
+    pub const NOTIFIED_AT: &str = "notifiedAt";
+
+    // Pending notification fields
+    pub const PENDING_CREATED_AT: &str = "created_at";
+    pub const PENDING_NOTIFICATION_TYPE: &str = "notification_type";
+
+    // Review fields
+    pub const REVIEW_IMAGE_URLS: &str = "reviewImageUrls";
+    pub const VERIFIED_PURCHASE: &str = "verifiedPurchase";
+    pub const REVIEW_ID: &str = "reviewId";
+    pub const VOTE: &str = "vote";
+    pub const HELPFUL_VOTES: &str = "helpfulVotes";
+    pub const UNHELPFUL_VOTES: &str = "unhelpfulVotes";
+    pub const SELLER_RESPONSE: &str = "sellerResponse";
+    pub const SELLER_RESPONDED_AT: &str = "sellerRespondedAt";
+
+    // Subcollection / parent fields
+    pub const PARENT_ID: &str = "parent_id";
+    pub const PARENT_COLLECTION: &str = "parent_collection";
+    pub const WAREHOUSE_ID: &str = "warehouseId";
+}
+
+// =============================================================================
+// FOOD & NUTRITION — Allergens, Dietary Badges, FOP Thresholds, Daily Values
+// =============================================================================
+
+/// Canada's 11 priority allergen categories (Health Canada / CFIA).
+pub mod allergen_values {
+    pub const EGGS: &str = "eggs";
+    pub const MILK: &str = "milk";
+    pub const MUSTARD: &str = "mustard";
+    pub const PEANUTS: &str = "peanuts";
+    pub const CRUSTACEANS: &str = "crustaceans";
+    pub const FISH: &str = "fish";
+    pub const SESAME: &str = "sesame";
+    pub const SOY: &str = "soy";
+    pub const SULPHITES: &str = "sulphites";
+    pub const TREE_NUTS: &str = "tree_nuts";
+    pub const WHEAT: &str = "wheat";
+
+    pub const ALL: &[&str] = &[
+        EGGS,
+        MILK,
+        MUSTARD,
+        PEANUTS,
+        CRUSTACEANS,
+        FISH,
+        SESAME,
+        SOY,
+        SULPHITES,
+        TREE_NUTS,
+        WHEAT,
+    ];
+}
+
+/// Dietary badge values for food product labeling.
+pub mod dietary_badge_values {
+    pub const ORGANIC: &str = "organic";
+    pub const VEGAN: &str = "vegan";
+    pub const VEGETARIAN: &str = "vegetarian";
+    pub const HALAL: &str = "halal";
+    pub const KOSHER: &str = "kosher";
+    pub const GLUTEN_FREE: &str = "gluten_free";
+    pub const NON_GMO: &str = "non_gmo";
+    pub const DAIRY_FREE: &str = "dairy_free";
+    pub const NUT_FREE: &str = "nut_free";
+    pub const SUGAR_FREE: &str = "sugar_free";
+
+    pub const ALL: &[&str] = &[
+        ORGANIC,
+        VEGAN,
+        VEGETARIAN,
+        HALAL,
+        KOSHER,
+        GLUTEN_FREE,
+        NON_GMO,
+        DAIRY_FREE,
+        NUT_FREE,
+        SUGAR_FREE,
+    ];
+}
+
+/// Health Canada Front-of-Package "High In" thresholds (15% DV per serving).
+/// Enforcement began January 1, 2026.
+pub mod fop_thresholds {
+    /// >= 3.0 g saturated fat per serving (3000 mg)
+    pub const SATURATED_FAT_MG_PER_SERVING: i64 = 3000;
+    /// >= 15.0 g sugars per serving (15000 mg)
+    pub const SUGARS_MG_PER_SERVING: i64 = 15000;
+    /// >= 345 mg sodium per serving
+    pub const SODIUM_MG_PER_SERVING: i64 = 345;
+}
+
+/// Health Canada Daily Values for %DV calculation (adults + children >= 4).
+pub mod health_canada_daily_values {
+    /// Fat: 75 g → 75000 mg
+    pub const TOTAL_FAT_MG: i64 = 75000;
+    /// Saturated + Trans fat (combined): 20 g → 20000 mg
+    pub const SATURATED_PLUS_TRANS_FAT_MG: i64 = 20000;
+    /// Cholesterol: 300 mg
+    pub const CHOLESTEROL_MG: i64 = 300;
+    /// Sodium: 2300 mg
+    pub const SODIUM_MG: i64 = 2300;
+    /// Fibre: 28 g → 28000 mg
+    pub const FIBRE_MG: i64 = 28000;
+    /// Sugars: 100 g → 100000 mg
+    pub const SUGARS_MG: i64 = 100000;
+    /// Vitamin A: 900 mcg RAE
+    pub const VITAMIN_A_MCG: i64 = 900;
+    /// Vitamin C: 90 mg
+    pub const VITAMIN_C_MG: i64 = 90;
+    /// Calcium: 1300 mg
+    pub const CALCIUM_MG: i64 = 1300;
+    /// Iron: 18 mg
+    pub const IRON_MG: i64 = 18;
+    /// Potassium: 3400 mg
+    pub const POTASSIUM_MG: i64 = 3400;
+    /// Vitamin D: 20 mcg
+    pub const VITAMIN_D_MCG: i64 = 20;
+}
+
+/// Serving size unit values.
+pub mod serving_size_unit_values {
+    pub const G: &str = "g";
+    pub const ML: &str = "mL";
+}
+
+// =============================================================================
+// PRODUCT SPECIFICATIONS — Value types
+// =============================================================================
+
+/// Spec value types for typed validation and rendering.
+pub mod spec_value_types {
+    pub const TEXT: &str = "text";
+    pub const NUMBER: &str = "number";
+    pub const BOOLEAN: &str = "boolean";
+
+    pub const ALL: &[&str] = &[TEXT, NUMBER, BOOLEAN];
 }
 
 // =============================================================================
@@ -434,13 +926,13 @@ pub mod business_rules {
     /// Platform commission rate in basis points (2.50%).
     pub const DEFAULT_COMMISSION_RATE_BPS: u32 = 250;
     /// Premium subscription price in CAD.
-    pub const PREMIUM_SUBSCRIPTION_PRICE_CAD: f64 = 9.99;
+    pub const PREMIUM_SUBSCRIPTION_PRICE_CAD: f64 = 7.86;
     /// Maximum return window in days.
     pub const RETURN_WINDOW_DAYS: u32 = 30;
     /// Days before auto-archiving delivered/cancelled orders.
     pub const AUTO_ARCHIVE_DAYS: u32 = 30;
     /// Days before payment authorization expires.
-    pub const AUTHORIZATION_EXPIRY_DAYS: u32 = 7;
+    pub const AUTHORIZATION_EXPIRY_DAYS: u32 = 6;
     /// Maximum FCM push notifications per user per day.
     pub const MAX_PUSH_PER_DAY: u32 = 20;
     /// Abandoned cart email threshold in hours.
@@ -580,15 +1072,15 @@ mod tests {
 
     #[test]
     fn test_payment_status_as_str() {
-        assert_eq!(PaymentStatus::Pending.as_str(), "PENDING");
-        assert_eq!(PaymentStatus::Authorized.as_str(), "AUTHORIZED");
-        assert_eq!(PaymentStatus::Captured.as_str(), "CAPTURED");
-        assert_eq!(PaymentStatus::Refunded.as_str(), "REFUNDED");
-        assert_eq!(PaymentStatus::PartialRefund.as_str(), "PARTIAL_REFUND");
-        assert_eq!(PaymentStatus::Failed.as_str(), "FAILED");
-        assert_eq!(PaymentStatus::Cancelled.as_str(), "CANCELLED");
-        assert_eq!(PaymentStatus::Disputed.as_str(), "DISPUTED");
-        assert_eq!(PaymentStatus::Expired.as_str(), "EXPIRED");
+        assert_eq!(PaymentStatus::Pending.as_str(), "awaiting_payment");
+        assert_eq!(PaymentStatus::Authorized.as_str(), "authorized");
+        assert_eq!(PaymentStatus::Captured.as_str(), "captured");
+        assert_eq!(PaymentStatus::Refunded.as_str(), "refunded");
+        assert_eq!(PaymentStatus::PartialRefund.as_str(), "partially_refunded");
+        assert_eq!(PaymentStatus::Failed.as_str(), "payment_failed");
+        assert_eq!(PaymentStatus::Cancelled.as_str(), "cancelled");
+        assert_eq!(PaymentStatus::Disputed.as_str(), "disputed");
+        assert_eq!(PaymentStatus::Expired.as_str(), "expired");
     }
 
     #[test]
@@ -676,7 +1168,7 @@ mod tests {
         assert!(!OrderStatus::Shipped.is_terminal());
         assert!(OrderStatus::Delivered.is_terminal());
         assert!(OrderStatus::Cancelled.is_terminal());
-        assert!(!OrderStatus::Refunded.is_terminal());
+        assert!(OrderStatus::Refunded.is_terminal());
         assert!(OrderStatus::Disputed.is_terminal());
         assert!(OrderStatus::Expired.is_terminal());
         assert!(OrderStatus::Failed.is_terminal());
@@ -752,7 +1244,7 @@ mod tests {
         let _ = email_config::URL_PROD;
         let _ = email_config::URL_STAGING;
         let _ = email_config::URL_DEV;
-        let _ = email_config::MAILJET_API_VERSION;
+        let _ = email_config::POSTAL_API_URL;
         let _ = email_config::PHYSICAL_ADDRESS;
         let _ = email_config::GST_HST_NUMBER;
         let _ = email_config::UNSUBSCRIBE_URL_PROD;
@@ -823,6 +1315,7 @@ mod tests {
         let _ = fields::AVG_RATING;
         let _ = fields::TOTAL_REVIEWS;
         let _ = fields::IS_PERISHABLE;
+        let _ = fields::IS_AGE_RESTRICTED;
         let _ = fields::ORDER_ID;
         let _ = fields::ORDER_STATUS;
         let _ = fields::RETURN_STATUS;
@@ -854,7 +1347,8 @@ mod tests {
         let _ = fields::PARTICIPANTS;
         let _ = fields::LAST_MESSAGE;
         let _ = fields::LAST_MESSAGE_AT;
-        let _ = fields::UNREAD_COUNT;
+        let _ = fields::BUYER_UNREAD_COUNT;
+        let _ = fields::SELLER_UNREAD_COUNT;
         let _ = fields::MESSAGE_TEXT;
         let _ = fields::SENDER_ID;
         let _ = fields::READ;
@@ -938,5 +1432,50 @@ mod tests {
         let _ = notification_types::SUBSCRIPTION_RENEWAL;
         let _ = notification_types::SELLER_SUSPENDED;
         let _ = notification_types::ABANDONED_CART;
+    }
+
+    #[test]
+    fn test_lifecycle_status_values() {
+        assert_eq!(lifecycle_status::DRAFT, "draft");
+        assert_eq!(lifecycle_status::ACTIVE, "active");
+        assert_eq!(lifecycle_status::INACTIVE, "inactive");
+        assert_eq!(lifecycle_status::DELETED, "deleted");
+        assert_eq!(lifecycle_status::ALL.len(), 4);
+        assert!(lifecycle_status::ALL.contains(&lifecycle_status::ACTIVE));
+        assert!(!lifecycle_status::ALL.contains(&"nonexistent"));
+    }
+
+    #[test]
+    fn test_field_constants_match_expected_values() {
+        // New constants added for magic string audit
+        assert_eq!(fields::ID, "id");
+        assert_eq!(fields::USER_ID, "userId");
+        assert_eq!(fields::COUPON_ID, "couponId");
+
+        // Core field constants
+        assert_eq!(fields::PRODUCT_ID, "productId");
+        assert_eq!(fields::SELLER_ID, "sellerId");
+        assert_eq!(fields::BUYER_ID, "buyerId");
+        assert_eq!(fields::ORDER_ID, "orderId");
+        assert_eq!(fields::ORDER_STATUS, "orderStatus");
+        assert_eq!(fields::PRICE_CENTS, "priceCents");
+        assert_eq!(fields::SUBTOTAL_CENTS, "subtotalCents");
+        assert_eq!(fields::TOTAL_AMOUNT_CENTS, "totalAmountCents");
+        assert_eq!(fields::TAX_AMOUNT_CENTS, "taxAmountCents");
+        assert_eq!(fields::STATUS, "status");
+        assert_eq!(fields::IS_DIGITAL, "isDigital");
+        assert_eq!(fields::QUANTITY, "quantity");
+        assert_eq!(fields::NAME, "name");
+        assert_eq!(fields::IS_DEFAULT, "isDefault");
+        assert_eq!(fields::PAYMENT_INTENT_ID, "paymentIntentId");
+        assert_eq!(fields::PAYMENT_STATUS, "paymentStatus");
+        assert_eq!(fields::ITEMS, "items");
+        assert_eq!(fields::RETURN_STATUS, "returnStatus");
+        assert_eq!(fields::NOTIFICATION_TYPE, "notificationType");
+        assert_eq!(fields::DELIVERY_SPEED, "deliverySpeed");
+        assert_eq!(fields::FULFILLMENT_WAREHOUSE_ID, "fulfillmentWarehouseId");
+        assert_eq!(fields::DISCOUNT_AMOUNT_CENTS, "discountAmountCents");
+        assert_eq!(fields::SHIPPING_COST_CENTS, "shippingCostCents");
+        assert_eq!(fields::PLATFORM_FEE_CENTS, "platformFeeTotalCents");
     }
 }

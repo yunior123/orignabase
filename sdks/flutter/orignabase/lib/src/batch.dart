@@ -96,8 +96,7 @@ class WriteBatch {
     }
 
     // Execute batch updates (grouped by collection)
-    final updatesByCollection =
-        <String, List<Map<String, dynamic>>>{};
+    final updatesByCollection = <String, List<Map<String, dynamic>>>{};
     for (final op in updates) {
       updatesByCollection.putIfAbsent(op.collection, () => []).add({
         'id': op.id,
@@ -122,9 +121,18 @@ class WriteBatch {
       }
     }
     for (final entry in deletesByCollection.entries) {
-      await _client.graphql(
+      final response = await _client.graphql(
         'mutation { batchDelete(collection: "${entry.key}", ids: ${toGraphQLValue(entry.value)}) }',
       );
+      final data = response['data']?['batchDelete'];
+      if (data is List) {
+        results.addAll(data.cast<Map<String, dynamic>>());
+        continue;
+      }
+      if (data is String && data.isNotEmpty) {
+        results.add({'message': data, 'deletedCount': entry.value.length});
+        continue;
+      }
       for (final id in entry.value) {
         results.add({'id': id, 'deleted': true});
       }

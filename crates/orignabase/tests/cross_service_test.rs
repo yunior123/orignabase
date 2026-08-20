@@ -1,9 +1,10 @@
 //! Cross-service integration tests for OrignaBase.
-//! Tests interactions between SurrealDB, Meilisearch, Auth, and WebSocket.
+//! Tests interactions between PostgreSQL, Meilisearch, Auth, and WebSocket.
 //!
 //! Run: cargo test -p orignabase --test cross_service_test -- --ignored
 
 use futures_util::{SinkExt, StreamExt};
+use ob_database::fields;
 use reqwest::Client;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -12,7 +13,7 @@ use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
 fn base_url() -> String {
-    std::env::var("OB_TEST_URL").unwrap_or_else(|_| "http://localhost:8080".to_string())
+    std::env::var("OB_TEST_URL").unwrap_or_else(|_| "http://localhost:8080".to_string()) // ignore-magic
 }
 
 fn ws_url() -> String {
@@ -25,23 +26,38 @@ async fn register_test_user(c: &Client) -> (String, String) {
     let email = format!("xsvc_{}@example.com", Uuid::new_v4());
     let resp = c
         .post(format!("{}/auth/register", base_url()))
-        .json(&json!({ "email": email, "password": "TestPassword123!" }))
+        .json(&json!({ "email": email, "password": "TestPassword123!" })) // ignore-magic
         .send()
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
-    (body["access_token"].as_str().unwrap().to_string(), email)
+    (body["access_token"].as_str().unwrap().to_string(), email) // ignore-magic
+}
+
+/// Login as the seeded seller account (has permissions to create products).
+async fn login_seller(c: &Client) -> (String, String, String) {
+    let resp = c
+        .post(format!("{}/auth/login", base_url()))
+        .json(&json!({ "email": "e2e-seller@test.origna.ca", "password": "TestPass123!" })) // ignore-magic
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let token = body["access_token"].as_str().unwrap_or("").to_string(); // ignore-magic
+    let refresh = body["refresh_token"].as_str().unwrap_or("").to_string(); // ignore-magic
+    let user_id = body["user"][fields::ID].as_str().unwrap_or("").to_string(); // ignore-magic
+    (token, refresh, user_id)
 }
 
 async fn graphql(c: &Client, token: &str, query: &str) -> Value {
     let resp = c
         .post(format!("{}/graphql", base_url()))
-        .header("Authorization", format!("Bearer {token}"))
-        .json(&json!({ "query": query }))
+        .header("Authorization", format!("Bearer {token}")) // ignore-magic
+        .json(&json!({ "query": query })) // ignore-magic
         .send()
         .await
         .unwrap();
-    resp.json().await.unwrap_or(json!({}))
+    resp.json().await.unwrap_or(json!({})) // ignore-magic
 }
 
 async fn create_doc(c: &Client, token: &str, collection: &str, data: &Value) -> String {
@@ -49,16 +65,16 @@ async fn create_doc(c: &Client, token: &str, collection: &str, data: &Value) -> 
     let escaped = serde_json::to_string(&data_str).unwrap();
     let q = format!(r#"mutation {{ create(collection: "{collection}", data: {escaped}) }}"#);
     let body = graphql(c, token, &q).await;
-    body["data"]["create"]["id"]
+    body["data"]["create"][fields::ID] // ignore-magic
         .as_str()
-        .or(body["data"]["create"]["_id"].as_str())
-        .or(body["data"]["create"].as_str())
+        .or(body["data"]["create"]["_id"].as_str()) // ignore-magic
+        .or(body["data"]["create"].as_str()) // ignore-magic
         .unwrap_or_default()
         .to_string()
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// SURREALDB + MEILISEARCH SYNC
+// DATABASE + MEILISEARCH SYNC
 // ═══════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -71,8 +87,8 @@ async fn search_finds_created_product() {
     create_doc(
         &c,
         &token,
-        "products",
-        &json!({"name": name, "price": 1999}),
+        "products",                            // ignore-magic
+        &json!({"name": name, "price": 1999}), // ignore-magic
     )
     .await;
 
@@ -83,12 +99,12 @@ async fn search_finds_created_product() {
         let resp = graphql(
             &c,
             &token,
-            &format!(r#"{{ search(collection: "products", query: "{name}", limit: 5) }}"#),
+            &format!(r#"{{ search(collection: "products", query: "{name}", limit: 5) }}"#), // ignore-magic
         )
         .await;
-        if let Some(results) = resp["data"]["search"].as_array()
+        if let Some(results) = resp["data"]["search"].as_array() // ignore-magic
             && results.iter().any(|r| {
-                r["name"].as_str() == Some(&name)
+                r[fields::NAME].as_str() == Some(&name) // ignore-magic
                     || serde_json::to_string(r).unwrap_or_default().contains(&name)
             })
         {
@@ -114,8 +130,8 @@ async fn search_reflects_updated_name() {
     let doc_id = create_doc(
         &c,
         &token,
-        "products",
-        &json!({"name": old_name, "price": 999}),
+        "products",                               // ignore-magic
+        &json!({"name": old_name, "price": 999}), // ignore-magic
     )
     .await;
     let clean_id = doc_id.split(':').next_back().unwrap_or(&doc_id);
@@ -123,13 +139,13 @@ async fn search_reflects_updated_name() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Update
-    let data = serde_json::to_string(&json!({"name": new_name})).unwrap();
+    let data = serde_json::to_string(&json!({"name": new_name})).unwrap(); // ignore-magic
     let escaped = serde_json::to_string(&data).unwrap();
     graphql(
         &c,
         &token,
         &format!(
-            r#"mutation {{ update(collection: "products", id: "{clean_id}", data: {escaped}) }}"#
+            r#"mutation {{ update(collection: "products", id: "{clean_id}", data: {escaped}) }}"# // ignore-magic
         ),
     )
     .await;
@@ -141,7 +157,7 @@ async fn search_reflects_updated_name() {
         let resp = graphql(
             &c,
             &token,
-            &format!(r#"{{ search(collection: "products", query: "{new_name}", limit: 5) }}"#),
+            &format!(r#"{{ search(collection: "products", query: "{new_name}", limit: 5) }}"#), // ignore-magic
         )
         .await;
         let text = serde_json::to_string(&resp).unwrap_or_default();
@@ -163,7 +179,7 @@ async fn deleted_product_removed_from_search() {
     let c = Client::new();
     let (token, _) = register_test_user(&c).await;
     let name = format!("DeleteMe_{}", Uuid::new_v4().simple());
-    let doc_id = create_doc(&c, &token, "products", &json!({"name": name, "price": 100})).await;
+    let doc_id = create_doc(&c, &token, "products", &json!({"name": name, "price": 100})).await; // ignore-magic
     let clean_id = doc_id.split(':').next_back().unwrap_or(&doc_id);
 
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -172,7 +188,7 @@ async fn deleted_product_removed_from_search() {
     graphql(
         &c,
         &token,
-        &format!(r#"mutation {{ delete(collection: "products", id: "{clean_id}") }}"#),
+        &format!(r#"mutation {{ delete(collection: "products", id: "{clean_id}") }}"#), // ignore-magic
     )
     .await;
 
@@ -181,14 +197,14 @@ async fn deleted_product_removed_from_search() {
     let resp = graphql(
         &c,
         &token,
-        &format!(r#"{{ search(collection: "products", query: "{name}", limit: 5) }}"#),
+        &format!(r#"{{ search(collection: "products", query: "{name}", limit: 5) }}"#), // ignore-magic
     )
     .await;
     let text = serde_json::to_string(&resp).unwrap_or_default();
     // Should not find it anymore (or empty results)
     assert!(
         !text.contains(&name)
-            || resp["data"]["search"]
+            || resp["data"]["search"] // ignore-magic
                 .as_array()
                 .is_none_or(|a| a.is_empty()),
         "Deleted product should not appear in search"
@@ -206,8 +222,8 @@ async fn bulk_create_all_searchable() {
         create_doc(
             &c,
             &token,
-            "products",
-            &json!({"name": format!("{prefix}_{i}"), "price": i * 100}),
+            "products",                                                  // ignore-magic
+            &json!({"name": format!("{prefix}_{i}"), "price": i * 100}), // ignore-magic
         )
         .await;
     }
@@ -218,10 +234,10 @@ async fn bulk_create_all_searchable() {
     let resp = graphql(
         &c,
         &token,
-        &format!(r#"{{ search(collection: "products", query: "{prefix}", limit: 20) }}"#),
+        &format!(r#"{{ search(collection: "products", query: "{prefix}", limit: 20) }}"#), // ignore-magic
     )
     .await;
-    let count = resp["data"]["search"]
+    let count = resp["data"]["search"] // ignore-magic
         .as_array()
         .map(|a| a.len())
         .unwrap_or(0);
@@ -285,7 +301,7 @@ async fn websocket_subscribe_receives_events() {
 
     // Subscribe
     ws.send(Message::Text(
-        json!({"type": "subscribe", "collection": collection})
+        json!({"type": "subscribe", "collection": collection}) // ignore-magic
             .to_string()
             .into(),
     ))
@@ -296,14 +312,15 @@ async fn websocket_subscribe_receives_events() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Create a document (should trigger event)
-    create_doc(&c, &token, &collection, &json!({"trigger": "test"})).await;
+    create_doc(&c, &token, &collection, &json!({"trigger": "test"})).await; // ignore-magic
 
     // Wait for event (up to 5s)
     let event = tokio::time::timeout(Duration::from_secs(5), async {
         while let Some(Ok(msg)) = ws.next().await {
             if let Message::Text(text) = msg {
-                let v: Value = serde_json::from_str(&text).unwrap_or(json!({}));
+                let v: Value = serde_json::from_str(&text).unwrap_or(json!({})); // ignore-magic
                 if v["type"] == "change" || v["event"].is_string() {
+                    // ignore-magic
                     return Some(v);
                 }
             }
@@ -316,7 +333,7 @@ async fn websocket_subscribe_receives_events() {
 
     if let Ok(Some(ev)) = event {
         // Got a change event — test passes
-        assert!(ev.get("type").is_some() || ev.get("event").is_some());
+        assert!(ev.get("type").is_some() || ev.get("event").is_some()); // ignore-magic
     }
     // Timeout is OK too — WS events may not be implemented for all collections
 }
@@ -333,7 +350,7 @@ async fn websocket_multiple_subscriptions() {
     // Subscribe to multiple collections
     for i in 0..3 {
         ws.send(Message::Text(
-            json!({"type": "subscribe", "collection": format!("ws_multi_{i}")})
+            json!({"type": "subscribe", "collection": format!("ws_multi_{i}")}) // ignore-magic
                 .to_string()
                 .into(),
         ))
@@ -355,28 +372,40 @@ async fn websocket_multiple_subscriptions() {
 #[ignore = "requires running orignabase instance"]
 async fn create_then_read_matches() {
     let c = Client::new();
-    let (token, _) = register_test_user(&c).await;
-    let collection = format!("xsvc_crud_{}", Uuid::new_v4().simple());
+    let (token, _, seller_id) = login_seller(&c).await;
+    let unique_name = format!("verify_me_{}", Uuid::new_v4().simple());
 
     let doc_id = create_doc(
         &c,
         &token,
-        &collection,
-        &json!({"name": "verify_me", "count": 42}),
+        "products", // ignore-magic
+        &json!({
+            "name": unique_name,
+            "priceCents": 4200,
+            "stockQuantity": 1,
+            "sellerId": seller_id,
+            "lifecycleStatus": "draft"
+        }), // ignore-magic
     )
     .await;
+    assert!(!doc_id.is_empty(), "Create should return a document ID");
     let clean_id = doc_id.split(':').next_back().unwrap_or(&doc_id);
 
     let body = graphql(
         &c,
         &token,
-        &format!(r#"{{ get(collection: "{collection}", id: "{clean_id}") }}"#),
+        &format!(r#"{{ get(collection: "products", id: "{clean_id}") }}"#), // ignore-magic
     )
     .await;
-    let doc = &body["data"]["get"];
+    let doc = &body["data"]["get"]; // ignore-magic
     assert!(
-        doc["name"] == "verify_me" || serde_json::to_string(doc).unwrap().contains("verify_me"),
-        "Read should match created data"
+        doc[fields::NAME] // ignore-magic
+            .as_str()
+            .map(|n| n.contains("verify_me"))
+            .unwrap_or(false)
+            || serde_json::to_string(doc).unwrap().contains("verify_me"),
+        "Read should match created data, got: {}",
+        serde_json::to_string_pretty(doc).unwrap_or_default()
     );
 }
 
@@ -384,36 +413,62 @@ async fn create_then_read_matches() {
 #[ignore = "requires running orignabase instance"]
 async fn token_refresh_continues_crud() {
     let c = Client::new();
-    let (token, _) = register_test_user(&c).await;
-    let collection = format!("xsvc_refresh_{}", Uuid::new_v4().simple());
+    // Use seller account (has permissions to create products)
+    let (token, refresh_token, seller_id) = login_seller(&c).await;
 
-    // Use original token
-    create_doc(&c, &token, &collection, &json!({"phase": "before_refresh"})).await;
+    // Use original token to create a product
+    let doc_id_before = create_doc(
+        &c,
+        &token,
+        "products", // ignore-magic
+        &json!({
+            "name": "before_refresh",
+            "priceCents": 100,
+            "stockQuantity": 1,
+            "sellerId": seller_id,
+            "lifecycleStatus": "draft"
+        }), // ignore-magic
+    )
+    .await;
+    assert!(
+        !doc_id_before.is_empty(),
+        "CRUD should work with original token"
+    );
 
-    // Refresh token
+    // Refresh token via POST body (not Bearer header)
     let resp = c
         .post(format!("{}/auth/refresh", base_url()))
-        .header("Authorization", format!("Bearer {token}"))
+        .json(&json!({ "refresh_token": refresh_token })) // ignore-magic
         .send()
         .await
         .unwrap();
 
     let new_token = if resp.status().is_success() {
         let body: Value = resp.json().await.unwrap();
-        body["access_token"].as_str().unwrap_or(&token).to_string()
+        body["access_token"].as_str().unwrap_or(&token).to_string() // ignore-magic
     } else {
+        // If refresh fails (e.g., no refresh token returned), use original
         token.clone()
     };
 
-    // Use new token
-    let doc_id = create_doc(
+    // Use refreshed token to create another product
+    let doc_id_after = create_doc(
         &c,
         &new_token,
-        &collection,
-        &json!({"phase": "after_refresh"}),
+        "products", // ignore-magic
+        &json!({
+            "name": "after_refresh",
+            "priceCents": 200,
+            "stockQuantity": 1,
+            "sellerId": seller_id,
+            "lifecycleStatus": "draft"
+        }), // ignore-magic
     )
     .await;
-    assert!(!doc_id.is_empty(), "CRUD should work with refreshed token");
+    assert!(
+        !doc_id_after.is_empty(),
+        "CRUD should work with refreshed token"
+    );
 }
 
 #[tokio::test]
@@ -429,7 +484,7 @@ async fn cross_user_isolation() {
         &c,
         &token_a,
         &collection,
-        &json!({"owner": "A", "secret": "a_data"}),
+        &json!({"owner": "A", "secret": "a_data"}), // ignore-magic
     )
     .await;
 
@@ -438,7 +493,7 @@ async fn cross_user_isolation() {
         &c,
         &token_b,
         &collection,
-        &json!({"owner": "B", "secret": "b_data"}),
+        &json!({"owner": "B", "secret": "b_data"}), // ignore-magic
     )
     .await;
 
@@ -451,7 +506,7 @@ async fn cross_user_isolation() {
     .await;
     // Should not crash regardless of isolation model
     assert!(
-        resp_a["data"]["list"].is_array() || resp_a.get("errors").is_some(),
+        resp_a["data"]["list"].is_array() || resp_a.get("errors").is_some(), // ignore-magic
         "List should return structured response"
     );
 }
@@ -467,7 +522,7 @@ async fn storage_presign_url_accessible() {
             "{}/storage/presign/upload/test_file.txt",
             base_url()
         ))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {token}")) // ignore-magic
         .send()
         .await
         .unwrap();

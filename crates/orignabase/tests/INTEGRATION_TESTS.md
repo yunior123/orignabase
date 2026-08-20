@@ -6,8 +6,8 @@ These integration tests cover the HTTP API endpoints for all major repository op
 
 ### Start OrignaBase
 ```bash
-# Terminal 1: SurrealDB
-surreal start --user root --pass root memory
+# Terminal 1: Start PostgreSQL + Meilisearch
+docker compose -f docker/docker-compose.yml up -d postgres meilisearch
 
 # Terminal 2: OrignaBase server
 cargo run -- serve
@@ -155,7 +155,7 @@ Timestamp fields vary by collection:
 - Products, cart: `dateCreated`
 - Webhook events: `timestamp`
 
-SurrealDB IDs: `collection:id` format (e.g., `products:abc123`)
+Document IDs use the `collection:id` format (e.g., `products:abc123`)
 
 ## Known Limitations
 
@@ -187,8 +187,8 @@ cargo test --test auth_repository_test -- --ignored --nocapture
 ### Check database state
 ```bash
 ssh root@204.168.137.16
-# SurrealDB CLI (if running locally)
-surreal sql -- root root --db production --ns orignabase
+# PostgreSQL
+psql postgres://orignabase:orignabase_dev@localhost:5432/orignabase
 ```
 
 ## CI Integration

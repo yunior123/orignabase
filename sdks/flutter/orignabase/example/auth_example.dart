@@ -20,7 +20,7 @@ Future<void> main() async {
   print('Access token: ${ob.auth.accessToken?.substring(0, 20)}...');
 
   // ── Sign Out ───────────────────────────────────────────────────────
-  ob.auth.signOut();
+  await ob.auth.signOut();
   print('\nSigned out: ${ob.auth.currentState.isAuthenticated == false}');
 
   // ── Email Login ────────────────────────────────────────────────────

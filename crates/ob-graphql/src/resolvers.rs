@@ -1,12 +1,45 @@
 use async_graphql::{Context, Object, Result as GqlResult};
 use ob_auth::AuthContext;
 use ob_database::DatabaseClient;
+use ob_database::fields;
 use ob_realtime::registry::{ChangeAction, ChangeEvent};
 use ob_search::SearchClient;
 use ob_security::{RuleEngine, SecurityContext};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+
+/// P1-NEW-21: Fields that must never appear in GraphQL responses.
+/// Admin users get a reduced blocklist (they may need some internal fields).
+const SENSITIVE_FIELDS_ALL: &[&str] = &[
+    "hashedPassword",
+    "mfaSecret",
+    "mfaRecoveryCodes",
+    "refreshToken",
+    "encryptedTotpSecret",
+    "passwordSalt",
+];
+const SENSITIVE_FIELDS_NON_ADMIN: &[&str] = &[
+    "stripeConnectId",
+    "stripeCustomerId",
+    "bankAccountLast4",
+    "internalNotes",
+];
+
+/// Strip sensitive fields from a document based on caller's role.
+fn strip_sensitive_fields(doc: &mut Value, ctx: &SecurityContext) {
+    if let Some(obj) = doc.as_object_mut() {
+        for &field in SENSITIVE_FIELDS_ALL {
+            obj.remove(field);
+        }
+        let is_admin = ctx.roles.iter().any(|r| r == "admin");
+        if !is_admin {
+            for &field in SENSITIVE_FIELDS_NON_ADMIN {
+                obj.remove(field);
+            }
+        }
+    }
+}
 
 /// If `data` is a JSON-encoded string, parse it into a Value.
 /// This handles the case where GraphQL mutations pass data as a string
@@ -19,10 +52,33 @@ fn normalize_data(data: Value) -> Value {
     }
 }
 
-fn config_field<'a>(config: &'a Value, field: &str) -> Option<&'a Value> {
-    config
-        .get(field)
-        .or_else(|| config.get("data").and_then(|data| data.get(field)))
+fn doc_is_readable(
+    rules: &RuleEngine,
+    collection: &str,
+    sec_ctx: &SecurityContext,
+    doc: &Value,
+) -> bool {
+    let per_doc_ctx = SecurityContext {
+        user_id: sec_ctx.user_id.clone(),
+        roles: sec_ctx.roles.clone(),
+        authenticated: sec_ctx.authenticated,
+        resource: Some(doc.clone()),
+        incoming: None,
+    };
+    rules
+        .check(collection, "read", &per_doc_ctx)
+        .unwrap_or(false)
+}
+
+fn filter_readable_docs(
+    rules: &RuleEngine,
+    collection: &str,
+    sec_ctx: &SecurityContext,
+    docs: Vec<Value>,
+) -> Vec<Value> {
+    docs.into_iter()
+        .filter(|doc| doc_is_readable(rules, collection, sec_ctx, doc))
+        .collect()
 }
 
 pub struct QueryRoot;
@@ -36,10 +92,15 @@ impl QueryRoot {
         let rules = ctx.data::<Arc<RuleEngine>>()?;
 
         // Fetch document FIRST so RLS (isOwner) can evaluate against it
-        let doc = db.get_document(&collection, &id).await.map_err(|e| {
-            tracing::error!("DB error: {e}");
-            async_graphql::Error::new("Internal server error")
-        })?;
+        let doc = match db.get_document(&collection, &id).await {
+            Ok(doc) => doc,
+            Err(ob_core::Error::NotFound(_)) => return Ok(Value::Null),
+            Err(ob_core::Error::Validation(_)) => return Ok(Value::Null),
+            Err(e) => {
+                tracing::error!("DB error: {e}");
+                return Err(async_graphql::Error::new("Internal server error"));
+            }
+        };
 
         let auth = ctx
             .data_opt::<AuthContext>()
@@ -65,7 +126,9 @@ impl QueryRoot {
             return Err(async_graphql::Error::new("Permission denied"));
         }
 
-        Ok(doc)
+        let mut result = doc;
+        strip_sensitive_fields(&mut result, &sec_ctx);
+        Ok(result)
     }
 
     /// List documents in a collection with optional filters and cursor pagination.
@@ -118,44 +181,110 @@ impl QueryRoot {
             .as_ref()
             .map(|f| f.iter().map(|s| s.as_str()).collect());
 
-        // When cursor pagination is active, fetch limit+1 so clients can detect hasMore
-        let effective_limit = limit.map(|n| {
-            let clamped = n.clamp(1, 10_000) as usize;
-            if start_after.is_some() {
-                clamped + 1
+        // P1-NEW-20: Default limit of 20, capped at 100 to prevent unbounded queries
+        let requested_limit = {
+            let n = limit.unwrap_or(20);
+            n.clamp(1, 100) as usize
+        };
+        let fetch_limit = if start_after.is_some() {
+            requested_limit + 1
+        } else {
+            requested_limit
+        };
+
+        let use_simple_list = filters.is_none()
+            && order_by.is_none()
+            && !descending
+            && start_after.is_none()
+            && field_refs.is_none();
+        let mut filtered = Vec::new();
+        let mut current_offset = offset.map(|n| n.max(0) as usize).unwrap_or(0);
+
+        while filtered.len() < requested_limit {
+            let docs = if use_simple_list {
+                db.list_documents(&collection, Some(fetch_limit), Some(current_offset))
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("DB error: {e}");
+                        async_graphql::Error::new("Internal server error")
+                    })?
             } else {
-                clamped
+                let query = ob_database::query::QueryTranslator::build_select_ext(
+                    &collection,
+                    filters.as_ref(),
+                    order_by.as_deref(),
+                    descending,
+                    Some(fetch_limit),
+                    Some(current_offset),
+                    field_refs.as_deref(),
+                    start_after.as_deref(),
+                );
+
+                db.query_raw(&query).await.map_err(|e| {
+                    tracing::error!("DB error: {e}");
+                    async_graphql::Error::new("Internal server error")
+                })?
+            };
+
+            if docs.is_empty() {
+                break;
             }
-        });
 
-        let query = ob_database::query::QueryTranslator::build_select_ext(
-            &collection,
-            filters.as_ref(),
-            order_by.as_deref(),
-            descending,
-            effective_limit,
-            offset.map(|n| n.max(0) as usize),
-            field_refs.as_deref(),
-            start_after.as_deref(),
-        );
+            let batch_len = docs.len();
 
-        let results = db.query_raw(&query).await.map_err(|e| {
-            tracing::error!("DB error: {e}");
-            async_graphql::Error::new("Internal server error")
-        })?;
+            // Post-fetch ownership filter: re-evaluate rules with each doc as resource
+            // so isOwner() checks work correctly for owner-scoped collections.
+            filtered.extend(filter_readable_docs(rules, &collection, &sec_ctx, docs));
 
-        Ok(results)
+            if batch_len < fetch_limit {
+                break;
+            }
+
+            current_offset += batch_len;
+        }
+
+        filtered.truncate(requested_limit);
+
+        // P1-NEW-21: Strip sensitive fields from responses to prevent data leakage.
+        // Fields like hashed passwords, MFA secrets, and internal tokens must never
+        // be exposed via GraphQL — even to authenticated users.
+        let sanitized: Vec<Value> = filtered
+            .into_iter()
+            .map(|mut doc| {
+                strip_sensitive_fields(&mut doc, &sec_ctx);
+                doc
+            })
+            .collect();
+
+        Ok(sanitized)
     }
 
     /// Get a remote config value by key.
     async fn config(&self, ctx: &Context<'_>, key: String) -> GqlResult<Value> {
+        let auth = ctx
+            .data_opt::<AuthContext>()
+            .cloned()
+            .unwrap_or_else(AuthContext::anonymous);
+        if !auth.authenticated {
+            return Err(async_graphql::Error::new("Authentication required"));
+        }
+
         let db = ctx.data::<DatabaseClient>()?;
 
-        let config = db.get_document("_config", &key).await.ok();
+        let results = db
+            .query_bind(
+                "SELECT data->'value' AS value FROM _config WHERE data->>'key' = $key LIMIT 1",
+                serde_json::json!({ "key": key }),
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!("DB error: {e}");
+                async_graphql::Error::new("Internal server error")
+            })?;
 
-        let value = config
-            .as_ref()
-            .and_then(|config| config_field(config, "value"))
+        let value = results
+            .first()
+            .and_then(|r| r.get("value"))
             .cloned()
             .unwrap_or(Value::Null);
 
@@ -164,10 +293,23 @@ impl QueryRoot {
 
     /// Get all remote config key-value pairs.
     async fn config_all(&self, ctx: &Context<'_>) -> GqlResult<Value> {
+        let auth = ctx
+            .data_opt::<AuthContext>()
+            .cloned()
+            .unwrap_or_else(AuthContext::anonymous);
+        if !auth.authenticated {
+            return Err(async_graphql::Error::new("Authentication required"));
+        }
+        if !auth.roles.contains(&"admin".to_string()) {
+            return Err(async_graphql::Error::new("Admin role required"));
+        }
+
         let db = ctx.data::<DatabaseClient>()?;
 
         let configs = db
-            .query_raw("SELECT * FROM _config LIMIT 100")
+            .query_raw(
+                "SELECT data->>'key' AS key, data->'value' AS value FROM _config ORDER BY data->>'key' ASC",
+            )
             .await
             .map_err(|e| {
                 tracing::error!("DB error: {e}");
@@ -177,8 +319,8 @@ impl QueryRoot {
         let map: serde_json::Map<String, Value> = configs
             .iter()
             .filter_map(|c| {
-                let key = config_field(c, "key")?.as_str()?;
-                let value = config_field(c, "value")?;
+                let key = c.get("key")?.as_str()?;
+                let value = c.get("value")?;
                 Some((key.to_string(), value.clone()))
             })
             .collect();
@@ -186,7 +328,7 @@ impl QueryRoot {
         Ok(Value::Object(map))
     }
 
-    /// Vector similarity search using SurrealDB's native vector functions.
+    /// Vector similarity search using PostgreSQL.
     ///
     /// Searches for documents where `vector_field` is most similar to `embedding`
     /// using cosine similarity. Returns results ordered by similarity score.
@@ -226,7 +368,7 @@ impl QueryRoot {
             return Err(async_graphql::Error::new("Permission denied"));
         }
 
-        let top_k = top_k.map(|n| n.clamp(1, 10_000) as usize).unwrap_or(10);
+        let top_k = top_k.map(|n| n.clamp(1, 100) as usize).unwrap_or(10);
 
         let results = db
             .vector_search(&collection, &vector_field, embedding, top_k, threshold)
@@ -277,6 +419,16 @@ impl QueryRoot {
             return Err(async_graphql::Error::new("Permission denied"));
         }
 
+        // FIX: Sanitize filter to prevent injection attacks
+        if let Some(ref filter_str) = filter {
+            let upper = filter_str.to_uppercase();
+            // Reject filters with SQL/destructive keywords that could be injected
+            if upper.contains("REMOVE") || upper.contains("DROP") || upper.contains("DELETE") {
+                tracing::warn!("search_filter_injection_attempt: {}", filter_str);
+                return Err(async_graphql::Error::new("Invalid filter syntax"));
+            }
+        }
+
         let result = search
             .search(
                 &index,
@@ -295,6 +447,70 @@ impl QueryRoot {
             tracing::error!("DB error: {e}");
             async_graphql::Error::new("Internal server error")
         })?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ob_security::parse_rules;
+    use serde_json::json;
+
+    fn test_sec_ctx(user_id: &str) -> SecurityContext {
+        SecurityContext {
+            user_id: Some(user_id.to_string()),
+            roles: vec!["user".to_string()],
+            authenticated: true,
+            resource: None,
+            incoming: None,
+        }
+    }
+
+    #[test]
+    fn filter_readable_docs_keeps_only_owned_documents() {
+        let rules = parse_rules(
+            r#"
+            rules addresses {
+                read: isAuthenticated() && isOwner(resource.userId);
+                list: isAuthenticated();
+            }
+        "#,
+        )
+        .expect("parse rules");
+        let engine = RuleEngine::new(rules);
+        let sec_ctx = test_sec_ctx("user_1");
+        let docs = vec![
+            json!({"id": "a1", "userId": "user_2", "label": "other"}),
+            json!({"id": "a2", "userId": "user_1", "label": "mine"}),
+            json!({"id": "a3", "userId": "user_3", "label": "other2"}),
+        ];
+
+        let filtered = filter_readable_docs(&engine, "addresses", &sec_ctx, docs);
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0][fields::ID], "a2");
+    }
+
+    #[test]
+    fn doc_is_readable_rejects_missing_owner_field() {
+        let rules = parse_rules(
+            r#"
+            rules chat_messages {
+                read: isAuthenticated() && isOwner(resource.senderId);
+                list: isAuthenticated();
+            }
+        "#,
+        )
+        .expect("parse rules");
+        let engine = RuleEngine::new(rules);
+        let sec_ctx = test_sec_ctx("user_1");
+
+        assert!(!doc_is_readable(
+            &engine,
+            "chat_messages",
+            &sec_ctx,
+            &json!({"id": "m1", "text": "hello"})
+        ));
     }
 }
 
@@ -339,7 +555,10 @@ impl MutationRoot {
 
         // Emit realtime change event
         if let Ok(tx) = ctx.data::<mpsc::Sender<ChangeEvent>>() {
-            let doc_id = doc.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let doc_id = doc
+                .get(fields::ID)
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             if let Err(e) = tx
                 .send(ChangeEvent {
                     action: ChangeAction::Create,
@@ -436,7 +655,7 @@ impl MutationRoot {
 
         // Emit realtime change event
         if let Ok(tx) = ctx.data::<mpsc::Sender<ChangeEvent>>() {
-            let doc_id = doc.get("id").and_then(|v| v.as_str()).unwrap_or(&id);
+            let doc_id = doc.get(fields::ID).and_then(|v| v.as_str()).unwrap_or(&id);
             if let Err(e) = tx
                 .send(ChangeEvent {
                     action: ChangeAction::Update,
@@ -612,6 +831,13 @@ impl MutationRoot {
                 }
             })
             .collect();
+
+        if docs.len() > 500 {
+            return Err(async_graphql::Error::new(
+                "Batch operations limited to 500 items",
+            ));
+        }
+
         let db = ctx.data::<DatabaseClient>()?;
         let rules = ctx.data::<Arc<RuleEngine>>()?;
 
@@ -650,7 +876,10 @@ impl MutationRoot {
         // Emit change events
         if let Ok(tx) = ctx.data::<mpsc::Sender<ChangeEvent>>() {
             for doc in &results {
-                let doc_id = doc.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let doc_id = doc
+                    .get(fields::ID)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
                 if let Err(e) = tx
                     .send(ChangeEvent {
                         action: ChangeAction::Create,
@@ -678,6 +907,12 @@ impl MutationRoot {
         collection: String,
         ids: Vec<String>,
     ) -> GqlResult<Vec<Value>> {
+        if ids.len() > 500 {
+            return Err(async_graphql::Error::new(
+                "Batch operations limited to 500 items",
+            ));
+        }
+
         let db = ctx.data::<DatabaseClient>()?;
         let rules = ctx.data::<Arc<RuleEngine>>()?;
 
@@ -767,13 +1002,19 @@ impl MutationRoot {
             _ => return Err(async_graphql::Error::new("updates must be an array")),
         };
 
+        if update_list.len() > 500 {
+            return Err(async_graphql::Error::new(
+                "Batch operations limited to 500 items",
+            ));
+        }
+
         let mut results = Vec::with_capacity(update_list.len());
         for entry in update_list {
             let obj = entry.as_object().ok_or_else(|| {
                 async_graphql::Error::new("Each update entry must be an object with id and data")
             })?;
             let id = obj
-                .get("id")
+                .get(fields::ID)
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| async_graphql::Error::new("Each update must have an id"))?;
             let data = obj

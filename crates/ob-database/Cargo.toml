@@ -1,6 +1,6 @@
 [package]
 name = "ob-database"
-description = "SurrealDB client pool, document CRUD, and query translation for OrignaBase"
+description = "PostgreSQL client pool, document CRUD, and query translation for OrignaBase"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 ob-core = { workspace = true }
 tokio = { workspace = true }
-surrealdb = { workspace = true }
+sqlx = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

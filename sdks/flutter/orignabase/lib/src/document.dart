@@ -36,14 +36,15 @@ class Document {
       ..remove('_rev')
       ..remove('_created')
       ..remove('_updated');
-    // SurrealDB returns nanosecond-precision timestamps (9 decimal digits).
+    // PostgreSQL returns nanosecond-precision timestamps (9 decimal digits).
     // Dart's DateTime.parse only supports up to microseconds (6 digits).
     // Truncate any ISO-8601 strings with >6 subsecond digits.
     _normalizeTimestamps(data);
     return Document(id: id, collection: collection, data: data);
   }
 
-  static final _nanoPattern = RegExp(r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6})\d+');
+  static final _nanoPattern =
+      RegExp(r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6})\d+');
 
   static void _normalizeTimestamps(Map<String, dynamic> data) {
     for (final key in data.keys.toList()) {
@@ -68,7 +69,8 @@ class QuerySnapshot {
   /// Whether there are more results available (cursor pagination).
   final bool hasMore;
 
-  QuerySnapshot({required this.docs, this.hasMore = false}) : size = docs.length;
+  QuerySnapshot({required this.docs, this.hasMore = false})
+      : size = docs.length;
 
   bool get isEmpty => docs.isEmpty;
   bool get isNotEmpty => docs.isNotEmpty;

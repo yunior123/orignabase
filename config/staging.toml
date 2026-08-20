@@ -5,16 +5,15 @@ host = "0.0.0.0"
 port = 8080
 
 [database]
-endpoint = "ws://surrealdb:8000"
-namespace = "orignabase"
-name = "staging"
-username = "root"
+endpoint = "postgresql:5432"
+name = "orignabase_staging"
+username = "orignabase"
 password = "${OB_DB_PASSWORD}"
 
 [auth]
 jwt_secret = "${OB_JWT_SECRET}"
 access_token_ttl_secs = 900        # 15 minutes
-refresh_token_ttl_secs = 604800    # 7 days
+refresh_token_ttl_secs = 518400    # 6 days
 
 [security]
 rules_path = "/etc/orignabase/rules.ob"
@@ -25,7 +24,7 @@ api_key = "${OB_MEILI_KEY}"
 
 [search.indexes.products]
 searchable = ["title", "description", "category"]
-filterable = ["category", "priceCents", "isActive", "sellerId", "isPerishable"]
+filterable = ["category", "priceCents", "isActive", "sellerId", "isPerishable", "dietaryBadges", "allergens", "mayContainAllergens", "fopHighSodium", "fopHighSugars", "fopHighSaturatedFat"]
 sortable = ["priceCents", "createdAt"]
 
 [storage]

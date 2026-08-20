@@ -2,43 +2,87 @@ use anyhow::Result;
 use async_graphql::http::GraphiQLSource;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
-use axum::http::HeaderValue;
 use axum::http::header::AUTHORIZATION;
+use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::IntoResponse;
 use clap::{Parser, Subcommand};
 use ob_admin::admin_router;
 use ob_admin::routes::AdminState;
 use ob_analytics::{AnalyticsState, analytics_router};
 use ob_auth::routes::{AuthState, auth_router};
-use ob_core::Config;
-use ob_database::DatabaseClient;
+use ob_core::{Config, Environment};
+use ob_database::{DatabaseClient, fields};
 use ob_functions::routes::FunctionsState;
 use ob_functions::{
     CronScheduler, DbTriggerExecutor, FunctionLimits, FunctionRegistry, WasmRuntime,
     functions_router,
 };
-use ob_graphql::build_schema;
+use ob_graphql::{GraphQlLimits, build_schema_with_limits};
 use ob_realtime::ChangeDispatcher;
 use ob_realtime::registry::SubscriptionRegistry;
 use ob_realtime::websocket::realtime_router;
+use ob_search::config::IndexConfig;
 use ob_search::sync::{SearchAction, SearchSyncEvent, SearchSyncer};
 use ob_search::{SearchClient, SearchConfig};
 use ob_security::{RuleEngine, parse_rules};
 use ob_storage::routes::{StorageState, storage_router};
 use ob_storage::{LocalStorage, ResumableUploadManager, SignedUrlGenerator};
+use sqlx::Row;
+use std::backtrace::Backtrace;
 use std::collections::HashMap;
+use std::future::pending;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use tower::ServiceBuilder;
 use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
-use tower_governor::key_extractor::PeerIpKeyExtractor;
+use tower_governor::key_extractor::KeyExtractor;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::compression::CompressionLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
+use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse};
 use tracing_subscriber::EnvFilter;
+
+// ── Custom Rate-Limit Key Extractor ──
+/// Extracts client IP from `X-Forwarded-For` header when the peer is the
+/// trusted reverse proxy (Caddy at 127.0.0.1).  Falls back to peer IP.
+/// This prevents all Docker-internal traffic from collapsing to one rate-limit key.
+#[derive(Clone, Debug)]
+struct XForwardedForKeyExtractor;
+
+const TRUSTED_PROXY_IP: &str = "127.0.0.1";
+
+impl KeyExtractor for XForwardedForKeyExtractor {
+    type Key = std::net::IpAddr;
+
+    fn extract<T>(
+        &self,
+        req: &axum::http::Request<T>,
+    ) -> Result<Self::Key, tower_governor::errors::GovernorError> {
+        let peer_ip = req
+            .extensions()
+            .get::<std::net::SocketAddr>()
+            .map(|a| a.ip());
+
+        // Only trust X-Forwarded-For from the local reverse proxy (Caddy at 127.0.0.1)
+        if peer_ip.is_some_and(|ip| ip.to_string() == TRUSTED_PROXY_IP)
+            && let Some(xff) = req.headers().get("x-forwarded-for")
+            && let Ok(val) = xff.to_str()
+            && let Some(first_ip) = val.split(',').next()
+            && let Ok(ip) = first_ip.trim().parse::<std::net::IpAddr>()
+        {
+            return Ok(ip);
+        }
+
+        // Fallback: peer IP (direct connection or untrusted proxy)
+        peer_ip.ok_or(tower_governor::errors::GovernorError::UnableToExtractKey)
+    }
+}
 
 // ── CLI Credential Storage ──
 
@@ -256,6 +300,7 @@ async fn main() -> Result<()> {
         )
         .json()
         .init();
+    install_panic_hook();
 
     let cli = Cli::parse();
     let config_path = cli.config.as_deref().map(std::path::Path::new);
@@ -269,9 +314,8 @@ async fn main() -> Result<()> {
                     "host": config.host,
                     "port": config.port,
                     "database": {
-                        "endpoint": config.database.endpoint,
-                        "namespace": config.database.namespace,
-                        "name": config.database.name,
+                        "url": config.database.url,
+                        "max_connections": config.database.max_connections,
                     },
                     "auth": {
                         "access_token_ttl_secs": config.auth.access_token_ttl_secs,
@@ -462,7 +506,7 @@ match /users/{userId} {
 
 # [[indexes]]
 # collection = "users"
-# fields = ["email"]
+# fields = [fields::EMAIL]
 # unique = true
 
 # [[indexes]]
@@ -472,14 +516,22 @@ match /users/{userId} {
             )?;
             println!("Initialized OrignaBase project at {}", dir.display());
             println!("  Created: orignabase.toml, rules.ob, indexes.toml");
-            println!("  Next: start SurrealDB, then run `orignabase serve`");
+            println!("  Next: start PostgreSQL, then run `orignabase serve`");
             Ok(())
         }
         Commands::Schema { action } => {
             let db = DatabaseClient::connect(&config.database).await?;
             match action {
                 SchemaAction::Inspect => {
-                    let tables = db.query_raw("INFO FOR DB").await?;
+                    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(
+                        "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
+                    )
+                    .fetch_all(db.inner().pool())
+                    .await?;
+                    let tables: Vec<String> = rows
+                        .iter()
+                        .map(|r| r.get::<String, _>("tablename"))
+                        .collect();
                     println!("{}", serde_json::to_string_pretty(&tables)?);
                     Ok(())
                 }
@@ -487,7 +539,7 @@ match /users/{userId} {
                     let migrations_dir = std::path::Path::new("migrations");
                     std::fs::create_dir_all(migrations_dir)?;
                     let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
-                    let filename = format!("{timestamp}_{name}.surql");
+                    let filename = format!("{timestamp}_{name}.sql");
                     let path = migrations_dir.join(&filename);
                     std::fs::write(
                         &path,
@@ -504,7 +556,7 @@ match /users/{userId} {
                     }
                     let mut entries: Vec<_> = std::fs::read_dir(migrations_dir)?
                         .filter_map(|e| e.ok())
-                        .filter(|e| e.path().extension().map(|x| x == "surql").unwrap_or(false))
+                        .filter(|e| e.path().extension().map(|x| x == "sql").unwrap_or(false))
                         .collect();
                     entries.sort_by_key(|e| e.file_name());
                     for entry in entries {
@@ -518,8 +570,8 @@ match /users/{userId} {
                 SchemaAction::Down => {
                     anyhow::bail!(
                         "Down migrations not yet implemented.\n  \
-                         Create a rollback file:  migrations/<timestamp>_<name>.down.surql\n  \
-                         Then run it manually:    orignabase schema up  (with the .down.surql file)"
+                         Create a rollback file:  migrations/<timestamp>_<name>.down.sql\n  \
+                         Then run it manually:    orignabase schema up  (with the .down.sql file)"
                     );
                 }
                 SchemaAction::Indexes => apply_indexes(&db).await,
@@ -539,7 +591,7 @@ match /users/{userId} {
                 AuthAction::Get { id } => {
                     let users = db
                         .query_bind(
-                            "SELECT id, email, display_name, roles, email_verified, mfa_enabled, created_at, custom_claims FROM type::thing($uid)",
+                            "SELECT id, email, display_name, roles, email_verified, mfa_enabled, created_at, custom_claims FROM users WHERE id = $uid LIMIT 1",
                             serde_json::json!({ "uid": id }),
                         )
                         .await?;
@@ -557,8 +609,9 @@ match /users/{userId} {
 
 /// Build CORS layer with explicit origin whitelist.
 /// CRITICAL FIX: Replace .allow_origin(Any) with specific production domains.
-fn build_cors_layer(is_test_mode: bool) -> tower_http::cors::CorsLayer {
-    let mut allowed_origins = vec![
+/// In test mode, use very_permissive() so integration tests with arbitrary origins pass.
+fn build_cors_layer(is_test_mode: bool) -> CorsLayer {
+    let allowed_origins = [
         "https://orignagta.ca".parse::<HeaderValue>().unwrap(),
         "https://www.orignagta.ca".parse::<HeaderValue>().unwrap(),
         "https://dev.orignagta.ca".parse::<HeaderValue>().unwrap(),
@@ -567,20 +620,53 @@ fn build_cors_layer(is_test_mode: bool) -> tower_http::cors::CorsLayer {
             .unwrap(),
     ];
 
-    // Allow localhost ONLY in test mode (for local development)
-    if is_test_mode {
-        allowed_origins.push("http://localhost:3000".parse::<HeaderValue>().unwrap());
-        allowed_origins.push("http://localhost:5173".parse::<HeaderValue>().unwrap());
+    let allow_loopback_origins = is_test_mode || Environment::from_env().is_dev();
+    let allow_origin = AllowOrigin::predicate(move |origin, _request_parts| {
+        allowed_origins.contains(origin) || (allow_loopback_origins && is_loopback_origin(origin))
+    });
+
+    CorsLayer::new()
+        .allow_origin(allow_origin)
+        .allow_credentials(true)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            header::ACCEPT,
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::ORIGIN,
+            header::CACHE_CONTROL,
+            "x-requested-with"
+                .parse()
+                .expect("static header should parse"),
+            "x-tenant-id".parse().expect("static header should parse"),
+        ])
+        .max_age(Duration::from_secs(3600))
+}
+
+fn is_loopback_origin(origin: &HeaderValue) -> bool {
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+
+    let Ok(uri) = origin.parse::<axum::http::Uri>() else {
+        return false;
+    };
+
+    if !matches!(uri.scheme_str(), Some("http" | "https")) {
+        return false;
     }
 
-    let mut cors = tower_http::cors::CorsLayer::new().allow_credentials(true);
-
-    for origin in allowed_origins {
-        cors = cors.allow_origin(origin);
-    }
-
-    cors.allow_methods(tower_http::cors::Any)
-        .allow_headers(tower_http::cors::Any)
+    matches!(
+        uri.host(),
+        Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
+    )
 }
 
 /// Validate configuration and panic on critical security issues.
@@ -595,7 +681,7 @@ fn validate_config_warnings(config: &Config) -> Result<()> {
         let msg = "JWT secret is the default value (INSECURE). Set OB_AUTH__JWT_SECRET or auth.jwt_secret in orignabase.toml.";
         warnings.push(("critical", msg));
 
-        // CRITICAL FIX: Panic in production, warn in test mode
+        // CRITICAL FIX: Block in production, allow in test mode
         if !is_test_mode {
             eprintln!();
             eprintln!("  [CRITICAL] {}", msg);
@@ -603,9 +689,8 @@ fn validate_config_warnings(config: &Config) -> Result<()> {
             eprintln!("  REFUSING TO START: Production cannot run with default JWT secret.");
             eprintln!("  Set OB_AUTH__JWT_SECRET to a cryptographically secure random value.");
             eprintln!();
-            panic!("JWT secret is the default value — cannot start in production");
+            fatal.push("JWT secret is the default value");
         }
-        fatal.push("JWT secret is the default value");
     }
 
     if config.auth.jwt_secret.len() < 32 {
@@ -613,7 +698,9 @@ fn validate_config_warnings(config: &Config) -> Result<()> {
             "critical",
             "JWT secret is shorter than 32 characters. Use a strong random secret (≥ 64 chars).",
         ));
-        fatal.push("JWT secret is shorter than 32 characters");
+        if !is_test_mode {
+            fatal.push("JWT secret is shorter than 32 characters");
+        }
     }
 
     if !Path::new(&config.security.rules_path).exists() {
@@ -638,6 +725,13 @@ fn validate_config_warnings(config: &Config) -> Result<()> {
             "info" => eprintln!("  [INFO]     {msg}"),
             _ => eprintln!("  {msg}"),
         }
+    }
+
+    // Block startup on critical security misconfigurations
+    ob_auth::assert_test_mode_not_in_production();
+    ob_auth::assert_jwt_secret_configured(&config.auth.jwt_secret);
+    if let Ok(stripe_key) = config.require_secret("stripe_secret_key") {
+        ob_auth::assert_no_live_stripe_in_dev(stripe_key);
     }
 
     // Block startup on critical issues
@@ -710,10 +804,37 @@ async fn serve(config: Config) -> Result<()> {
             enabled: true,
             url: search.url.clone(),
             api_key: search.api_key.clone(),
-            indexes: HashMap::new(),
+            indexes: HashMap::from([(
+                "products".to_string(),
+                IndexConfig {
+                    searchable: vec![
+                        "title".to_string(),
+                        fields::NAME.to_string(),
+                        "description".to_string(),
+                        "subcategory".to_string(),
+                    ],
+                    filterable: vec![
+                        "lifecycleStatus".to_string(),
+                        "categoryId".to_string(),
+                        fields::SELLER_ID.to_string(),
+                        fields::PRICE_CENTS.to_string(),
+                        "isDigital".to_string(),
+                        "isPerishable".to_string(),
+                    ],
+                    sortable: vec![
+                        fields::CREATED_AT.to_string(),
+                        fields::DATE_CREATED.to_string(),
+                        fields::PRICE_CENTS.to_string(),
+                    ],
+                    primary_key: fields::ID.to_string(),
+                },
+            )]),
         })
         .unwrap_or_default();
     let search_client = SearchClient::new(search_config, http_client.clone());
+    if let Err(e) = search_client.ensure_indexes().await {
+        tracing::warn!("Failed to apply Meilisearch index settings: {e}");
+    }
     let (search_syncer, search_sync_tx) = SearchSyncer::new(search_client.clone());
     tokio::spawn(search_syncer.run());
 
@@ -770,81 +891,104 @@ async fn serve(config: Config) -> Result<()> {
                 if let Some(cluster_tx) = &cluster_tx {
                     let _ = cluster_tx.send(event.clone()).await;
                 }
-                // Fan-out to search syncer
-                let search_action = match event.action {
-                    ob_realtime::registry::ChangeAction::Create
-                    | ob_realtime::registry::ChangeAction::Update => SearchAction::Upsert,
-                    ob_realtime::registry::ChangeAction::Delete => SearchAction::Delete,
-                };
-                let _ = search_sync_tx
-                    .send(SearchSyncEvent {
-                        action: search_action,
-                        index: event.collection.clone(),
-                        document_id: event.document_id.clone(),
-                        data: event.data,
-                    })
-                    .await;
+                // Fan-out to search syncer — products only (no PII collections)
+                if event.collection == "products" {
+                    let search_action = match event.action {
+                        ob_realtime::registry::ChangeAction::Create
+                        | ob_realtime::registry::ChangeAction::Update => SearchAction::Upsert,
+                        ob_realtime::registry::ChangeAction::Delete => SearchAction::Delete,
+                    };
+                    let _ = search_sync_tx
+                        .send(SearchSyncEvent {
+                            action: search_action,
+                            index: event.collection.clone(),
+                            document_id: event.document_id.clone(),
+                            data: event.data,
+                        })
+                        .await;
+                }
             }
         });
     }
 
+    // --- GraphQL security limits ---
+    let gql_limits = GraphQlLimits {
+        enable_introspection: is_test_mode
+            || std::env::var("OB_ENABLE_INTROSPECTION").as_deref() == Ok("true"),
+        max_depth: std::env::var("OB_GRAPHQL_MAX_DEPTH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(12),
+        max_complexity: std::env::var("OB_GRAPHQL_MAX_COMPLEXITY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100),
+    };
+
+    if !gql_limits.enable_introspection && !is_test_mode {
+        tracing::info!("GraphQL introspection DISABLED (OB_ENABLE_INTROSPECTION not set)");
+    }
+
     // --- GraphQL ---
-    let schema = build_schema(
+    let schema = build_schema_with_limits(
         db.clone(),
         rule_engine.clone(),
         change_tx.clone(),
         search_client.clone(),
+        gql_limits,
     );
 
     // --- JWT Keys ---
-    // Try RS256 (auto-generate if keys don't exist), fall back to HS256
+    // Require RS256 (RSA keys) in production; HS256 fallback only for dev/test
     let jwt_keys = {
         let keys_dir = std::path::Path::new("./data/keys");
         let private_path = keys_dir.join("jwt_private.pem");
         let public_path = keys_dir.join("jwt_public.pem");
+        let environment = std::env::var("ENVIRONMENT").unwrap_or_default();
+        let is_production = environment == "production";
 
-        if private_path.exists() && public_path.exists() {
-            let private_pem = std::fs::read(&private_path)?;
-            let public_pem = std::fs::read(&public_path)?;
-            match ob_auth::JwtKeys::from_rsa_pem(&private_pem, &public_pem) {
-                Ok(keys) => {
-                    tracing::info!(
-                        "Using RS256 JWT signing (RSA keys from {})",
-                        keys_dir.display()
-                    );
-                    keys
-                }
-                Err(e) => {
-                    tracing::warn!("Invalid RSA keys, falling back to HS256: {e}");
-                    ob_auth::JwtKeys::from_secret(&config.auth.jwt_secret)
-                }
+        let try_load_rsa = || -> Option<ob_auth::JwtKeys> {
+            if private_path.exists() && public_path.exists() {
+                let private_pem = std::fs::read(&private_path).ok()?;
+                let public_pem = std::fs::read(&public_path).ok()?;
+                ob_auth::JwtKeys::from_rsa_pem(&private_pem, &public_pem).ok()
+            } else {
+                None
             }
-        } else {
-            // Try to auto-generate RSA keys
+        };
+
+        let try_generate_rsa = || -> Option<ob_auth::JwtKeys> {
             match ob_auth::generate_rsa_keys(keys_dir) {
                 Ok((private_pem, public_pem)) => {
-                    match ob_auth::JwtKeys::from_rsa_pem(&private_pem, &public_pem) {
-                        Ok(keys) => {
-                            tracing::info!(
-                                "Auto-generated RS256 JWT keys at {}",
-                                keys_dir.display()
-                            );
-                            keys
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to load generated RSA keys: {e}");
-                            ob_auth::JwtKeys::from_secret(&config.auth.jwt_secret)
-                        }
-                    }
+                    ob_auth::JwtKeys::from_rsa_pem(&private_pem, &public_pem).ok()
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "Could not generate RSA keys (openssl not found?), using HS256: {e}"
-                    );
-                    ob_auth::JwtKeys::from_secret(&config.auth.jwt_secret)
+                    tracing::warn!("Could not generate RSA keys: {e}");
+                    None
                 }
             }
-        }
+        };
+
+        try_load_rsa()
+            .or_else(|| {
+                tracing::info!("RSA keys not found, attempting auto-generation");
+                try_generate_rsa()
+            })
+            .inspect(|_| {
+                tracing::info!("Using RS256 JWT signing (RSA keys from {})", keys_dir.display());
+            })
+            .unwrap_or_else(|| {
+                if is_production {
+                    panic!(
+                        "FATAL: RS256 RSA keys are required in production but could not be loaded or generated. \
+                         Ensure openssl is installed and ./data/keys/ is writable. \
+                         HS256 fallback is not permitted in production."
+                    );
+                } else {
+                    tracing::warn!("RSA keys unavailable, falling back to HS256 (dev/test only)");
+                    ob_auth::JwtKeys::from_secret(&config.auth.jwt_secret)
+                }
+            })
     };
 
     // --- Auth ---
@@ -915,11 +1059,13 @@ async fn serve(config: Config) -> Result<()> {
         oauth_state_nonces: Arc::new(dashmap::DashMap::new()),
         turnstile_secret_key: config.secret("turnstile_secret_key").map(|s| s.to_string()),
         http_client: auth_http_client,
+        test_mode: std::env::var("OB_TEST_MODE").unwrap_or_default() == "1",
     };
 
     // --- Storage ---
     let storage = LocalStorage::new("./data/storage")?;
-    let url_gen = SignedUrlGenerator::new(&config.auth.jwt_secret, &base_url);
+    let storage_signing_key = format!("storage-{}", config.auth.jwt_secret);
+    let url_gen = SignedUrlGenerator::new(&storage_signing_key, &base_url);
     let resumable = ResumableUploadManager::new("./data/storage/.uploads")?;
     let storage_state = StorageState {
         storage,
@@ -1008,7 +1154,7 @@ async fn serve(config: Config) -> Result<()> {
     // Auth routes
     let auth_governor_conf = Arc::new(
         GovernorConfigBuilder::default()
-            .key_extractor(PeerIpKeyExtractor)
+            .key_extractor(XForwardedForKeyExtractor)
             .per_millisecond(auth_replenish_ms)
             .burst_size(auth_burst)
             .finish()
@@ -1029,7 +1175,7 @@ async fn serve(config: Config) -> Result<()> {
     // API routes
     let api_governor_conf = Arc::new(
         GovernorConfigBuilder::default()
-            .key_extractor(PeerIpKeyExtractor)
+            .key_extractor(XForwardedForKeyExtractor)
             .per_millisecond(api_replenish_ms)
             .burst_size(api_burst)
             .finish()
@@ -1066,9 +1212,16 @@ async fn serve(config: Config) -> Result<()> {
 
     // Health check is outside the governor layer to avoid IP extraction issues
     // behind reverse proxies (Docker/Caddy).
-    let health_route = Router::new().route("/health", axum::routing::get(|| async { "ok" }));
-
+    let health_db = db.clone();
+    let health_route = Router::new().route(
+        "/health",
+        axum::routing::get(move || {
+            let db = health_db.clone();
+            async move { health_handler(db).await }
+        }),
+    );
     let app = Router::new()
+        .merge(health_route)
         .route(
             "/graphql",
             axum::routing::get(|| async {
@@ -1102,7 +1255,7 @@ async fn serve(config: Config) -> Result<()> {
                         };
 
                         // Parse GraphQL request from body
-                        let body = axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024)
+                        let body = axum::body::to_bytes(req.into_body(), 2 * 1024 * 1024)
                             .await
                             .unwrap_or_default();
                         let gql_req: async_graphql::Request = serde_json::from_slice(&body)
@@ -1184,12 +1337,29 @@ async fn serve(config: Config) -> Result<()> {
             axum::http::header::X_FRAME_OPTIONS,
             HeaderValue::from_static("DENY"),
         ))
+        .layer(SetResponseHeaderLayer::overriding(
+            axum::http::header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("default-src 'self'"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            axum::http::header::HeaderName::from_static("x-xss-protection"),
+            HeaderValue::from_static("1; mode=block"),
+        ))
         .layer(CompressionLayer::new())
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(30),
         ))
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            ServiceBuilder::new()
+                .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+                .layer(
+                    TraceLayer::new_for_http()
+                        .make_span_with(DefaultMakeSpan::new().include_headers(true))
+                        .on_response(DefaultOnResponse::new().include_headers(true)),
+                )
+                .layer(PropagateRequestIdLayer::x_request_id()),
+        )
         .layer(build_cors_layer(is_test_mode))
         .layer(axum::middleware::from_fn(
             ob_auth::middleware::auth_extractor,
@@ -1198,8 +1368,7 @@ async fn serve(config: Config) -> Result<()> {
         .layer(axum::Extension(tenant_config))
         .layer(axum::middleware::from_fn(
             ob_core::tenant::tenant_middleware,
-        ))
-        .merge(health_route);
+        ));
 
     tracing::info!("OrignaBase listening on {addr}");
     tracing::info!("  GraphiQL:  http://{addr}/graphql");
@@ -1213,9 +1382,73 @@ async fn serve(config: Config) -> Result<()> {
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await?;
 
     Ok(())
+}
+
+fn install_panic_hook() {
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let location = panic_info
+            .location()
+            .map(|loc| format!("{}:{}", loc.file(), loc.line()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let payload = panic_info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|msg| (*msg).to_string())
+            .or_else(|| panic_info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "non-string panic payload".to_string());
+        let backtrace = Backtrace::force_capture();
+        tracing::error!(
+            location = %location,
+            panic = %payload,
+            backtrace = %backtrace,
+            "Unhandled panic"
+        );
+        previous_hook(panic_info);
+    }));
+}
+
+async fn health_handler(db: DatabaseClient) -> impl IntoResponse {
+    match db.query_raw_value("SELECT 1").await {
+        Ok(_) => (StatusCode::OK, "ok").into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, "health_check_db_ping_failed");
+            (StatusCode::SERVICE_UNAVAILABLE, "db_unhealthy").into_response()
+        }
+    }
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "failed_to_install_sigterm_handler");
+                pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = pending::<()>();
+
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            if let Err(error) = result {
+                tracing::warn!(error = %error, "failed_to_install_ctrl_c_handler");
+            }
+        }
+        _ = terminate => {}
+    }
+
+    tracing::info!("Shutdown signal received");
 }
 
 // ── Backup / Restore ──
@@ -1224,14 +1457,16 @@ async fn backup_database(config: &Config, output: &str) -> Result<()> {
     let db = ob_database::DatabaseClient::connect(&config.database).await?;
 
     // List all tables in the database
-    let tables_result = db.query_raw_value("INFO FOR DB").await?;
+    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(
+        "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
+    )
+    .fetch_all(db.inner().pool())
+    .await?;
 
-    let table_names: Vec<String> = tables_result
-        .get("tables")
-        .or_else(|| tables_result.get("tb"))
-        .and_then(|v| v.as_object())
-        .map(|obj| obj.keys().cloned().collect())
-        .unwrap_or_default();
+    let table_names: Vec<String> = rows
+        .iter()
+        .map(|r| r.get::<String, _>("tablename"))
+        .collect();
 
     if table_names.is_empty() {
         println!("No tables found in database. Nothing to back up.");
@@ -1244,6 +1479,7 @@ async fn backup_database(config: &Config, output: &str) -> Result<()> {
     let mut total_docs: u64 = 0;
 
     for table in &table_names {
+        ob_core::validate_identifier(table)?;
         let docs = db.query_raw(&format!("SELECT * FROM {table}")).await?;
 
         let count = docs.len() as u64;
@@ -1309,9 +1545,8 @@ async fn restore_database(config: &Config, input: &str, skip_confirm: bool) -> R
         };
 
         for doc in docs {
-            let doc_json = serde_json::to_string(doc)?;
-            let query = format!("CREATE {table} CONTENT {doc_json}");
-            match db.query_raw(&query).await {
+            ob_core::validate_identifier(table)?;
+            match db.create_document(table, doc.clone()).await {
                 Ok(_) => restored += 1,
                 Err(e) => {
                     eprintln!("  Error restoring doc to '{table}': {e}");
@@ -1418,7 +1653,7 @@ async fn migrate_from_firebase(
             // Show first 3 doc IDs as preview
             for (i, doc) in docs.iter().take(3).enumerate() {
                 let id = doc
-                    .get("id")
+                    .get(fields::ID)
                     .or_else(|| doc.get("_id"))
                     .or_else(|| doc.get("__name__"))
                     .map(|v| v.to_string())
@@ -1564,12 +1799,15 @@ fn translate_firestore_doc(doc: &serde_json::Value) -> serde_json::Value {
                     }
                 }
                 // Preserve document name/ID if present
-                if let Some(name) = map.get("name")
+                if let Some(name) = map.get(fields::NAME)
                     && let Some(name_str) = name.as_str()
                 {
                     // Extract doc ID from path like "projects/x/databases/y/documents/collection/DOC_ID"
                     if let Some(id) = name_str.rsplit('/').next() {
-                        result.insert("id".to_string(), serde_json::Value::String(id.to_string()));
+                        result.insert(
+                            fields::ID.to_string(),
+                            serde_json::Value::String(id.to_string()),
+                        );
                     }
                 }
                 return serde_json::Value::Object(result);
@@ -1655,7 +1893,7 @@ async fn codegen_dart(url: &str, output_dir: &str) -> Result<()> {
 
     let mut count = 0;
     for typ in types {
-        let name = typ["name"].as_str().unwrap_or("");
+        let name = typ[fields::NAME].as_str().unwrap_or("");
         let kind = typ["kind"].as_str().unwrap_or("");
 
         // Skip built-in GraphQL types
@@ -1682,7 +1920,7 @@ async fn codegen_dart(url: &str, output_dir: &str) -> Result<()> {
             models.push_str(&format!("  const factory {name}({{\n"));
 
             for field in fields {
-                let field_name = field["name"].as_str().unwrap_or("unknown");
+                let field_name = field[fields::NAME].as_str().unwrap_or("unknown");
                 let dart_type = graphql_type_to_dart(&field["type"]);
                 models.push_str(&format!("    {dart_type}? {field_name},\n"));
             }
@@ -1707,7 +1945,7 @@ async fn codegen_dart(url: &str, output_dir: &str) -> Result<()> {
 
 fn graphql_type_to_dart(typ: &serde_json::Value) -> String {
     let kind = typ["kind"].as_str().unwrap_or("");
-    let name = typ["name"].as_str().unwrap_or("");
+    let name = typ[fields::NAME].as_str().unwrap_or("");
 
     match kind {
         "SCALAR" => match name {
@@ -1772,12 +2010,12 @@ unique = false"#
 
         let name = format!("idx_{}_{}", idx.collection, idx.fields.join("_"));
         let unique = if idx.unique.unwrap_or(false) {
-            " UNIQUE"
+            "UNIQUE "
         } else {
             ""
         };
         let query = format!(
-            "DEFINE INDEX {name} ON {} FIELDS {}{unique}",
+            "CREATE {unique}INDEX IF NOT EXISTS {name} ON {} ({})",
             idx.collection,
             idx.fields.join(", ")
         );

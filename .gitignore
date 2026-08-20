@@ -1,16 +1,20 @@
 /target
 **/*.rs.bk
+*.bak
 *.swp
 *.swo
 .env
-docker/.env.dev
+.env.*
+!.env.example
+docker/.env
 docker/.env.staging
 docker/.env.prod
-data/keys/
 .DS_Store
+Thumbs.db
 orignabase.toml
-secrets-staging.json
-secrets-prod.json
+secrets-*.json
+secrets/
+data/keys/
 
 # Coverage
 coverage/
@@ -19,3 +23,17 @@ coverage/
 # Test font symlinks (for PDF coverage tests)
 Helvetica-*.ttf
 fuzz/target/
+
+# Local embedded SurrealDB data (regenerated on cargo run)
+local_test_data/
+
+# IDE
+.idea/
+*.iml
+.tags
+
+# Backup / temp
+*.backup
+*.orig
+*.md.bak
+*~

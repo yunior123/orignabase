@@ -20,10 +20,11 @@ function_call = { ident ~ "(" ~ (value ~ ("," ~ value)*)? ~ ")" }
 comp_op = { ">=" | "<=" | "!=" | ">" | "<" | "==" }
 
 // Expressions
-atom       = { "(" ~ expr ~ ")" | value }
+not_op = { "!" }
+atom = { "(" ~ expr ~ ")" | value }
 comparison = { atom ~ comp_op ~ atom }
-not_expr   = { "!" ~ atom | comparison | atom }
-and_expr   = { not_expr ~ ("&&" ~ not_expr)* }
+not_expr = { not_op ~ atom | comparison | atom }
+and_expr = { not_expr ~ ("&&" ~ not_expr)* }
 expr       = { and_expr ~ ("||" ~ and_expr)* }
 
 // Operations

@@ -4,7 +4,7 @@
 //! Run with: cargo test --test <name> -- --ignored
 //!
 //! To start the server:
-//!   surreal start --user root --pass root memory
+//!   docker compose -f docker/docker-compose.yml up -d postgres meilisearch
 //!   cargo run -- serve
 //!
 //! Set OB_TEST_URL to override the default (http://localhost:8080).

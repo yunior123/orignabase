@@ -1,5 +1,6 @@
 ---
 source: crates/ob-handlers/tests/snapshot_tests.rs
+assertion_line: 86
 expression: output
 ---
-double
+

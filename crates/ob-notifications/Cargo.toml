@@ -20,3 +20,5 @@ jsonwebtoken = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
+tower = { workspace = true }
+wiremock = "0.6.5"

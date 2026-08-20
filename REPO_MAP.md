@@ -11,7 +11,7 @@
 | Crate | Entry Point | Purpose |
 |-------|-------------|---------|
 | `ob-core` | `src/lib.rs` | Config (TOML+env), error types, TenantConfig |
-| `ob-database` | `src/lib.rs` | SurrealDB client, CRUD (`crud.rs`), query translator (`query.rs`), transactions, batch ops, FieldValue |
+| `ob-database` | `src/lib.rs` | PostgreSQL client, CRUD (`crud.rs`), query translator (`query.rs`), transactions, batch ops, FieldValue |
 | `ob-auth` | `src/lib.rs` | JWT (`jwt.rs`), routes (`routes.rs`), MFA/TOTP (`totp.rs`), email (`email.rs`), middleware |
 | `ob-graphql` | `src/lib.rs` | Dynamic schema builder, CRUD resolvers (`resolvers.rs`), batch mutations |
 | `ob-security` | `src/lib.rs` | Pest rules DSL parser (`parser.rs`) + evaluator (`evaluator.rs`) |
@@ -26,7 +26,7 @@
 ### Key Files (Most Edited)
 - `crates/ob-graphql/src/resolvers.rs` — All GraphQL query/mutation resolvers
 - `crates/ob-database/src/crud.rs` — CRUD operations, FieldValue handling, batch ops
-- `crates/ob-database/src/query.rs` — SurrealQL query translator
+- `crates/ob-database/src/query.rs` — SQL query translator
 - `crates/ob-auth/src/routes.rs` — All auth endpoints (register, login, MFA, magic link, admin users)
 - `crates/ob-admin/src/routes.rs` — Admin dashboard, collections, indexes, config, links, metrics
 - `crates/orignabase/src/main.rs` — Server assembly, router composition

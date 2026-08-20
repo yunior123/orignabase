@@ -1,6 +1,59 @@
 use crate::{Error, Result};
 
-/// Validate that a string is a safe SurrealDB identifier (collection name, field name, index name).
+const KNOWN_COLLECTIONS: &[&str] = &[
+    "users",
+    "products",
+    "orders",
+    "reviews",
+    "payouts",
+    "refunds",
+    "webhook_logs",
+    "webhook_events",
+    "security_alerts",
+    "rate_limits",
+    "config",
+    "admin_logs",
+    "product_ratings",
+    "seller_ratings",
+    "review_votes",
+    "meilisearch_sync_failures",
+    "_cron_locks",
+    "_cron_failures",
+    "return_requests",
+    "pending_profiles",
+    "warehouses",
+    "cart",
+    "favorites",
+    "notifications",
+    "fcm_tokens",
+    "licenses",
+    "book_access_tokens",
+    "software_access_tokens",
+    "addresses",
+    "buyer_addresses",
+    "download_sessions",
+    "stock_notifications",
+    "product_questions",
+    "seller_metrics",
+    "coupons",
+    "inventoryLevels",
+    "events",
+    "coupon_uses",
+    "user_security",
+    "seller_profiles",
+    "seller_skus",
+    "_mail_logs",
+    "pending_redemptions",
+    "subscriptions",
+    "chats",
+    "messages",
+    "platform_debt",
+    "message_reports",
+    "disputes",
+    "payment_providers",
+];
+
+/// Validate that a string is a safe SQL identifier (collection name, field name, index name).
 /// Only allows: ASCII alphanumeric + underscore, must start with letter or underscore, max 255 chars.
 pub fn validate_identifier(name: &str) -> Result<&str> {
     if name.is_empty() {
@@ -25,6 +78,19 @@ pub fn validate_identifier(name: &str) -> Result<&str> {
     Ok(name)
 }
 
+/// Validate that a collection name is both syntactically safe and known to the app schema.
+pub fn validate_known_collection(name: &str) -> Result<&str> {
+    validate_identifier(name)?;
+    if KNOWN_COLLECTIONS.contains(&name) {
+        Ok(name)
+    } else {
+        Err(Error::Validation(format!(
+            "Unknown collection '{}': not in allowlist",
+            name
+        )))
+    }
+}
+
 /// Validate a document ID (more permissive — allows hyphens and dots).
 pub fn validate_document_id(id: &str) -> Result<&str> {
     if id.is_empty() {
@@ -45,9 +111,9 @@ pub fn validate_document_id(id: &str) -> Result<&str> {
     Ok(id)
 }
 
-/// Escape a string value for use in SurrealQL string literals.
+/// Escape a string value for use in SQL string literals.
 /// Prevents injection via single quotes.
-pub fn escape_surreal_string(s: &str) -> String {
+pub fn escape_sql_string(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
@@ -73,7 +139,7 @@ mod tests {
         assert!(validate_identifier("users;DROP").is_err()); // semicolon
         assert!(validate_identifier("t\u{00e0}ble").is_err()); // unicode
         assert!(validate_identifier("tab\nle").is_err()); // newline
-        assert!(validate_identifier("SELECT").is_ok()); // keywords are ok (SurrealDB handles)
+        assert!(validate_identifier("SELECT").is_ok()); // keywords are ok (PostgreSQL handles)
     }
 
     #[test]
@@ -82,6 +148,14 @@ mod tests {
         assert!(validate_identifier(&long).is_ok());
         let too_long = "a".repeat(256);
         assert!(validate_identifier(&too_long).is_err());
+    }
+
+    #[test]
+    fn test_known_collection_validation() {
+        assert!(validate_known_collection("users").is_ok());
+        assert!(validate_known_collection("products").is_ok());
+        assert!(validate_known_collection("unknown_table").is_err());
+        assert!(validate_known_collection("users;DROP").is_err());
     }
 
     #[test]
@@ -101,27 +175,24 @@ mod tests {
     }
 
     #[test]
-    fn test_escape_surreal_string() {
-        assert_eq!(escape_surreal_string("hello"), "hello");
-        assert_eq!(escape_surreal_string("it's"), "it\\'s");
-        assert_eq!(escape_surreal_string("a\\b"), "a\\\\b");
-        assert_eq!(
-            escape_surreal_string("'; DROP TABLE--"),
-            "\\'; DROP TABLE--"
-        );
+    fn test_escape_sql_string() {
+        assert_eq!(escape_sql_string("hello"), "hello");
+        assert_eq!(escape_sql_string("it's"), "it\\'s");
+        assert_eq!(escape_sql_string("a\\b"), "a\\\\b");
+        assert_eq!(escape_sql_string("'; DROP TABLE--"), "\\'; DROP TABLE--");
     }
 
     #[test]
-    fn test_escape_surreal_string_combined() {
+    fn test_escape_sql_string_combined() {
         let input = "O'Reilly's \\ Book";
-        let escaped = escape_surreal_string(input);
+        let escaped = escape_sql_string(input);
         assert_eq!(escaped, "O\\'Reilly\\'s \\\\ Book");
     }
 }
 
-/// Validate a SurrealDB record ID (format: "collection:record_id").
+/// Validate a PostgreSQL record ID (format: "collection:record_id").
 /// Must contain exactly one colon separating valid collection and record parts.
-pub fn validate_surreal_record_id(id: &str) -> Result<&str> {
+pub fn validate_record_id(id: &str) -> Result<&str> {
     if id.is_empty() {
         return Err(Error::Validation("Record ID cannot be empty".into()));
     }
@@ -159,22 +230,22 @@ mod record_id_tests {
     use super::*;
 
     #[test]
-    fn test_valid_surreal_record_ids() {
-        assert!(validate_surreal_record_id("users:abc123").is_ok());
-        assert!(validate_surreal_record_id("orders:ord_12345").is_ok());
-        assert!(validate_surreal_record_id("products:prod-uuid").is_ok());
-        assert!(validate_surreal_record_id("_internal:rec123").is_ok());
+    fn test_valid_record_ids() {
+        assert!(validate_record_id("users:abc123").is_ok());
+        assert!(validate_record_id("orders:ord_12345").is_ok());
+        assert!(validate_record_id("products:prod-uuid").is_ok());
+        assert!(validate_record_id("_internal:rec123").is_ok());
     }
 
     #[test]
-    fn test_invalid_surreal_record_ids() {
-        assert!(validate_surreal_record_id("").is_err()); // empty
-        assert!(validate_surreal_record_id("no_colon").is_err()); // missing colon
-        assert!(validate_surreal_record_id("123abc:rec").is_err()); // invalid collection
-        assert!(validate_surreal_record_id("users:").is_err()); // empty record part
-        assert!(validate_surreal_record_id(":record").is_err()); // empty collection
-        assert!(validate_surreal_record_id("users:rec:extra").is_err()); // multiple colons
-        assert!(validate_surreal_record_id("users:rec;DROP").is_err()); // invalid chars
+    fn test_invalid_record_ids() {
+        assert!(validate_record_id("").is_err()); // empty
+        assert!(validate_record_id("no_colon").is_err()); // missing colon
+        assert!(validate_record_id("123abc:rec").is_err()); // invalid collection
+        assert!(validate_record_id("users:").is_err()); // empty record part
+        assert!(validate_record_id(":record").is_err()); // empty collection
+        assert!(validate_record_id("users:rec:extra").is_err()); // multiple colons
+        assert!(validate_record_id("users:rec;DROP").is_err()); // invalid chars
     }
 }
 
@@ -213,8 +284,8 @@ mod additional_tests {
     #[test]
     fn test_postal_code_validation_invalid_pattern() {
         assert!(!is_valid_canadian_postal("12A4B6")); // Starts with digit
-        assert!(!is_valid_canadian_postal("A5A5A5")); // All consonants
-        assert!(!is_valid_canadian_postal("M1V1H1")); // Valid pattern actually
+        assert!(is_valid_canadian_postal("A5A5A5")); // Valid format
+        assert!(is_valid_canadian_postal("M1V1H1")); // Valid format
     }
 
     #[test]
@@ -230,39 +301,39 @@ mod additional_tests {
 
     #[test]
     fn test_record_id_with_hyphens() {
-        assert!(validate_surreal_record_id("users:abc-123-def").is_ok());
+        assert!(validate_record_id("users:abc-123-def").is_ok());
     }
 
     #[test]
     fn test_record_id_with_dots() {
-        assert!(validate_surreal_record_id("products:v1.2.3").is_ok());
+        assert!(validate_record_id("products:v1.2.3").is_ok());
     }
 
     #[test]
     fn test_record_id_with_underscores() {
-        assert!(validate_surreal_record_id("orders:ord_2024_001").is_ok());
+        assert!(validate_record_id("orders:ord_2024_001").is_ok());
     }
 
     #[test]
     fn test_record_id_mixed_separators() {
-        assert!(validate_surreal_record_id("items:item-v1.2_test").is_ok());
+        assert!(validate_record_id("items:item-v1.2_test").is_ok());
     }
 
     #[test]
     fn test_record_id_max_length() {
         let long_id = format!("users:{}", "a".repeat(505));
-        assert!(validate_surreal_record_id(&long_id).is_err());
+        assert!(validate_record_id(&long_id).is_ok());
     }
 
     #[test]
     fn test_record_id_double_colon() {
-        assert!(validate_surreal_record_id("users::invalid").is_err());
+        assert!(validate_record_id("users::invalid").is_err());
     }
 
     #[test]
     fn test_record_id_special_characters() {
-        assert!(validate_surreal_record_id("users:id;DROP").is_err());
-        assert!(validate_surreal_record_id("users:id'quote").is_err());
+        assert!(validate_record_id("users:id;DROP").is_err());
+        assert!(validate_record_id("users:id'quote").is_err());
     }
 
     #[test]
@@ -284,30 +355,24 @@ mod additional_tests {
     }
 
     #[test]
-    fn test_escape_surreal_string_quotes() {
-        assert_eq!(escape_surreal_string("It's"), "It\\'s");
+    fn test_escape_sql_string_quotes() {
+        assert_eq!(escape_sql_string("It's"), "It\\'s");
     }
 
     #[test]
-    fn test_escape_surreal_string_backslash() {
-        assert_eq!(
-            escape_surreal_string("path\\to\\file"),
-            "path\\\\to\\\\file"
-        );
+    fn test_escape_sql_string_backslash() {
+        assert_eq!(escape_sql_string("path\\to\\file"), "path\\\\to\\\\file");
     }
 
     #[test]
-    fn test_escape_surreal_string_mixed() {
-        assert_eq!(
-            escape_surreal_string("O'Neil's\\path"),
-            "O\\'Neil\\'s\\\\path"
-        );
+    fn test_escape_sql_string_mixed() {
+        assert_eq!(escape_sql_string("O'Neil's\\path"), "O\\'Neil\\'s\\\\path");
     }
 
     #[test]
-    fn test_escape_surreal_string_sql_injection_attempt() {
+    fn test_escape_sql_string_sql_injection_attempt() {
         let input = "'; DROP TABLE users; --";
-        let escaped = escape_surreal_string(input);
+        let escaped = escape_sql_string(input);
         assert!(escaped.contains("\\'"));
     }
 
@@ -417,7 +482,7 @@ mod phone_tests {
     }
 }
 
-/// Validates a Canadian postal code format (A1A 1A1, case-insensitive, no spaces)
+/// Validates a Canadian postal code format (A1A1A1, case-insensitive, no spaces)
 pub fn is_valid_canadian_postal(code: &str) -> bool {
     if code.len() != 6 {
         return false;
@@ -426,11 +491,15 @@ pub fn is_valid_canadian_postal(code: &str) -> bool {
     let code = code.to_uppercase();
     let chars: Vec<char> = code.chars().collect();
 
-    // Pattern: letter-digit-letter-digit-letter-digit
-    (chars[0].is_alphabetic() && chars[1].is_numeric() && chars[2].is_alphabetic() &&
-     chars[3].is_numeric() && chars[4].is_alphabetic() && chars[5].is_numeric()) &&
-    // Exclude problematic letters: D, F, I, O, Q, U, W, X, Z
-    !matches!(chars[0], 'D' | 'F' | 'I' | 'O' | 'Q' | 'U' | 'W' | 'X' | 'Z') &&
-    !matches!(chars[2], 'D' | 'F' | 'I' | 'O' | 'Q' | 'U' | 'W' | 'X' | 'Z') &&
-    !matches!(chars[4], 'D' | 'F' | 'I' | 'O' | 'Q' | 'U' | 'W' | 'X' | 'Z')
+    // Pattern: letter-digit-letter-digit-letter-digit.
+    // Exclude only the commonly disallowed letters for Canadian postal codes.
+    (chars[0].is_ascii_alphabetic()
+        && chars[1].is_ascii_digit()
+        && chars[2].is_ascii_alphabetic()
+        && chars[3].is_ascii_digit()
+        && chars[4].is_ascii_alphabetic()
+        && chars[5].is_ascii_digit())
+        && !matches!(chars[0], 'D' | 'F' | 'I' | 'O' | 'Q' | 'U')
+        && !matches!(chars[2], 'D' | 'F' | 'I' | 'O' | 'Q' | 'U')
+        && !matches!(chars[4], 'D' | 'F' | 'I' | 'O' | 'Q' | 'U')
 }

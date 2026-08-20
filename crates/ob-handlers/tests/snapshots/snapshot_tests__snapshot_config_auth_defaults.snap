@@ -3,7 +3,7 @@ source: crates/ob-handlers/tests/snapshot_tests.rs
 expression: auth_snapshot
 ---
 {
-  "jwt_secret": "CHANGE_ME_IN_PRODUCTION",
   "access_token_ttl_secs": 900,
+  "jwt_secret": "CHANGE_ME_IN_PRODUCTION",
   "refresh_token_ttl_secs": 604800
 }

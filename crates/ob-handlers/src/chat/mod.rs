@@ -262,38 +262,58 @@ pub fn router(state: HandlersState) -> Router {
 }
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
+use std::sync::OnceLock;
+
+static ZERO_WIDTH_RE: OnceLock<regex_lite::Regex> = OnceLock::new();
+static SCRIPT_TAG_RE: OnceLock<regex_lite::Regex> = OnceLock::new();
+static JS_SCHEME_RE: OnceLock<regex_lite::Regex> = OnceLock::new();
+static EMAIL_RE: OnceLock<regex_lite::Regex> = OnceLock::new();
+static URL_RE: OnceLock<regex_lite::Regex> = OnceLock::new();
+static WWW_RE: OnceLock<regex_lite::Regex> = OnceLock::new();
+static PHONE_RE: OnceLock<regex_lite::Regex> = OnceLock::new();
+
 fn _sanitize_text(text: &str) -> String {
     if text.is_empty() {
         return String::new();
     }
 
     // Strip zero-width chars and other invisible whitespace
-    let zero_width = regex_lite::Regex::new(r"[\u{200B}\u{200C}\u{200D}\u{FEFF}]").unwrap();
+    let zero_width = ZERO_WIDTH_RE.get_or_init(|| {
+        regex_lite::Regex::new(r"[\u{200B}\u{200C}\u{200D}\u{FEFF}]").expect("valid regex")
+    });
     let text = zero_width.replace_all(text, "");
 
     // Strip HTML and script tags
-    let script_tag = regex_lite::Regex::new("(?i)<script[^>]*>.*?</script>").unwrap();
+    let script_tag = SCRIPT_TAG_RE.get_or_init(|| {
+        regex_lite::Regex::new("(?i)<script[^>]*>.*?</script>").expect("valid regex")
+    });
     let text = script_tag.replace_all(&text, "");
 
     let clean = sanitize_html(&text);
 
-    let js_scheme = regex_lite::Regex::new("(?i)javascript:").unwrap();
+    let js_scheme = JS_SCHEME_RE
+        .get_or_init(|| regex_lite::Regex::new("(?i)javascript:").expect("valid regex"));
     let text = js_scheme.replace_all(&clean, "");
 
     // Redact email addresses
-    let email_pat =
+    let email_pat = EMAIL_RE.get_or_init(|| {
         regex_lite::Regex::new(r"(?i)\b[\w._%+\-]+(\s*[@\[(]at[\])]\s*|@)[\w.\-]+\.[a-zA-Z]{2,}\b")
-            .unwrap();
+            .expect("valid regex")
+    });
     let text = email_pat.replace_all(&text, "[email removed]");
 
     // Redact URLs and web links
-    let url_pat = regex_lite::Regex::new(r"(?i)https?://[^\s]+").unwrap();
+    let url_pat =
+        URL_RE.get_or_init(|| regex_lite::Regex::new(r"(?i)https?://[^\s]+").expect("valid regex"));
     let text = url_pat.replace_all(&text, "[link removed]");
-    let www_pat = regex_lite::Regex::new(r"(?i)www\.[^\s]+").unwrap();
+    let www_pat =
+        WWW_RE.get_or_init(|| regex_lite::Regex::new(r"(?i)www\.[^\s]+").expect("valid regex"));
     let text = www_pat.replace_all(&text, "[link removed]");
 
     // Redact phone numbers (10-15 digits)
-    let phone_pat = regex_lite::Regex::new(r"(\+?[\d\s\-\.()]{10,20}\d)").unwrap();
+    let phone_pat = PHONE_RE.get_or_init(|| {
+        regex_lite::Regex::new(r"(\+?[\d\s\-\.()]{10,20}\d)").expect("valid regex")
+    });
     let text = phone_pat.replace_all(&text, |caps: &regex_lite::Captures| {
         let raw = &caps[0];
         let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).collect();
@@ -339,7 +359,7 @@ async fn buyer_has_chat_eligible_order(
     product_id: &str,
 ) -> Result<bool, ob_core::Error> {
     let query = format!(
-        "SELECT * FROM {} WHERE userId = $buyer_id AND {} IN ['DELIVERED', 'DISPUTED'] LIMIT 50",
+        "SELECT * FROM {} WHERE data->>'userId' = $buyer_id AND data->>'{}' IN ('delivered', 'disputed') LIMIT 50",
         collections::ORDERS,
         fields::ORDER_STATUS
     );
@@ -351,7 +371,7 @@ async fn buyer_has_chat_eligible_order(
 
     Ok(orders.iter().any(|order| {
         order
-            .get("productIds")
+            .get(fields::PRODUCT_IDS)
             .and_then(|v| v.as_array())
             .map(|ids| ids.iter().any(|id| id.as_str() == Some(product_id)))
             .unwrap_or(false)
@@ -456,11 +476,11 @@ async fn get_or_create_chat(
         fields::PRODUCT_ID: product_id,
         fields::BUYER_ID: buyer_id,
         fields::SELLER_ID: seller_id,
-        "productTitle": product_name,
-        "productImageUrl": product_image,
-        "buyerUnreadCount": 0,
-        "sellerUnreadCount": 0,
-        "messageCount": 0,
+        fields::PRODUCT_TITLE: product_name,
+        fields::PRODUCT_IMAGE_URL: product_image,
+        fields::BUYER_UNREAD_COUNT: 0,
+        fields::SELLER_UNREAD_COUNT: 0,
+        fields::MESSAGE_COUNT: 0,
         fields::CREATED_AT: now,
         fields::UPDATED_AT: now,
     });
@@ -552,7 +572,7 @@ async fn send_message(
     }
 
     // Deduplication guard
-    let last_text = chat.get("lastMessageText").and_then(|v| v.as_str());
+    let last_text = chat.get(fields::LAST_MESSAGE_TEXT).and_then(|v| v.as_str());
     let last_update = chat
         .get(fields::UPDATED_AT)
         .and_then(|v| v.as_str())
@@ -567,7 +587,7 @@ async fn send_message(
 
     // Thread capacity check
     let msg_count = chat
-        .get("messageCount")
+        .get(fields::MESSAGE_COUNT)
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
     if msg_count >= MAX_MESSAGES_PER_THREAD {
@@ -616,11 +636,11 @@ async fn send_message(
         .unwrap_or("Someone");
 
     let msg_doc = json!({
-        "chatId": req.chat_id,
+        fields::CHAT_ID: req.chat_id,
         fields::SENDER_ID: uid,
-        "senderDisplayName": sender_name,
+        fields::SENDER_DISPLAY_NAME: sender_name,
         fields::MESSAGE_TEXT: text,
-        "imageUrls": image_urls.cloned().unwrap_or_default(),
+        fields::IMAGE_URLS: image_urls.cloned().unwrap_or_default(),
         fields::CREATED_AT: now,
         fields::READ: false,
         fields::DELETED: false,
@@ -633,32 +653,32 @@ async fn send_message(
 
     // Update thread
     let target_unread = if uid == buyer_id {
-        "sellerUnreadCount"
+        fields::SELLER_UNREAD_COUNT
     } else {
-        "buyerUnreadCount"
+        fields::BUYER_UNREAD_COUNT
     };
     let mut thread_update = json!({
         fields::LAST_MESSAGE: if text.len() > 100 { &text[..100] } else { &text },
-        "lastMessageText": text,
+        fields::LAST_MESSAGE_TEXT: text,
         fields::LAST_MESSAGE_AT: now,
         fields::UPDATED_AT: now,
-        "messageCount": msg_count + 1,
+        fields::MESSAGE_COUNT: msg_count + 1,
         target_unread: chat.get(target_unread).and_then(|v| v.as_i64()).unwrap_or(0) + 1,
     });
 
     // Metrics
-    if uid == buyer_id && chat.get("firstBuyerMessageAt").is_none() {
-        thread_update["firstBuyerMessageAt"] = json!(now);
+    if uid == buyer_id && chat.get(fields::FIRST_BUYER_MESSAGE_AT).is_none() {
+        thread_update[fields::FIRST_BUYER_MESSAGE_AT] = json!(now);
     } else if uid == seller_id
-        && chat.get("firstSellerReplyAt").is_none()
+        && chat.get(fields::FIRST_SELLER_REPLY_AT).is_none()
         && let Some(first_buyer_at) = chat
-            .get("firstBuyerMessageAt")
+            .get(fields::FIRST_BUYER_MESSAGE_AT)
             .and_then(|v| v.as_str())
             .and_then(parse_rfc3339)
     {
         let hours = (chrono::Utc::now() - first_buyer_at).num_minutes() as f64 / 60.0;
-        thread_update["firstSellerReplyAt"] = json!(now);
-        thread_update["firstReplyHours"] = json!(hours);
+        thread_update[fields::FIRST_SELLER_REPLY_AT] = json!(now);
+        thread_update[fields::FIRST_REPLY_HOURS] = json!(hours);
     }
 
     state
@@ -670,9 +690,9 @@ async fn send_message(
     let _recipient_id = if uid == buyer_id { seller_id } else { buyer_id };
     let _ = crate::push::send_push(
         &state.http_client,
-        &state.config.database.name, // Using DB name as project_id placeholder
-        "",                          // Would need service account
-        "",                          // Would need recipient token
+        "orignabase", // Project ID placeholder
+        "",           // Would need service account
+        "",           // Would need recipient token
         &format!("Message from {sender_name}"),
         if text.is_empty() {
             "Sent an image"
@@ -725,7 +745,7 @@ async fn mark_messages_read(
     // Mark messages read in batch
     let msg_collection = format!("{}__{}", collections::CHATS, collections::CHAT_MESSAGES);
     let query = format!(
-        "UPDATE {} SET read = true WHERE chatId = $chat_id AND senderId != $uid AND read = false",
+        "UPDATE {} SET data = data || '{{\"read\": true}}'::jsonb WHERE data->>'chatId' = $chat_id AND data->>'senderId' != $uid AND data @> '{{\"read\": false}}'::jsonb RETURNING id, data::TEXT, created_at, updated_at",
         msg_collection
     );
 
@@ -737,9 +757,9 @@ async fn mark_messages_read(
 
     if count > 0 {
         let unread_field = if uid == buyer_id {
-            "buyerUnreadCount"
+            fields::BUYER_UNREAD_COUNT
         } else {
-            "sellerUnreadCount"
+            fields::SELLER_UNREAD_COUNT
         };
         state
             .db
@@ -807,7 +827,7 @@ async fn delete_message(
             json!({
                 fields::DELETED: true,
                 fields::MESSAGE_TEXT: "",
-                "imageUrls": Vec::<String>::new(),
+                fields::IMAGE_URLS: Vec::<String>::new(),
                 fields::UPDATED_AT: chrono::Utc::now().to_rfc3339(),
             }),
         )
@@ -866,12 +886,12 @@ async fn report_message(
 
     let report_id = uuid::Uuid::new_v4().to_string();
     let report_data = json!({
-        "reportId": report_id,
-        "chatId": req.chat_id,
-        "messageId": req.message_id,
-        "reporterId": uid,
-        "reason": req.reason.unwrap_or_else(|| "Inappropriate content".into()),
-        "messageText": msg.get(fields::MESSAGE_TEXT).and_then(|v| v.as_str()).unwrap_or(""),
+        fields::REPORT_ID: report_id,
+        fields::CHAT_ID: req.chat_id,
+        fields::MESSAGE_ID: req.message_id,
+        fields::REPORTER_ID: uid,
+        fields::REASON: req.reason.unwrap_or_else(|| "Inappropriate content".into()),
+        fields::MESSAGE_TEXT: msg.get(fields::MESSAGE_TEXT).and_then(|v| v.as_str()).unwrap_or(""),
         fields::SENDER_ID: msg.get(fields::SENDER_ID).and_then(|v| v.as_str()).unwrap_or(""),
         fields::STATUS: "pending",
         fields::CREATED_AT: chrono::Utc::now().to_rfc3339(),
@@ -1011,10 +1031,11 @@ mod tests {
     #[tokio::test]
     async fn test_get_or_create_chat_full_flow() {
         let state = setup_state().await;
-        let buyer_id = "buyer_1";
-        let seller_id = "seller_1";
-        let product_id = "prod_1";
-        let auth = auth_ctx(buyer_id);
+        let buyer_id = uuid::Uuid::new_v4().to_string();
+        let seller_id = uuid::Uuid::new_v4().to_string();
+        let product_id = uuid::Uuid::new_v4().to_string();
+        let order_id = uuid::Uuid::new_v4().to_string();
+        let auth = auth_ctx(&buyer_id);
 
         // 1. Setup Data
         // Active premium subscription
@@ -1022,7 +1043,7 @@ mod tests {
             .db
             .upsert_document(
                 collections::SUBSCRIPTIONS,
-                buyer_id,
+                &buyer_id,
                 json!({ fields::STATUS: "active" }),
             )
             .await
@@ -1033,10 +1054,10 @@ mod tests {
             .db
             .upsert_document(
                 collections::PRODUCTS,
-                product_id,
+                &product_id,
                 json!({
                     fields::NAME: "Maple Syrup",
-                    fields::SELLER_ID: seller_id,
+                    fields::SELLER_ID: &seller_id,
                     fields::LIFECYCLE_STATUS: "ACTIVE",
                     fields::IMAGE_URLS: ["https://cdn.test/1.jpg"]
                 }),
@@ -1046,24 +1067,28 @@ mod tests {
 
         // 2. Test without eligible order (should fail)
         let req = GetOrCreateChatRequest {
-            other_user_id: seller_id.into(),
-            product_id: Some(product_id.into()),
+            other_user_id: seller_id.clone(),
+            product_id: Some(product_id.clone()),
         };
         let result =
             get_or_create_chat(State(state.clone()), Extension(auth.clone()), Json(req)).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("delivered order"));
+        assert!(result.is_err(), "Expected error but got success");
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            err_str.contains("delivered order"),
+            "Expected 'delivered order' error, got: {err_str}"
+        );
 
         // 3. Add eligible order
         state
             .db
             .upsert_document(
                 collections::ORDERS,
-                "order_1",
+                &order_id,
                 json!({
-                    "userId": buyer_id,
-                    "productIds": [product_id],
-                    fields::ORDER_STATUS: "DELIVERED"
+                    "userId": &buyer_id,
+                    "productIds": [&product_id],
+                    fields::ORDER_STATUS: "delivered"
                 }),
             )
             .await
@@ -1071,8 +1096,8 @@ mod tests {
 
         // 4. Test success create
         let req = GetOrCreateChatRequest {
-            other_user_id: seller_id.into(),
-            product_id: Some(product_id.into()),
+            other_user_id: seller_id.clone(),
+            product_id: Some(product_id.clone()),
         };
         let result = get_or_create_chat(
             State(state.clone()),
@@ -1080,25 +1105,27 @@ mod tests {
             Json(req.clone()),
         )
         .await;
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "{result:?}");
         let Json(resp) = result.unwrap();
         assert!(resp.is_new);
-        assert_eq!(resp.chat_id, format!("{product_id}_{buyer_id}"));
+        assert_eq!(resp.chat_id, format!("{}_{}", product_id, buyer_id));
 
         // 5. Test idempotency (should return existing)
         let result =
             get_or_create_chat(State(state.clone()), Extension(auth.clone()), Json(req)).await;
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "{result:?}");
         let Json(resp) = result.unwrap();
         assert!(!resp.is_new);
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn test_send_message_full_flow() {
         let state = setup_state().await;
-        let buyer_id = "buyer_1";
-        let seller_id = "seller_1";
-        let chat_id = "p1_b1";
+        let buyer_id = &uuid::Uuid::new_v4().to_string();
+        let seller_id = &uuid::Uuid::new_v4().to_string();
+        let chat_id_str = format!("chat_{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let chat_id = chat_id_str.as_str();
         let auth = auth_ctx(buyer_id);
 
         // Setup chat thread
@@ -1110,8 +1137,8 @@ mod tests {
                 json!({
                     fields::BUYER_ID: buyer_id,
                     fields::SELLER_ID: seller_id,
-                    "messageCount": 0,
-                    "sellerUnreadCount": 0,
+                    fields::MESSAGE_COUNT: 0,
+                    fields::SELLER_UNREAD_COUNT: 0,
                     fields::UPDATED_AT: "2020-01-01T00:00:00Z"
                 }),
             )
@@ -1156,11 +1183,28 @@ mod tests {
             .get_document(collections::CHATS, chat_id)
             .await
             .unwrap();
-        assert_eq!(chat["messageCount"], 1);
-        assert_eq!(chat["sellerUnreadCount"], 1);
-        assert_eq!(chat["lastMessageText"], "Hello seller!");
+        assert_eq!(chat[fields::MESSAGE_COUNT], 1);
+        assert_eq!(chat[fields::SELLER_UNREAD_COUNT], 1);
+        assert_eq!(chat[fields::LAST_MESSAGE_TEXT], "Hello seller!");
 
-        // Test Deduplication (within 5s)
+        // Test Deduplication (within 5s) — pre-set dedup state to avoid race with thread update
+        let now = chrono::Utc::now().to_rfc3339();
+        state
+            .db
+            .upsert_document(
+                collections::CHATS,
+                chat_id,
+                json!({
+                    fields::BUYER_ID: buyer_id,
+                    fields::SELLER_ID: seller_id,
+                    fields::MESSAGE_COUNT: 1,
+                    fields::SELLER_UNREAD_COUNT: 1,
+                    fields::LAST_MESSAGE_TEXT: "Hello seller!",
+                    fields::UPDATED_AT: now,
+                }),
+            )
+            .await
+            .unwrap();
         let req_dup = SendMessageRequest {
             chat_id: chat_id.into(),
             message_text: Some("Hello seller!".into()),
@@ -1169,16 +1213,20 @@ mod tests {
         };
         let result_dup =
             send_message(State(state.clone()), Extension(auth.clone()), Json(req_dup)).await;
-        assert!(result_dup.is_err());
+        assert!(
+            result_dup.is_err(),
+            "Dedup should reject duplicate message within 5s"
+        );
         assert!(result_dup.unwrap_err().to_string().contains("already sent"));
     }
 
     #[tokio::test]
     async fn test_mark_read_flow() {
         let state = setup_state().await;
-        let buyer_id = "buyer_1";
-        let seller_id = "seller_1";
-        let chat_id = "p1_b1";
+        let buyer_id = &uuid::Uuid::new_v4().to_string();
+        let seller_id = &uuid::Uuid::new_v4().to_string();
+        let chat_id_str = format!("mrf_{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let chat_id = chat_id_str.as_str();
         let auth = auth_ctx(buyer_id);
 
         // Setup chat
@@ -1190,7 +1238,7 @@ mod tests {
                 json!({
                     fields::BUYER_ID: buyer_id,
                     fields::SELLER_ID: seller_id,
-                    "buyerUnreadCount": 2
+                    fields::BUYER_UNREAD_COUNT: 2
                 }),
             )
             .await
@@ -1198,15 +1246,17 @@ mod tests {
 
         // Setup unread messages from seller
         let msg_coll = format!("{}__{}", collections::CHATS, collections::CHAT_MESSAGES);
+        let m1 = uuid::Uuid::new_v4().to_string();
+        let m2 = uuid::Uuid::new_v4().to_string();
         state
             .db
             .upsert_document(
                 &msg_coll,
-                "m1",
+                &m1,
                 json!({
-                    "chatId": chat_id,
+                    fields::CHAT_ID: chat_id,
                     fields::SENDER_ID: seller_id,
-                    "read": false
+                    fields::READ: false
                 }),
             )
             .await
@@ -1215,11 +1265,11 @@ mod tests {
             .db
             .upsert_document(
                 &msg_coll,
-                "m2",
+                &m2,
                 json!({
-                    "chatId": chat_id,
+                    fields::CHAT_ID: chat_id,
                     fields::SENDER_ID: seller_id,
-                    "read": false
+                    fields::READ: false
                 }),
             )
             .await
@@ -1231,7 +1281,11 @@ mod tests {
         };
         let result =
             mark_messages_read(State(state.clone()), Extension(auth.clone()), Json(req)).await;
-        assert!(result.is_ok());
+        assert!(
+            result.is_ok(),
+            "mark_messages_read failed: {:?}",
+            result.err()
+        );
         let Json(resp) = result.unwrap();
         assert_eq!(resp.count, 2);
 
@@ -1241,7 +1295,7 @@ mod tests {
             .get_document(collections::CHATS, chat_id)
             .await
             .unwrap();
-        assert_eq!(chat["buyerUnreadCount"], 0);
+        assert_eq!(chat[fields::BUYER_UNREAD_COUNT], 0);
     }
 
     #[tokio::test]
@@ -1313,9 +1367,10 @@ mod tests {
     #[tokio::test]
     async fn test_send_message_accepts_https_image_urls() {
         let state = setup_state().await;
-        let buyer_id = "buyer_1";
-        let seller_id = "seller_1";
-        let chat_id = "p1_b1";
+        let buyer_id = &uuid::Uuid::new_v4().to_string();
+        let seller_id = &uuid::Uuid::new_v4().to_string();
+        let chat_id_str = format!("https_{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let chat_id = chat_id_str.as_str();
         let auth = auth_ctx(buyer_id);
 
         // Setup chat + premium
@@ -1327,8 +1382,8 @@ mod tests {
                 json!({
                     fields::BUYER_ID: buyer_id,
                     fields::SELLER_ID: seller_id,
-                    "messageCount": 0,
-                    "sellerUnreadCount": 0,
+                    fields::MESSAGE_COUNT: 0,
+                    fields::SELLER_UNREAD_COUNT: 0,
                     fields::UPDATED_AT: "2020-01-01T00:00:00Z"
                 }),
             )
@@ -1370,9 +1425,10 @@ mod tests {
     #[tokio::test]
     async fn test_send_message_dedup_same_text_within_5s() {
         let state = setup_state().await;
-        let buyer_id = "buyer_1";
-        let seller_id = "seller_1";
-        let chat_id = "p1_b1";
+        let buyer_id = &uuid::Uuid::new_v4().to_string();
+        let seller_id = &uuid::Uuid::new_v4().to_string();
+        let chat_id_str = format!("dedup_{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let chat_id = chat_id_str.as_str();
         let auth = auth_ctx(buyer_id);
         let now = chrono::Utc::now().to_rfc3339();
 
@@ -1385,9 +1441,9 @@ mod tests {
                 json!({
                     fields::BUYER_ID: buyer_id,
                     fields::SELLER_ID: seller_id,
-                    "messageCount": 0,
-                    "sellerUnreadCount": 0,
-                    "lastMessageText": "Hello seller!",
+                    fields::MESSAGE_COUNT: 0,
+                    fields::SELLER_UNREAD_COUNT: 0,
+                    fields::LAST_MESSAGE_TEXT: "Hello seller!",
                     fields::UPDATED_AT: now
                 }),
             )
@@ -1421,9 +1477,10 @@ mod tests {
     #[tokio::test]
     async fn test_send_message_dedup_allows_different_text() {
         let state = setup_state().await;
-        let buyer_id = "buyer_1";
-        let seller_id = "seller_1";
-        let chat_id = "p1_b1";
+        let buyer_id = &uuid::Uuid::new_v4().to_string();
+        let seller_id = &uuid::Uuid::new_v4().to_string();
+        let chat_id_str = format!("diff_{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let chat_id = chat_id_str.as_str();
         let now = chrono::Utc::now().to_rfc3339();
         let auth = auth_ctx(buyer_id);
 
@@ -1435,9 +1492,9 @@ mod tests {
                 json!({
                     fields::BUYER_ID: buyer_id,
                     fields::SELLER_ID: seller_id,
-                    "messageCount": 0,
-                    "sellerUnreadCount": 0,
-                    "lastMessageText": "First message",
+                    fields::MESSAGE_COUNT: 0,
+                    fields::SELLER_UNREAD_COUNT: 0,
+                    fields::LAST_MESSAGE_TEXT: "First message",
                     fields::UPDATED_AT: now
                 }),
             )
@@ -1479,10 +1536,11 @@ mod tests {
     #[tokio::test]
     async fn test_report_message_flow() {
         let state = setup_state().await;
-        let buyer_id = "buyer_1";
-        let seller_id = "seller_1";
-        let chat_id = "p1_b1";
-        let msg_id = "m1";
+        let buyer_id = &uuid::Uuid::new_v4().to_string();
+        let seller_id = &uuid::Uuid::new_v4().to_string();
+        let chat_id_str = format!("rpt_{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let chat_id = chat_id_str.as_str();
+        let msg_id = &uuid::Uuid::new_v4().to_string();
         let auth = auth_ctx(buyer_id);
 
         state
@@ -1542,12 +1600,15 @@ mod tests {
     #[tokio::test]
     async fn test_get_or_create_chat_rejects_non_premium_buyer() {
         let state = setup_state().await;
+        let buyer_id = uuid::Uuid::new_v4().to_string();
+        let seller_id = uuid::Uuid::new_v4().to_string();
+        let product_id = uuid::Uuid::new_v4().to_string();
         let err = get_or_create_chat(
             State(state),
-            Extension(auth_ctx("buyer_1")),
+            Extension(auth_ctx(&buyer_id)),
             Json(GetOrCreateChatRequest {
-                other_user_id: "seller_1".into(),
-                product_id: Some("prod_1".into()),
+                other_user_id: seller_id,
+                product_id: Some(product_id),
             }),
         )
         .await
@@ -1591,14 +1652,16 @@ mod tests {
     #[tokio::test]
     async fn test_delete_message_already_deleted_is_idempotent() {
         let state = setup_state().await;
+        let uid = uuid::Uuid::new_v4().to_string();
+        let msg_id = uuid::Uuid::new_v4().to_string();
         let msg_coll = format!("{}__{}", collections::CHATS, collections::CHAT_MESSAGES);
         state
             .db
             .upsert_document(
                 &msg_coll,
-                "m1",
+                &msg_id,
                 json!({
-                    fields::SENDER_ID: "buyer_1",
+                    fields::SENDER_ID: &uid,
                     fields::DELETED: true,
                 }),
             )
@@ -1607,10 +1670,10 @@ mod tests {
 
         let result = delete_message(
             State(state),
-            Extension(auth_ctx("buyer_1")),
+            Extension(auth_ctx(&uid)),
             Json(DeleteMessageRequest {
                 chat_id: "c1".into(),
-                message_id: "m1".into(),
+                message_id: msg_id,
             }),
         )
         .await;
@@ -1849,8 +1912,8 @@ mod tests {
                 json!({
                     fields::BUYER_ID: buyer_id,
                     fields::SELLER_ID: seller_id,
-                    "messageCount": 0,
-                    "sellerUnreadCount": 0,
+                    fields::MESSAGE_COUNT: 0,
+                    fields::SELLER_UNREAD_COUNT: 0,
                     fields::UPDATED_AT: "2020-01-01T00:00:00Z",
                 }),
             )
@@ -1894,7 +1957,7 @@ mod tests {
                 json!({
                     fields::BUYER_ID: "buyer_1",
                     fields::SELLER_ID: "seller_1",
-                    "messageCount": 0,
+                    fields::MESSAGE_COUNT: 0,
                     fields::UPDATED_AT: "2020-01-01T00:00:00Z",
                 }),
             )
@@ -1931,8 +1994,8 @@ mod tests {
                 json!({
                     fields::BUYER_ID: buyer_id,
                     fields::SELLER_ID: seller_id,
-                    "messageCount": 10_000,
-                    "sellerUnreadCount": 0,
+                    fields::MESSAGE_COUNT: 10_000,
+                    fields::SELLER_UNREAD_COUNT: 0,
                     fields::UPDATED_AT: "2020-01-01T00:00:00Z",
                 }),
             )
@@ -1978,8 +2041,8 @@ mod tests {
                 json!({
                     fields::BUYER_ID: buyer_id,
                     fields::SELLER_ID: seller_id,
-                    "messageCount": 0,
-                    "sellerUnreadCount": 0,
+                    fields::MESSAGE_COUNT: 0,
+                    fields::SELLER_UNREAD_COUNT: 0,
                     fields::UPDATED_AT: "2020-01-01T00:00:00Z",
                 }),
             )
@@ -2018,8 +2081,8 @@ mod tests {
                 json!({
                     fields::BUYER_ID: buyer_id,
                     fields::SELLER_ID: seller_id,
-                    "messageCount": 0,
-                    "sellerUnreadCount": 0,
+                    fields::MESSAGE_COUNT: 0,
+                    fields::SELLER_UNREAD_COUNT: 0,
                     fields::UPDATED_AT: "2020-01-01T00:00:00Z",
                 }),
             )
@@ -2042,7 +2105,7 @@ mod tests {
                 &msg_coll,
                 msg_id,
                 json!({
-                    "chatId": chat_id,
+                    fields::CHAT_ID: chat_id,
                     fields::SENDER_ID: buyer_id,
                     fields::MESSAGE_TEXT: "hello",
                 }),
@@ -2069,11 +2132,13 @@ mod tests {
     // --- Coverage: seller first reply metrics (lines 438-443) ---
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn test_send_message_seller_first_reply_metrics() {
         let state = setup_state().await;
-        let buyer_id = "buyer_reply";
-        let seller_id = "seller_reply";
-        let chat_id = "chat_reply";
+        let buyer_id = &uuid::Uuid::new_v4().to_string();
+        let seller_id = &uuid::Uuid::new_v4().to_string();
+        let chat_id_str = format!("rply_{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let chat_id = chat_id_str.as_str();
 
         let earlier = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
         state
@@ -2084,9 +2149,9 @@ mod tests {
                 json!({
                     fields::BUYER_ID: buyer_id,
                     fields::SELLER_ID: seller_id,
-                    "messageCount": 1,
-                    "buyerUnreadCount": 0,
-                    "sellerUnreadCount": 0,
+                    fields::MESSAGE_COUNT: 1,
+                    fields::BUYER_UNREAD_COUNT: 0,
+                    fields::SELLER_UNREAD_COUNT: 0,
                     "firstBuyerMessageAt": earlier,
                     fields::UPDATED_AT: "2020-01-01T00:00:00Z",
                 }),
@@ -2343,5 +2408,29 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("not found") || err.to_string().contains("Not found"));
+    }
+
+    #[test]
+    fn test_sanitize_once_lock_regex_reuse() {
+        // Verify OnceLock regexes are compiled once and reused across calls
+        let first = _sanitize_text("test@example.com");
+        let second = _sanitize_text("another@test.org");
+        let third = _sanitize_text("https://evil.com +1-416-555-1234");
+        assert!(first.contains("[email removed]"));
+        assert!(second.contains("[email removed]"));
+        assert!(third.contains("[link removed]"));
+        assert!(third.contains("[phone removed]"));
+        // If OnceLock were broken, this would panic on second use
+    }
+
+    #[test]
+    fn test_sanitize_preserves_safe_text() {
+        let safe = "Hello, this is a normal message about products.";
+        assert_eq!(_sanitize_text(safe), safe);
+    }
+
+    #[test]
+    fn test_sanitize_empty_input() {
+        assert_eq!(_sanitize_text(""), "");
     }
 }

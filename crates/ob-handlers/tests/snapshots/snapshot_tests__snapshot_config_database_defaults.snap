@@ -3,7 +3,6 @@ source: crates/ob-handlers/tests/snapshot_tests.rs
 expression: db_snapshot
 ---
 {
-  "endpoint": "localhost:8000",
-  "namespace": "orignabase",
-  "name": "main"
+  "max_connections": 20,
+  "url": "postgres://orignabase:orignabase_dev@localhost:5432/orignabase"
 }

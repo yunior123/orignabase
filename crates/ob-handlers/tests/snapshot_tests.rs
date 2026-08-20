@@ -263,13 +263,14 @@ fn snapshot_validate_amount_cents_ok() {
 
 #[test]
 fn snapshot_validate_amount_cents_zero() {
+    // Zero amount is now correctly rejected (P2-NEW: validate_amount_cents allows zero)
     let result = validate_amount_cents("price", 0);
-    assert!(result.is_ok());
+    assert!(result.is_err());
 }
 
 #[test]
 fn snapshot_validate_amount_cents_max_allowed() {
-    let result = validate_amount_cents("price", 100_000_000);
+    let result = validate_amount_cents("price", 10_000_000);
     assert!(result.is_ok());
 }
 
@@ -305,9 +306,8 @@ fn snapshot_config_auth_defaults() {
 fn snapshot_config_database_defaults() {
     let config = Config::load(None).unwrap();
     let db_snapshot = json!({
-        "endpoint": config.database.endpoint,
-        "namespace": config.database.namespace,
-        "name": config.database.name,
+        "url": config.database.url,
+        "max_connections": config.database.max_connections,
     });
     insta::assert_json_snapshot!(db_snapshot);
 }
@@ -363,20 +363,20 @@ fn snapshot_jwt_claims_access_token() {
     };
 
     let json = serde_json::to_value(&claims).unwrap();
-    insta::assert_json_snapshot!(json, @r###"
+    insta::assert_json_snapshot!(json, @r#"
     {
-      "sub": "user_12345",
-      "iat": 1700000000,
+      "email_verified": true,
       "exp": 1700000900,
+      "iat": 1700000000,
+      "mfa_required": false,
       "roles": [
         "buyer",
         "verified"
       ],
-      "typ": "access",
-      "email_verified": true,
-      "mfa_required": false
+      "sub": "user_12345",
+      "typ": "access"
     }
-    "###);
+    "#);
 }
 
 #[test]
@@ -396,21 +396,21 @@ fn snapshot_jwt_claims_refresh_token() {
     };
 
     let json = serde_json::to_value(&claims).unwrap();
-    insta::assert_json_snapshot!(json, @r###"
+    insta::assert_json_snapshot!(json, @r#"
     {
-      "sub": "user_67890",
-      "iat": 1700000000,
-      "exp": 1700604800,
-      "roles": [],
-      "typ": "refresh",
       "email_verified": false,
-      "mfa_required": false
+      "exp": 1700604800,
+      "iat": 1700000000,
+      "mfa_required": false,
+      "roles": [],
+      "sub": "user_67890",
+      "typ": "refresh"
     }
-    "###);
+    "#);
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "integration"), ignore)]
 fn snapshot_jwt_claims_with_custom_claims() {
     use ob_auth::jwt::Claims;
 
@@ -435,20 +435,20 @@ fn snapshot_jwt_claims_with_custom_claims() {
     let json = serde_json::to_value(&claims).unwrap();
     insta::assert_json_snapshot!(json, @r###"
     {
-      "sub": "seller_001",
-      "iat": 1700000000,
-      "exp": 1700000900,
-      "roles": [
-        "seller"
-      ],
-      "typ": "access",
-      "email_verified": true,
-      "mfa_required": false,
       "custom_claims": {
         "plan": "pro",
         "role": "seller",
         "store_id": "store_abc123"
-      }
+      },
+      "email_verified": true,
+      "exp": 1700000900,
+      "iat": 1700000000,
+      "mfa_required": false,
+      "roles": [
+        "seller"
+      ],
+      "sub": "seller_001",
+      "typ": "access"
     }
     "###);
 }
@@ -470,17 +470,17 @@ fn snapshot_jwt_claims_mfa_challenge() {
     };
 
     let json = serde_json::to_value(&claims).unwrap();
-    insta::assert_json_snapshot!(json, @r###"
+    insta::assert_json_snapshot!(json, @r#"
     {
-      "sub": "user_mfa",
-      "iat": 1700000000,
-      "exp": 1700000300,
-      "roles": [],
-      "typ": "mfa_challenge",
       "email_verified": false,
-      "mfa_required": true
+      "exp": 1700000300,
+      "iat": 1700000000,
+      "mfa_required": true,
+      "roles": [],
+      "sub": "user_mfa",
+      "typ": "mfa_challenge"
     }
-    "###);
+    "#);
 }
 
 #[test]
@@ -500,17 +500,17 @@ fn snapshot_jwt_claims_verification_token() {
     };
 
     let json = serde_json::to_value(&claims).unwrap();
-    insta::assert_json_snapshot!(json, @r###"
+    insta::assert_json_snapshot!(json, @r#"
     {
-      "sub": "user_verify",
-      "iat": 1700000000,
-      "exp": 1700086400,
-      "roles": [],
-      "typ": "email_verify",
       "email_verified": false,
-      "mfa_required": false
+      "exp": 1700086400,
+      "iat": 1700000000,
+      "mfa_required": false,
+      "roles": [],
+      "sub": "user_verify",
+      "typ": "email_verify"
     }
-    "###);
+    "#);
 }
 
 #[test]
@@ -530,17 +530,17 @@ fn snapshot_jwt_claims_password_reset_token() {
     };
 
     let json = serde_json::to_value(&claims).unwrap();
-    insta::assert_json_snapshot!(json, @r###"
+    insta::assert_json_snapshot!(json, @r#"
     {
-      "sub": "user_reset",
-      "iat": 1700000000,
-      "exp": 1700003600,
-      "roles": [],
-      "typ": "password_reset",
       "email_verified": false,
-      "mfa_required": false
+      "exp": 1700003600,
+      "iat": 1700000000,
+      "mfa_required": false,
+      "roles": [],
+      "sub": "user_reset",
+      "typ": "password_reset"
     }
-    "###);
+    "#);
 }
 
 #[test]
@@ -560,17 +560,17 @@ fn snapshot_jwt_claims_magic_link_token() {
     };
 
     let json = serde_json::to_value(&claims).unwrap();
-    insta::assert_json_snapshot!(json, @r###"
+    insta::assert_json_snapshot!(json, @r#"
     {
-      "sub": "user_magic",
-      "iat": 1700000000,
-      "exp": 1700000900,
-      "roles": [],
-      "typ": "magic_link",
       "email_verified": false,
-      "mfa_required": false
+      "exp": 1700000900,
+      "iat": 1700000000,
+      "mfa_required": false,
+      "roles": [],
+      "sub": "user_magic",
+      "typ": "magic_link"
     }
-    "###);
+    "#);
 }
 
 // =============================================================================
@@ -641,9 +641,10 @@ fn snapshot_parse_wildcard_rules() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "integration"), ignore)]
 fn snapshot_parse_multi_collection_rules() {
     use ob_security::parser::parse_rules;
+    use std::collections::BTreeMap;
 
     let input = r#"
         rules users {
@@ -661,7 +662,8 @@ fn snapshot_parse_multi_collection_rules() {
     "#;
 
     let result = parse_rules(input).unwrap();
-    insta::assert_debug_snapshot!(result);
+    let sorted: BTreeMap<_, _> = result.into_iter().collect();
+    insta::assert_debug_snapshot!(sorted);
 }
 
 #[test]

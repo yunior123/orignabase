@@ -151,8 +151,11 @@ impl ResumableUploadManager {
             .map(|s| s.value().clone())
             .ok_or_else(|| Error::NotFound(format!("Upload session not found: {session_id}")))?;
 
-        // Ownership check
-        if !session.owner.is_empty() && session.owner != owner {
+        // Ownership check: reject both empty owner and mismatched owner
+        if session.owner.is_empty() {
+            return Err(Error::Auth("Upload requires authenticated user".into()));
+        }
+        if session.owner != owner {
             return Err(Error::Auth("Not authorized for this upload session".into()));
         }
 

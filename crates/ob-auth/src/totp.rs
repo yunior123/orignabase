@@ -56,11 +56,20 @@ pub fn generate_qr_base64(secret: &[u8], issuer: &str, account: &str) -> Result<
         .map_err(|e| Error::Internal(format!("QR generation failed: {e}")))
 }
 
-/// Verify a TOTP code against a secret, with replay prevention.
+/// Verifies a TOTP code and rejects replayed codes from the same or older time step.
 ///
-/// Returns the current time step if verification succeeds.
-/// `last_used_step` should be the step returned from the previous successful verification.
-/// Codes from the same or earlier step are rejected to prevent replay attacks.
+/// Parameters:
+/// - `secret`: decrypted MFA secret bytes for the user.
+/// - `code`: user-supplied TOTP code as a string.
+/// - `last_used_step`: last successful time-step value previously returned for this user.
+///
+/// Returns:
+/// - `Ok(step)` with the current TOTP time step when verification succeeds.
+/// - `Err(...)` if the code is malformed, invalid, replayed, or system time cannot be read.
+///
+/// Gotchas:
+/// - Replay prevention compares integer time steps, not the raw code value.
+/// - Clock skew tolerance is delegated to the underlying TOTP library configuration.
 pub fn verify_totp(secret: &[u8], code: &str, last_used_step: Option<u64>) -> Result<u64> {
     let totp = build_totp(secret, "orignabase", "user")?;
 
@@ -90,13 +99,22 @@ pub fn verify_totp(secret: &[u8], code: &str, last_used_step: Option<u64>) -> Re
 }
 
 /// Generate recovery codes as plaintext strings.
-/// Each code is 8 hex characters (32 bits of entropy per code).
+/// Each code is 32 hex characters (128 bits of entropy per code).
+/// Displayed as 4 groups of 8 for readability: `xxxxxxxx-xxxxxxxx-xxxxxxxx-xxxxxxxx`.
 pub fn generate_recovery_codes() -> Vec<String> {
     let mut codes = Vec::with_capacity(RECOVERY_CODE_COUNT);
     for _ in 0..RECOVERY_CODE_COUNT {
-        let mut buf = [0u8; 4];
+        let mut buf = [0u8; 16]; // 128-bit entropy (was 4 bytes / 32-bit)
         OsRng.fill_bytes(&mut buf);
-        codes.push(hex::encode(buf));
+        let hex = hex::encode(buf);
+        // Format as xxxx-xxxx-xxxx-xxxx for readability
+        codes.push(format!(
+            "{}-{}-{}-{}",
+            &hex[0..8],
+            &hex[8..16],
+            &hex[16..24],
+            &hex[24..32]
+        ));
     }
     codes
 }
@@ -324,9 +342,15 @@ fn test_recovery_codes_non_empty() {
 #[test]
 fn test_recovery_codes_format() {
     let codes = generate_recovery_codes();
-    // Codes should be alphanumeric
+    // Codes should be hex chars + dashes in format xxxxxxxx-xxxxxxxx-xxxxxxxx-xxxxxxxx
     for code in &codes {
-        assert!(code.chars().all(|c| c.is_ascii_alphanumeric()));
+        assert!(code.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
+        assert_eq!(code.len(), 35); // 32 hex + 3 dashes
+        let parts: Vec<&str> = code.split('-').collect();
+        assert_eq!(parts.len(), 4);
+        for part in parts {
+            assert_eq!(part.len(), 8);
+        }
     }
 }
 

@@ -92,7 +92,7 @@ This allows other crates (like `orignabase` binary) to depend on ob-mcp.
 ### Money Handling
 - **All monetary values: integer cents**
 - No `double` or `float` conversion
-- Preserves SurrealDB IDs: `collection:record_id`
+- Uses OrignaBase document IDs as plain UUID strings
 - Schema compliance:
   - Orders: `createdAt` timestamp
   - Products: `dateCreated` timestamp
@@ -164,7 +164,7 @@ cd ~/orignabase && cargo run -p orignabase -- --mcp-stdio
 
 ✓ Reuses existing ob-database, ob-auth, ob-search, ob-handlers crates
 ✓ All monetary values as integer cents (no floats)
-✓ SurrealDB ID format preserved (`collection:record_id`)
+✓ OrignaBase document IDs remain plain UUID strings
 ✓ Schema field names match constants (createdAt, dateCreated, timestamp)
 ✓ Errors sanitized (no stack traces, no DB details)
 ✓ JWT authentication integrated (reuses ob-auth)

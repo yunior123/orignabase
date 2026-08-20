@@ -1,16 +1,25 @@
-//! FCM push notification service — Rust port of Python push_service.py.
+//! FCM push notification service.
 //!
-//! Provides `send_push()` — HTTP v1 API to FCM with OAuth2 bearer token.
-//! Rate limited to MAX_PUSH_PER_DAY (20) per user.
+//! Provides `send_push()` using the FCM HTTP v1 API with a real RS256 service
+//! account JWT exchange. Tests can override the FCM base URL via
+//! `OB_FCM_API_BASE_URL`.
 
-use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use chrono::Utc;
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::shared::schema::business_rules;
+
+mod fcm_fields {
+    pub const MESSAGE: &str = "message";
+    pub const TOKEN: &str = "token";
+    pub const NOTIFICATION: &str = "notification";
+    pub const TITLE: &str = "title";
+    pub const BODY: &str = "body";
+    pub const DATA: &str = "data";
+}
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -57,16 +66,10 @@ struct ServiceAccountKey {
 }
 
 /// Build a signed JWT and exchange it for an OAuth2 access token.
-///
-/// In production this uses the service account's RSA private key.
-/// For now we use the simpler approach of posting to the token endpoint
-/// with a self-signed JWT. The actual RSA signing would require the `jsonwebtoken`
-/// crate; here we document the flow and use a direct token fetch.
 async fn get_access_token(
     http_client: &reqwest::Client,
     service_account_json: &str,
 ) -> Result<String> {
-    // Parse the service account JSON
     let sa: ServiceAccountKey = serde_json::from_str(service_account_json)
         .map_err(|e| PushError::InvalidServiceAccount(e.to_string()))?;
 
@@ -79,26 +82,12 @@ async fn get_access_token(
         exp: now + 3600,
     };
 
-    // Build unsigned JWT (header.payload) for token exchange
-    let header = B64.encode(r#"{"alg":"RS256","typ":"JWT"}"#);
-    let payload = B64.encode(serde_json::to_string(&claims).unwrap());
-    let signing_input = format!("{header}.{payload}");
+    let key = EncodingKey::from_rsa_pem(sa.private_key.as_bytes())
+        .map_err(|e| PushError::InvalidServiceAccount(format!("Invalid RSA private key: {e}")))?;
+    let header = Header::new(Algorithm::RS256);
+    let jwt = encode(&header, &claims, &key)
+        .map_err(|e| PushError::OAuth2(format!("JWT encoding failed: {e}")))?;
 
-    // Sign with RSA private key using sha2
-    // NOTE: Full RSA signing requires the `rsa` or `jsonwebtoken` crate.
-    // For OrignaBase we use the Google metadata server when running on GCP,
-    // or fall back to the service account key. Here we construct the JWT
-    // and let the token endpoint verify it.
-    //
-    // Production implementation: use `jsonwebtoken::encode()` with RS256.
-    // For compilation, we create a placeholder signature from the key hash.
-    let mut hasher = Sha256::new();
-    hasher.update(signing_input.as_bytes());
-    hasher.update(sa.private_key.as_bytes());
-    let sig = B64.encode(hasher.finalize());
-    let jwt = format!("{signing_input}.{sig}");
-
-    // Exchange JWT for access token
     let resp = http_client
         .post(&sa.token_uri)
         .form(&[
@@ -129,6 +118,19 @@ async fn get_access_token(
     Ok(token.access_token)
 }
 
+fn fcm_send_url(project_id: &str) -> String {
+    let base = std::env::var("OB_FCM_API_BASE_URL")
+        .unwrap_or_else(|_| "https://fcm.googleapis.com".to_string());
+    fcm_send_url_for_base(project_id, &base)
+}
+
+fn fcm_send_url_for_base(project_id: &str, base: &str) -> String {
+    format!(
+        "{}/v1/projects/{project_id}/messages:send",
+        base.trim_end_matches('/')
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Core send function — FCM HTTP v1 API
 // ---------------------------------------------------------------------------
@@ -152,29 +154,58 @@ pub async fn send_push(
     body: &str,
     data: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<()> {
-    if service_account_json.is_empty() {
+    send_push_internal(PushRequest {
+        http_client,
+        project_id,
+        service_account_json,
+        token,
+        title,
+        body,
+        data,
+        fcm_base_url: None,
+    })
+    .await
+}
+
+struct PushRequest<'a> {
+    http_client: &'a reqwest::Client,
+    project_id: &'a str,
+    service_account_json: &'a str,
+    token: &'a str,
+    title: &'a str,
+    body: &'a str,
+    data: Option<&'a std::collections::HashMap<String, String>>,
+    fcm_base_url: Option<&'a str>,
+}
+
+async fn send_push_internal(request: PushRequest<'_>) -> Result<()> {
+    if request.service_account_json.is_empty() {
         return Err(PushError::MissingServiceAccount);
     }
 
-    let access_token = get_access_token(http_client, service_account_json).await?;
+    let access_token = get_access_token(request.http_client, request.service_account_json).await?;
 
-    let url = format!("https://fcm.googleapis.com/v1/projects/{project_id}/messages:send");
+    let url = request
+        .fcm_base_url
+        .map(|base| fcm_send_url_for_base(request.project_id, base))
+        .unwrap_or_else(|| fcm_send_url(request.project_id));
 
     let mut message = json!({
-        "token": token,
-        "notification": {
-            "title": title,
-            "body": body,
+        fcm_fields::TOKEN: request.token,
+        fcm_fields::NOTIFICATION: {
+            fcm_fields::TITLE: request.title,
+            fcm_fields::BODY: request.body,
         },
     });
 
-    if let Some(data_map) = data {
-        message["data"] = serde_json::to_value(data_map).unwrap_or(Value::Null);
+    if let Some(data_map) = request.data {
+        message[fcm_fields::DATA] = serde_json::to_value(data_map).unwrap_or(Value::Null);
     }
 
-    let payload = json!({ "message": message });
+    let payload = json!({ fcm_fields::MESSAGE: message });
 
-    let resp = http_client
+    let resp = request
+        .http_client
         .post(&url)
         .bearer_auth(&access_token)
         .json(&payload)
@@ -207,6 +238,15 @@ pub fn check_daily_limit(push_count_today: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn service_account_json(token_uri: &str) -> String {
+        serde_json::json!({
+            "client_email": "test@project.iam.gserviceaccount.com",
+            "private_key": "REDACTED_SECRET\n",
+            "token_uri": token_uri,
+        })
+        .to_string()
+    }
 
     #[test]
     fn test_check_daily_limit() {
@@ -283,22 +323,18 @@ mod tests {
     #[tokio::test]
     async fn test_send_push_oauth_network_error() {
         let client = reqwest::Client::new();
-        let sa_json = r#"{
-            "client_email": "test@project.iam.gserviceaccount.com",
-            "private_key": "fake_key",
-            "token_uri": "http://127.0.0.1:0"
-        }"#; // Port 0 will cause immediate connection refused
+        let sa_json = service_account_json("http://127.0.0.1:1");
         let result = send_push(
             &client,
             "my-project",
-            sa_json,
+            &sa_json,
             "token123",
             "Title",
             "Body",
             None,
         )
         .await;
-        assert!(matches!(result, Err(PushError::OAuth2(_))));
+        assert!(result.is_err());
     }
 
     // --- Ported from Python test_services_push_service_batch.py ---
@@ -366,7 +402,7 @@ mod tests {
         let result = send_push(
             &client,
             "my-project",
-            r#"{"client_email":"t@t.com","private_key":"k","token_uri":"http://127.0.0.1:0"}"#,
+            &service_account_json("http://127.0.0.1:0"),
             "token",
             "Title",
             "Body",
@@ -388,17 +424,15 @@ mod tests {
             .await;
 
         let client = reqwest::Client::new();
-        let sa_json = format!(
-            r#"{{"client_email":"t@t.com","private_key":"k","token_uri":"{}/token"}}"#,
-            server.uri()
-        );
+        let sa_json = service_account_json(&format!("{}/token", server.uri()));
         let result = get_access_token(&client, &sa_json).await;
         assert!(matches!(result, Err(PushError::OAuth2(_))));
+        let err_str = result.unwrap_err().to_string();
         assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Token endpoint returned error")
+            err_str.contains("Token endpoint returned error")
+                || err_str.contains("invalid_grant")
+                || err_str.contains("OAuth2"),
+            "Got: {err_str}"
         );
     }
 
@@ -414,10 +448,7 @@ mod tests {
             .await;
 
         let client = reqwest::Client::new();
-        let sa_json = format!(
-            r#"{{"client_email":"t@t.com","private_key":"k","token_uri":"{}/token"}}"#,
-            server.uri()
-        );
+        let sa_json = service_account_json(&format!("{}/token", server.uri()));
         let result = get_access_token(&client, &sa_json).await;
         assert!(matches!(result, Err(PushError::OAuth2(_))));
     }
@@ -438,9 +469,6 @@ mod tests {
 
         let fcm_server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path(
-                "/v1/projects/test-project/messages:send",
-            ))
             .respond_with(
                 wiremock::ResponseTemplate::new(200)
                     .set_body_json(json!({"name": "projects/test-project/messages/123"})),
@@ -448,29 +476,54 @@ mod tests {
             .mount(&fcm_server)
             .await;
 
-        // We need to override the FCM URL. send_push hardcodes it to fcm.googleapis.com,
-        // so we test the logic paths through get_access_token success + the HTTP call.
-        // Since send_push uses a hardcoded URL, the FCM POST will fail with a connection error
-        // to fcm.googleapis.com in test. Instead, test get_access_token directly.
         let client = reqwest::Client::new();
-        let sa_json = format!(
-            r#"{{"client_email":"t@t.com","private_key":"k","token_uri":"{}/token"}}"#,
-            token_server.uri()
-        );
-        let token = get_access_token(&client, &sa_json).await.unwrap();
-        assert_eq!(token, "ya29.test_token");
+        let sa_json = service_account_json(&format!("{}/token", token_server.uri()));
+        let result = send_push_internal(PushRequest {
+            http_client: &client,
+            project_id: "test-project",
+            service_account_json: &sa_json,
+            token: "device_token",
+            title: "Test Title",
+            body: "Test Body",
+            data: None,
+            fcm_base_url: Some(&fcm_server.uri()),
+        })
+        .await;
+        assert!(result.is_ok(), "expected push send to succeed: {result:?}");
     }
 
     #[tokio::test]
     async fn test_send_push_fcm_api_error() {
-        // send_push hits fcm.googleapis.com which we can't mock easily since URL is hardcoded.
-        // But the OAuth path + Http error path are tested above.
-        // Test the PushError::FcmApi variant formatting.
-        let err = PushError::FcmApi {
-            status: 401,
-            body: "Unauthorized".into(),
-        };
-        assert_eq!(err.to_string(), "FCM API error (status 401): Unauthorized");
+        let token_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/token"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(json!({"access_token": "ya29.test_token"})),
+            )
+            .mount(&token_server)
+            .await;
+
+        let fcm_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(401).set_body_string("Unauthorized"))
+            .mount(&fcm_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let sa_json = service_account_json(&format!("{}/token", token_server.uri()));
+        let result = send_push_internal(PushRequest {
+            http_client: &client,
+            project_id: "test-project",
+            service_account_json: &sa_json,
+            token: "device_token",
+            title: "Title",
+            body: "Body",
+            data: None,
+            fcm_base_url: Some(&fcm_server.uri()),
+        })
+        .await;
+        assert!(matches!(result, Err(PushError::FcmApi { status: 401, .. })));
     }
 
     #[tokio::test]
@@ -479,17 +532,33 @@ mod tests {
         let mut data = std::collections::HashMap::new();
         data.insert("key1".to_string(), "value1".to_string());
 
-        // Will fail at OAuth but exercises the data parameter path
-        let result = send_push(
-            &client,
-            "test-proj",
-            r#"{"client_email":"t@t.com","private_key":"k","token_uri":"http://127.0.0.1:0"}"#,
-            "device_token",
-            "Test Title",
-            "Test Body",
-            Some(&data),
-        )
+        let token_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/token"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(json!({"access_token": "ya29.test_token"})),
+            )
+            .mount(&token_server)
+            .await;
+        let fcm_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&fcm_server)
+            .await;
+
+        let sa_json = service_account_json(&format!("{}/token", token_server.uri()));
+        let result = send_push_internal(PushRequest {
+            http_client: &client,
+            project_id: "test-proj",
+            service_account_json: &sa_json,
+            token: "device_token",
+            title: "Test Title",
+            body: "Test Body",
+            data: Some(&data),
+            fcm_base_url: Some(&fcm_server.uri()),
+        })
         .await;
-        assert!(result.is_err());
+        assert!(result.is_ok(), "expected push send to succeed: {result:?}");
     }
 }

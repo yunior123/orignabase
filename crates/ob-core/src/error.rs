@@ -26,11 +26,15 @@ pub enum Error {
     #[error("Unsupported media type: {0}")]
     UnsupportedMediaType(String),
 
+    #[error("Too many requests: {0}")]
+    TooManyRequests(String),
+
     #[error("Internal error: {0}")]
     Internal(String),
 }
 
 impl Error {
+    /// Returns the HTTP status code for this error
     pub fn status_code(&self) -> StatusCode {
         match self {
             Error::Config(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -40,7 +44,45 @@ impl Error {
             Error::NotFound(_) => StatusCode::NOT_FOUND,
             Error::Validation(_) => StatusCode::BAD_REQUEST,
             Error::UnsupportedMediaType(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Error::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
             Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    /// Returns a machine-readable error code string (never changes, suitable for client-side handling)
+    pub fn error_code(&self) -> &'static str {
+        match self {
+            Error::Config(_) => "CONFIG_ERROR",
+            Error::Database(_) => "DATABASE_ERROR",
+            Error::Auth(_) => "AUTH_ERROR",
+            Error::Forbidden(_) => "FORBIDDEN",
+            Error::NotFound(_) => "NOT_FOUND",
+            Error::Validation(_) => "VALIDATION_ERROR",
+            Error::UnsupportedMediaType(_) => "UNSUPPORTED_MEDIA_TYPE",
+            Error::TooManyRequests(_) => "TOO_MANY_REQUESTS",
+            Error::Internal(_) => "INTERNAL_ERROR",
+        }
+    }
+
+    /// Creates a validation error with field context
+    pub fn field_validation(field: &str, message: &str) -> Self {
+        Error::Validation(format!("{}: {}", field, message))
+    }
+
+    /// Creates a not-found error for a specific resource
+    pub fn resource_not_found(resource: &str) -> Self {
+        Error::NotFound(format!("{} not found", resource))
+    }
+
+    /// Returns the safe message to display to clients (never leaks sensitive info)
+    fn safe_message(&self) -> String {
+        match self {
+            // Sensitive errors: redact details from client response
+            Error::Database(_) | Error::Internal(_) | Error::Config(_) => {
+                "Internal server error".to_string()
+            }
+            // Safe errors: include full message
+            other => other.to_string(),
         }
     }
 }
@@ -50,8 +92,9 @@ impl IntoResponse for Error {
         let status = self.status_code();
         let body = serde_json::json!({
             "error": {
-                "code": status.as_u16(),
-                "message": self.to_string(),
+                "status": status.as_u16(),
+                "code": self.error_code(),
+                "message": self.safe_message(),
             }
         });
         (status, axum::Json(body)).into_response()
@@ -61,6 +104,7 @@ impl IntoResponse for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::fields;
     use axum::response::IntoResponse;
     use http_body_util::BodyExt;
 
@@ -106,6 +150,54 @@ mod tests {
     fn test_display_internal() {
         let e = Error::Internal("panic".into());
         assert_eq!(e.to_string(), "Internal error: panic");
+    }
+
+    // ── error_code() tests ──
+
+    #[test]
+    fn test_error_code_config() {
+        assert_eq!(Error::Config("x".into()).error_code(), "CONFIG_ERROR");
+    }
+
+    #[test]
+    fn test_error_code_database() {
+        assert_eq!(Error::Database("x".into()).error_code(), "DATABASE_ERROR");
+    }
+
+    #[test]
+    fn test_error_code_auth() {
+        assert_eq!(Error::Auth("x".into()).error_code(), "AUTH_ERROR");
+    }
+
+    #[test]
+    fn test_error_code_forbidden() {
+        assert_eq!(Error::Forbidden("x".into()).error_code(), "FORBIDDEN");
+    }
+
+    #[test]
+    fn test_error_code_not_found() {
+        assert_eq!(Error::NotFound("x".into()).error_code(), "NOT_FOUND");
+    }
+
+    #[test]
+    fn test_error_code_validation() {
+        assert_eq!(
+            Error::Validation("x".into()).error_code(),
+            "VALIDATION_ERROR"
+        );
+    }
+
+    #[test]
+    fn test_error_code_unsupported_media_type() {
+        assert_eq!(
+            Error::UnsupportedMediaType("x".into()).error_code(),
+            "UNSUPPORTED_MEDIA_TYPE"
+        );
+    }
+
+    #[test]
+    fn test_error_code_internal() {
+        assert_eq!(Error::Internal("x".into()).error_code(), "INTERNAL_ERROR");
     }
 
     // ── status_code() tests ──
@@ -166,6 +258,78 @@ mod tests {
         );
     }
 
+    // ── safe_message() tests ──
+
+    #[test]
+    fn test_safe_message_config_redacted() {
+        let e = Error::Config("secret config path".into());
+        assert_eq!(e.safe_message(), "Internal server error");
+    }
+
+    #[test]
+    fn test_safe_message_database_redacted() {
+        let e = Error::Database("sensitive query".into());
+        assert_eq!(e.safe_message(), "Internal server error");
+    }
+
+    #[test]
+    fn test_safe_message_internal_redacted() {
+        let e = Error::Internal("panic details".into());
+        assert_eq!(e.safe_message(), "Internal server error");
+    }
+
+    #[test]
+    fn test_safe_message_auth_exposed() {
+        let e = Error::Auth("invalid token".into());
+        assert_eq!(e.safe_message(), "Authentication error: invalid token");
+    }
+
+    #[test]
+    fn test_safe_message_validation_exposed() {
+        let e = Error::Validation("email required".into());
+        assert_eq!(e.safe_message(), "Validation error: email required");
+    }
+
+    #[test]
+    fn test_safe_message_forbidden_exposed() {
+        let e = Error::Forbidden("not allowed".into());
+        assert_eq!(e.safe_message(), "Authorization denied: not allowed");
+    }
+
+    #[test]
+    fn test_safe_message_not_found_exposed() {
+        let e = Error::NotFound("user".into());
+        assert_eq!(e.safe_message(), "Not found: user");
+    }
+
+    // ── Field validation helper ──
+
+    #[test]
+    fn test_field_validation_error() {
+        let e = Error::field_validation("email", "must be valid");
+        assert_eq!(e.to_string(), "Validation error: email: must be valid");
+    }
+
+    #[test]
+    fn test_field_validation_error_code() {
+        let e = Error::field_validation("password", "too short");
+        assert_eq!(e.error_code(), "VALIDATION_ERROR");
+    }
+
+    // ── Resource not found helper ──
+
+    #[test]
+    fn test_resource_not_found_error() {
+        let e = Error::resource_not_found("User");
+        assert_eq!(e.to_string(), "Not found: User not found");
+    }
+
+    #[test]
+    fn test_resource_not_found_error_code() {
+        let e = Error::resource_not_found("Product");
+        assert_eq!(e.error_code(), "NOT_FOUND");
+    }
+
     // ── IntoResponse tests ──
 
     #[tokio::test]
@@ -176,7 +340,8 @@ mod tests {
 
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(json["error"]["code"], 401);
+        assert_eq!(json["error"][fields::STATUS], 401);
+        assert_eq!(json["error"]["code"], "AUTH_ERROR");
         assert_eq!(json["error"]["message"], "Authentication error: bad creds");
     }
 
@@ -188,7 +353,8 @@ mod tests {
 
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(json["error"]["code"], 404);
+        assert_eq!(json["error"][fields::STATUS], 404);
+        assert_eq!(json["error"]["code"], "NOT_FOUND");
         assert_eq!(json["error"]["message"], "Not found: item");
     }
 
@@ -200,7 +366,9 @@ mod tests {
 
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(json["error"]["code"], 400);
+        assert_eq!(json["error"][fields::STATUS], 400);
+        assert_eq!(json["error"]["code"], "VALIDATION_ERROR");
+        assert_eq!(json["error"]["message"], "Validation error: missing field");
     }
 
     #[tokio::test]
@@ -211,7 +379,9 @@ mod tests {
 
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(json["error"]["code"], 403);
+        assert_eq!(json["error"][fields::STATUS], 403);
+        assert_eq!(json["error"]["code"], "FORBIDDEN");
+        assert_eq!(json["error"]["message"], "Authorization denied: nope");
     }
 
     #[tokio::test]
@@ -222,7 +392,10 @@ mod tests {
 
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(json["error"]["code"], 500);
+        assert_eq!(json["error"][fields::STATUS], 500);
+        assert_eq!(json["error"]["code"], "INTERNAL_ERROR");
+        // Must NOT leak internal error details
+        assert_eq!(json["error"]["message"], "Internal server error");
     }
 
     #[tokio::test]
@@ -230,6 +403,12 @@ mod tests {
         let e = Error::Config("oops".into());
         let resp = e.into_response();
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["error"][fields::STATUS], 500);
+        assert_eq!(json["error"]["code"], "CONFIG_ERROR");
+        assert_eq!(json["error"]["message"], "Internal server error");
     }
 
     #[tokio::test]
@@ -237,6 +416,27 @@ mod tests {
         let e = Error::Database("timeout".into());
         let resp = e.into_response();
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["error"][fields::STATUS], 500);
+        assert_eq!(json["error"]["code"], "DATABASE_ERROR");
+        // Must NOT leak database error details
+        assert_eq!(json["error"]["message"], "Internal server error");
+    }
+
+    #[tokio::test]
+    async fn test_into_response_config_hides_details() {
+        let e = Error::Config("secret config path".into());
+        let resp = e.into_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["error"][fields::STATUS], 500);
+        assert_eq!(json["error"]["code"], "CONFIG_ERROR");
+        // Must NOT leak config error details
+        assert_eq!(json["error"]["message"], "Internal server error");
     }
 
     #[test]
@@ -264,7 +464,39 @@ mod tests {
 
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(json["error"]["code"], 415);
+        assert_eq!(json["error"][fields::STATUS], 415);
+        assert_eq!(json["error"]["code"], "UNSUPPORTED_MEDIA_TYPE");
         assert_eq!(json["error"]["message"], "Unsupported media type: bad type");
+    }
+
+    #[tokio::test]
+    async fn test_into_response_field_validation() {
+        let e = Error::field_validation("email", "invalid format");
+        let resp = e.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["error"][fields::STATUS], 400);
+        assert_eq!(json["error"]["code"], "VALIDATION_ERROR");
+        assert!(json["error"]["message"].as_str().unwrap().contains("email"));
+    }
+
+    #[tokio::test]
+    async fn test_into_response_resource_not_found() {
+        let e = Error::resource_not_found("Product");
+        let resp = e.into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["error"][fields::STATUS], 404);
+        assert_eq!(json["error"]["code"], "NOT_FOUND");
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Product")
+        );
     }
 }

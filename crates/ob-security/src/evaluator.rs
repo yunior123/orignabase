@@ -119,13 +119,46 @@ impl RuleEngine {
                 if let Some(Expression::Path(field)) = args.first() {
                     let resource_val = self.resolve_path(field, ctx);
                     if let (Some(uid), Value::String(owner_id)) = (&ctx.user_id, &resource_val) {
-                        Ok(owner_matches_uid(owner_id, uid))
+                        Ok(uid == owner_id)
                     } else {
                         Ok(false)
                     }
                 } else {
                     Ok(false)
                 }
+            }
+            "fieldEqualsAuth" => {
+                let Some(field) = string_arg(args) else {
+                    return Ok(false);
+                };
+                let Some(uid) = &ctx.user_id else {
+                    return Ok(false);
+                };
+                Ok(resolve_context_field(ctx.incoming.as_ref(), field).as_ref()
+                    == Some(&Value::String(uid.clone())))
+            }
+            "fieldAbsentOrEqualsAuth" => {
+                let Some(field) = string_arg(args) else {
+                    return Ok(false);
+                };
+                let Some(value) = resolve_context_field(ctx.incoming.as_ref(), field) else {
+                    return Ok(true);
+                };
+                let Some(uid) = &ctx.user_id else {
+                    return Ok(false);
+                };
+                Ok(value == Value::String(uid.clone()))
+            }
+            "fieldUnchanged" => {
+                let Some(field) = string_arg(args) else {
+                    return Ok(false);
+                };
+                let Some(incoming_value) = resolve_context_field(ctx.incoming.as_ref(), field)
+                else {
+                    return Ok(true);
+                };
+                Ok(resolve_context_field(ctx.resource.as_ref(), field).as_ref()
+                    == Some(&incoming_value))
             }
             _ => {
                 tracing::warn!("Unknown security function: {name}");
@@ -241,8 +274,25 @@ fn resolve_json_path(value: &Value, path: &[&str]) -> Value {
     current.clone()
 }
 
-fn owner_matches_uid(owner_id: &str, uid: &str) -> bool {
-    owner_id == uid || owner_id.rsplit_once(':').is_some_and(|(_, id)| id == uid)
+fn resolve_json_path_option(value: &Value, path: &[&str]) -> Option<Value> {
+    let mut current = value;
+    for &segment in path {
+        current = current.get(segment)?;
+    }
+    Some(current.clone())
+}
+
+fn resolve_context_field(value: Option<&Value>, field: &str) -> Option<Value> {
+    let value = value?;
+    let parts: Vec<&str> = field.split('.').collect();
+    resolve_json_path_option(value, &parts)
+}
+
+fn string_arg(args: &[Expression]) -> Option<&str> {
+    match args.first() {
+        Some(Expression::StringLit(value)) => Some(value.as_str()),
+        _ => None,
+    }
 }
 
 fn is_truthy(value: &Value) -> bool {
@@ -288,6 +338,7 @@ fn compare_values(left: &Value, op: &CompOp, right: &Value) -> bool {
 mod tests {
     use super::*;
     use crate::parser::parse_rules;
+    use ob_core::constants::fields;
 
     fn test_ctx(authenticated: bool, roles: Vec<&str>) -> SecurityContext {
         SecurityContext {
@@ -394,6 +445,20 @@ mod tests {
         }
     }
 
+    fn ctx_with_incoming_and_roles(
+        user_id: &str,
+        incoming: Value,
+        roles: Vec<&str>,
+    ) -> SecurityContext {
+        SecurityContext {
+            user_id: Some(user_id.to_string()),
+            roles: roles.into_iter().map(String::from).collect(),
+            authenticated: true,
+            resource: None,
+            incoming: Some(incoming),
+        }
+    }
+
     // Helper: context with both resource and incoming
     fn ctx_full(
         user_id: &str,
@@ -425,31 +490,6 @@ mod tests {
         let engine = RuleEngine::new(rules);
         let ctx = ctx_with_resource("user123", serde_json::json!({"seller_id": "user123"}));
         assert!(engine.check("products", "update", &ctx).unwrap());
-    }
-
-    #[test]
-    fn test_is_owner_matches_record_reference() {
-        let rules = parse_rules(
-            r#"
-            rules cart {
-                create: isOwner(incoming.userId) || isOwner(incoming.parent_id);
-                read: isOwner(resource.userId) || isOwner(resource.parent_id);
-            }
-        "#,
-        )
-        .unwrap();
-        let engine = RuleEngine::new(rules);
-        let create_ctx = ctx_with_incoming(
-            "user123",
-            serde_json::json!({"userId": "users:user123", "parent_id": "users:user123"}),
-        );
-        assert!(engine.check("cart", "create", &create_ctx).unwrap());
-
-        let read_ctx = ctx_with_resource(
-            "user123",
-            serde_json::json!({"userId": "users:user123", "parent_id": "users:user123"}),
-        );
-        assert!(engine.check("cart", "read", &read_ctx).unwrap());
     }
 
     #[test]
@@ -495,6 +535,191 @@ mod tests {
         let engine = RuleEngine::new(rules);
         let ctx = test_ctx(true, vec![]);
         assert!(!engine.check("products", "update", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_field_equals_auth_requires_present_matching_incoming_field() {
+        let rules = parse_rules(
+            r#"
+            rules cart {
+                create: fieldEqualsAuth("userId");
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let matching = ctx_with_incoming("user123", serde_json::json!({"userId": "user123"}));
+        let missing = ctx_with_incoming("user123", serde_json::json!({}));
+        let null_value = ctx_with_incoming("user123", serde_json::json!({"userId": null}));
+        let other = ctx_with_incoming("user123", serde_json::json!({"userId": "other"}));
+
+        assert!(engine.check("cart", "create", &matching).unwrap());
+        assert!(!engine.check("cart", "create", &missing).unwrap());
+        assert!(!engine.check("cart", "create", &null_value).unwrap());
+        assert!(!engine.check("cart", "create", &other).unwrap());
+    }
+
+    #[test]
+    fn test_field_absent_or_equals_auth_rejects_present_mismatch_or_null() {
+        let rules = parse_rules(
+            r#"
+            rules orders {
+                create: fieldEqualsAuth("buyerId") && fieldAbsentOrEqualsAuth("userId");
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let missing = ctx_with_incoming("user123", serde_json::json!({"buyerId": "user123"}));
+        let matching = ctx_with_incoming(
+            "user123",
+            serde_json::json!({"buyerId": "user123", "userId": "user123"}),
+        );
+        let null_value = ctx_with_incoming(
+            "user123",
+            serde_json::json!({"buyerId": "user123", "userId": null}),
+        );
+        let other = ctx_with_incoming(
+            "user123",
+            serde_json::json!({"buyerId": "user123", "userId": "other"}),
+        );
+
+        assert!(engine.check("orders", "create", &missing).unwrap());
+        assert!(engine.check("orders", "create", &matching).unwrap());
+        assert!(!engine.check("orders", "create", &null_value).unwrap());
+        assert!(!engine.check("orders", "create", &other).unwrap());
+    }
+
+    #[test]
+    fn test_field_unchanged_allows_missing_and_rejects_owner_mutation() {
+        let rules = parse_rules(
+            r#"
+            rules products {
+                update: isOwner(resource.sellerId) && fieldUnchanged("sellerId");
+            }
+        "#,
+        )
+        .unwrap();
+        let engine = RuleEngine::new(rules);
+        let missing = ctx_full(
+            "seller1",
+            serde_json::json!({"sellerId": "seller1"}),
+            serde_json::json!({"name": "New name"}),
+            vec![],
+        );
+        let unchanged = ctx_full(
+            "seller1",
+            serde_json::json!({"sellerId": "seller1"}),
+            serde_json::json!({"sellerId": "seller1"}),
+            vec![],
+        );
+        let null_value = ctx_full(
+            "seller1",
+            serde_json::json!({"sellerId": "seller1"}),
+            serde_json::json!({"sellerId": null}),
+            vec![],
+        );
+        let other = ctx_full(
+            "seller1",
+            serde_json::json!({"sellerId": "seller1"}),
+            serde_json::json!({"sellerId": "seller2"}),
+            vec![],
+        );
+
+        assert!(engine.check("products", "update", &missing).unwrap());
+        assert!(engine.check("products", "update", &unchanged).unwrap());
+        assert!(!engine.check("products", "update", &null_value).unwrap());
+        assert!(!engine.check("products", "update", &other).unwrap());
+    }
+
+    #[test]
+    fn test_origna_gta_rules_reject_owner_spoofing_and_owner_clearing() {
+        let rules = parse_rules(include_str!("../../../rules.ob")).unwrap();
+        let engine = RuleEngine::new(rules);
+
+        let cart_patch = ctx_full(
+            "user123",
+            serde_json::json!({"userId": "user123", "quantity": 1}),
+            serde_json::json!({"quantity": 2}),
+            vec![],
+        );
+        let cart_clear = ctx_full(
+            "user123",
+            serde_json::json!({"userId": "user123", "quantity": 1}),
+            serde_json::json!({"userId": null}),
+            vec![],
+        );
+        let cart_spoof = ctx_full(
+            "user123",
+            serde_json::json!({"userId": "user123", "quantity": 1}),
+            serde_json::json!({"userId": "other"}),
+            vec![],
+        );
+        assert!(engine.check("cart", "update", &cart_patch).unwrap());
+        assert!(!engine.check("cart", "update", &cart_clear).unwrap());
+        assert!(!engine.check("cart", "update", &cart_spoof).unwrap());
+
+        let order_ok = ctx_with_incoming("user123", serde_json::json!({"userId": "user123"}));
+        let order_mismatch = ctx_with_incoming(
+            "user123",
+            serde_json::json!({"userId": "user123", "buyerId": "other"}),
+        );
+        assert!(engine.check("orders", "create", &order_ok).unwrap());
+        assert!(!engine.check("orders", "create", &order_mismatch).unwrap());
+
+        let chat_message_ok = ctx_with_incoming(
+            "buyer1",
+            serde_json::json!({
+                "senderId": "buyer1",
+                "buyerId": "buyer1",
+                "sellerId": "seller1"
+            }),
+        );
+        let chat_message_sender_spoof = ctx_with_incoming(
+            "buyer1",
+            serde_json::json!({
+                "senderId": "seller1",
+                "buyerId": "buyer1",
+                "sellerId": "seller1"
+            }),
+        );
+        let chat_message_seller_without_role = ctx_with_incoming(
+            "seller1",
+            serde_json::json!({
+                "senderId": "seller1",
+                "buyerId": "buyer1",
+                "sellerId": "seller1"
+            }),
+        );
+        let chat_message_seller_with_role = ctx_with_incoming_and_roles(
+            "seller1",
+            serde_json::json!({
+                "senderId": "seller1",
+                "buyerId": "buyer1",
+                "sellerId": "seller1"
+            }),
+            vec!["seller"],
+        );
+        assert!(
+            engine
+                .check("chat_messages", "create", &chat_message_ok)
+                .unwrap()
+        );
+        assert!(
+            !engine
+                .check("chat_messages", "create", &chat_message_sender_spoof)
+                .unwrap()
+        );
+        assert!(
+            !engine
+                .check("chat_messages", "create", &chat_message_seller_without_role)
+                .unwrap()
+        );
+        assert!(
+            engine
+                .check("chat_messages", "create", &chat_message_seller_with_role)
+                .unwrap()
+        );
     }
 
     // ---- Or expression ----
@@ -555,29 +780,22 @@ mod tests {
     }
 
     // ---- Not expression ----
-    // NOTE: The `!` operator in the grammar is currently not propagated by the
-    // parser (the "!" token is anonymous in pest and not counted in children).
-    // These tests document the current behavior. When the parser is fixed,
-    // update these assertions.
 
     #[test]
-    fn test_not_expression_currently_ignored() {
-        // Due to parser bug, `!isAuthenticated()` parses as `isAuthenticated()`
+    fn test_not_expression() {
         let rules = parse_rules(
             r#"
-            rules products {
-                read: !isAuthenticated();
-            }
-        "#,
+rules products {
+    read: !isAuthenticated();
+}
+"#,
         )
         .unwrap();
         let engine = RuleEngine::new(rules);
-        // Authenticated → the `!` is lost, so result is true (not negated)
         let ctx = test_ctx(true, vec![]);
-        assert!(engine.check("products", "read", &ctx).unwrap());
-        // Unauthenticated → false (not negated)
+        assert!(!engine.check("products", "read", &ctx).unwrap());
         let ctx2 = test_ctx(false, vec![]);
-        assert!(!engine.check("products", "read", &ctx2).unwrap());
+        assert!(engine.check("products", "read", &ctx2).unwrap());
     }
 
     #[test]
@@ -1564,8 +1782,8 @@ mod tests {
 
         // User → ssn filtered out
         let filtered = engine.filter_fields("users", &doc, &user);
-        assert!(filtered.get("name").is_some());
-        assert!(filtered.get("email").is_some());
+        assert!(filtered.get(fields::NAME).is_some());
+        assert!(filtered.get(fields::EMAIL).is_some());
         assert!(filtered.get("ssn").is_none());
 
         // Admin → ssn kept

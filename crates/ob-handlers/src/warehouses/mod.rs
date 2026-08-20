@@ -1,14 +1,18 @@
 //! Seller warehouse management handlers.
 //! Ported from: functions/handlers/products.py
 
-use axum::{Json, Router, extract::State, routing::post};
+use axum::{Json, Router, extract::Extension, extract::State, routing::post};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::shared::auth::resolve_self_user_id;
+use ob_auth::middleware::AuthContext;
+
 use crate::HandlersState;
 use crate::shared::schema::{COUNTRY_CANADA, collections, fields};
 use crate::shared::validation::{sanitize_html, validate_uid};
+use ob_database::fields as db_fields;
 
 const MAX_LABEL_LENGTH: usize = 100;
 const VALID_TYPES: &[&str] = &["warehouse", "personal"];
@@ -149,15 +153,15 @@ fn sanitize_address(address: &WarehouseAddressInput) -> ob_core::Result<Value> {
 
     Ok(json!({
         fields::STREET: sanitize_html(address.street.trim()),
-        "apartment": sanitize_html(address.apartment.as_deref().unwrap_or("").trim()),
+        fields::APARTMENT: sanitize_html(address.apartment.as_deref().unwrap_or("").trim()),
         fields::CITY: sanitize_html(address.city.trim()),
-        "state": sanitize_html(address.state.trim()),
+        fields::PROVINCE: sanitize_html(address.state.trim()),
         fields::POSTAL_CODE: address.postal_code.trim().to_uppercase(),
         fields::COUNTRY: address.country.trim(),
-        "phoneNumber": address.phone_number.as_deref().map(|s| sanitize_html(s.trim())),
+        fields::PHONE_NUMBER: address.phone_number.as_deref().map(|s| sanitize_html(s.trim())),
         fields::LATITUDE: address.latitude,
         fields::LONGITUDE: address.longitude,
-        "label": address.label.as_deref().map(|s| sanitize_html(s.trim())),
+        fields::LABEL: address.label.as_deref().map(|s| sanitize_html(s.trim())),
     }))
 }
 
@@ -168,14 +172,14 @@ async fn clear_other_defaults(
 ) -> ob_core::Result<()> {
     let collection = warehouses_collection();
     let query = format!(
-        "SELECT * FROM {} WHERE parent_id = '{}' AND isDefault = true",
+        "SELECT * FROM {} WHERE data->>'parent_id' = '{}' AND data->>'isDefault' = 'true'",
         collection,
-        ob_core::escape_surreal_string(&warehouse_parent(user_id))
+        ob_core::escape_sql_string(&warehouse_parent(user_id))
     );
     let docs = state.db.query_raw(&query).await?;
     for doc in docs {
         let id = doc
-            .get("id")
+            .get(db_fields::ID)
             .and_then(|v| v.as_str())
             .ok_or_else(|| ob_core::Error::Database("Warehouse record missing id".into()))?;
         let raw_id = id.strip_prefix(&format!("{collection}:")).unwrap_or(id);
@@ -197,11 +201,11 @@ async fn load_owned_warehouse(
 ) -> ob_core::Result<Value> {
     let collection = warehouses_collection();
     let doc = state.db.get_document(&collection, warehouse_id).await?;
-    let parent_id = doc
-        .get("parent_id")
+    let parent_id_val = doc
+        .get(fields::PARENT_ID)
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    if parent_id != warehouse_parent(user_id) {
+    if parent_id_val != warehouse_parent(user_id) {
         return Err(ob_core::Error::NotFound("Warehouse not found".into()));
     }
     Ok(doc)
@@ -209,13 +213,15 @@ async fn load_owned_warehouse(
 
 async fn create_warehouse(
     State(state): State<HandlersState>,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<CreateWarehouseRequest>,
 ) -> ob_core::Result<Json<WarehouseMutationResponse>> {
     validate_uid("userId", &req.user_id)?;
+    let user_id = resolve_self_user_id(&auth, Some(req.user_id.as_str()), "userId")?;
 
     crate::shared::rate_limiter::check_user_rate_limit(
         &state.db,
-        &req.user_id,
+        &user_id,
         "create_warehouse",
         15, // 15 creations
         60, // per hour
@@ -227,7 +233,7 @@ async fn create_warehouse(
     let address = sanitize_address(&req.address)?;
 
     if req.is_default {
-        clear_other_defaults(&state, &req.user_id, None).await?;
+        clear_other_defaults(&state, &user_id, None).await?;
     }
 
     let collection = warehouses_collection();
@@ -237,23 +243,24 @@ async fn create_warehouse(
         .create_document(
             &collection,
             json!({
-                "parent_id": warehouse_parent(&req.user_id),
-                "parent_collection": collections::USERS,
-                "label": label,
-                "type": warehouse_type,
+                fields::PARENT_ID: warehouse_parent(&user_id),
+                fields::PARENT_COLLECTION: collections::USERS,
+                fields::LABEL: label,
+                fields::TYPE: warehouse_type,
                 fields::ADDRESS: address,
                 fields::IS_DEFAULT: req.is_default,
-                fields::CREATED_AT: now,
+                db_fields::CREATED_AT: now,
             }),
         )
         .await?;
 
-    let id = created
-        .get("id")
+    let raw_id = created
+        .get(db_fields::ID)
         .and_then(|v| v.as_str())
-        .ok_or_else(|| ob_core::Error::Database("Warehouse create returned no id".into()))?
+        .ok_or_else(|| ob_core::Error::Database("Warehouse create returned no id".into()))?;
+    let id = raw_id
         .strip_prefix(&format!("{collection}:"))
-        .unwrap_or_default()
+        .unwrap_or(raw_id)
         .to_string();
 
     Ok(Json(WarehouseMutationResponse {
@@ -264,35 +271,40 @@ async fn create_warehouse(
 
 async fn update_warehouse(
     State(state): State<HandlersState>,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<UpdateWarehouseRequest>,
 ) -> ob_core::Result<Json<WarehouseMutationResponse>> {
     validate_uid("userId", &req.user_id)?;
     validate_uid("warehouseId", &req.warehouse_id)?;
+    let user_id = resolve_self_user_id(&auth, Some(req.user_id.as_str()), "userId")?;
 
     crate::shared::rate_limiter::check_user_rate_limit(
         &state.db,
-        &req.user_id,
+        &user_id,
         "update_warehouse",
         30, // 30 updates
         60, // per hour
     )
     .await?;
 
-    let _existing = load_owned_warehouse(&state, &req.user_id, &req.warehouse_id).await?;
+    let _existing = load_owned_warehouse(&state, &user_id, &req.warehouse_id).await?;
 
     let mut patch = serde_json::Map::new();
     if let Some(label) = req.label.as_deref() {
-        patch.insert("label".to_string(), json!(sanitize_label(label)?));
+        patch.insert(fields::LABEL.to_string(), json!(sanitize_label(label)?));
     }
     if let Some(warehouse_type) = req.warehouse_type.as_deref() {
-        patch.insert("type".to_string(), json!(sanitize_type(warehouse_type)?));
+        patch.insert(
+            fields::TYPE.to_string(),
+            json!(sanitize_type(warehouse_type)?),
+        );
     }
     if let Some(address) = req.address.as_ref() {
         patch.insert(fields::ADDRESS.to_string(), sanitize_address(address)?);
     }
     if let Some(is_default) = req.is_default {
         if is_default {
-            clear_other_defaults(&state, &req.user_id, Some(&req.warehouse_id)).await?;
+            clear_other_defaults(&state, &user_id, Some(&req.warehouse_id)).await?;
         }
         patch.insert(fields::IS_DEFAULT.to_string(), json!(is_default));
     }
@@ -304,7 +316,7 @@ async fn update_warehouse(
     }
 
     patch.insert(
-        fields::UPDATED_AT.to_string(),
+        db_fields::UPDATED_AT.to_string(),
         json!(Utc::now().to_rfc3339()),
     );
     state
@@ -324,29 +336,29 @@ async fn update_warehouse(
 
 async fn delete_warehouse(
     State(state): State<HandlersState>,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<DeleteWarehouseRequest>,
 ) -> ob_core::Result<Json<WarehouseMutationResponse>> {
     validate_uid("userId", &req.user_id)?;
     validate_uid("warehouseId", &req.warehouse_id)?;
+    let user_id = resolve_self_user_id(&auth, Some(req.user_id.as_str()), "userId")?;
 
     crate::shared::rate_limiter::check_user_rate_limit(
         &state.db,
-        &req.user_id,
+        &user_id,
         "delete_warehouse",
         15, // 15 deletions
         60, // per hour
     )
     .await?;
 
-    let existing = load_owned_warehouse(&state, &req.user_id, &req.warehouse_id).await?;
+    let existing = load_owned_warehouse(&state, &user_id, &req.warehouse_id).await?;
 
     let product_guard_query = format!(
-        "SELECT id FROM {} WHERE {} = '{}' AND {} CONTAINS '{}' LIMIT 1",
+        "SELECT id FROM {} WHERE data->>'sellerId' = '{}' AND data->'warehouseIds' @> '\"{}\"'::jsonb LIMIT 1",
         collections::PRODUCTS,
-        fields::SELLER_ID,
-        ob_core::escape_surreal_string(&req.user_id),
-        "warehouseIds",
-        ob_core::escape_surreal_string(&req.warehouse_id),
+        ob_core::escape_sql_string(&user_id),
+        ob_core::escape_sql_string(&req.warehouse_id),
     );
     if !state.db.query_raw(&product_guard_query).await?.is_empty() {
         return Err(ob_core::Error::Validation(
@@ -361,14 +373,13 @@ async fn delete_warehouse(
     {
         let collection = warehouses_collection();
         let promote_query = format!(
-            "SELECT * FROM {} WHERE parent_id = '{}' AND id != type::thing('{}', '{}') ORDER BY createdAt ASC LIMIT 1",
+            "SELECT * FROM {} WHERE data->>'parent_id' = '{}' AND id != '{}' ORDER BY data->>'createdAt' ASC LIMIT 1",
             collection,
-            ob_core::escape_surreal_string(&warehouse_parent(&req.user_id)),
-            collection,
-            ob_core::escape_surreal_string(&req.warehouse_id),
+            ob_core::escape_sql_string(&warehouse_parent(&user_id)),
+            ob_core::escape_sql_string(&req.warehouse_id),
         );
         if let Some(other) = state.db.query_raw(&promote_query).await?.into_iter().next()
-            && let Some(id) = other.get("id").and_then(|v| v.as_str())
+            && let Some(id) = other.get(db_fields::ID).and_then(|v| v.as_str())
         {
             let raw_id = id.strip_prefix(&format!("{collection}:")).unwrap_or(id);
             state
@@ -391,26 +402,28 @@ async fn delete_warehouse(
 
 async fn list_warehouses(
     State(state): State<HandlersState>,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<ListWarehousesRequest>,
 ) -> ob_core::Result<Json<ListWarehousesResponse>> {
     validate_uid("userId", &req.user_id)?;
+    let user_id = resolve_self_user_id(&auth, Some(req.user_id.as_str()), "userId")?;
     let collection = warehouses_collection();
     let query = format!(
-        "SELECT * FROM {} WHERE parent_id = '{}' ORDER BY isDefault DESC, createdAt ASC",
+        "SELECT * FROM {} WHERE data->>'parent_id' = '{}' ORDER BY data->>'isDefault' DESC, data->>'createdAt' ASC",
         collection,
-        ob_core::escape_surreal_string(&warehouse_parent(&req.user_id)),
+        ob_core::escape_sql_string(&warehouse_parent(&user_id)),
     );
     let rows = state.db.query_raw(&query).await?;
     let warehouses = rows
         .into_iter()
         .map(|mut row| {
-            if let Some(id) = row.get("id").and_then(|v| v.as_str()) {
+            if let Some(id) = row.get(db_fields::ID).and_then(|v| v.as_str()) {
                 let raw_id = id
                     .strip_prefix(&format!("{collection}:"))
                     .unwrap_or(id)
                     .to_string();
                 if let Some(obj) = row.as_object_mut() {
-                    obj.insert("warehouseId".to_string(), json!(raw_id));
+                    obj.insert(fields::WAREHOUSE_ID.to_string(), json!(raw_id));
                 }
             }
             row
@@ -426,10 +439,27 @@ async fn list_warehouses(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::extract::State;
+    use axum::extract::{Extension, State};
+    use ob_auth::middleware::AuthContext;
     use ob_core::Config;
     use ob_database::DatabaseClient;
     use std::sync::Arc;
+    use uuid::Uuid;
+
+    fn auth(user_id: &str, role: &str) -> Extension<AuthContext> {
+        Extension(AuthContext {
+            user_id: user_id.to_string(),
+            roles: vec![role.to_string()],
+            authenticated: true,
+            email_verified: true,
+            custom_claims: serde_json::Value::Null,
+        })
+    }
+
+    /// Generate a unique seller ID per test.
+    fn unique_seller_id() -> String {
+        Uuid::new_v4().to_string()
+    }
 
     async fn setup_state() -> HandlersState {
         HandlersState {
@@ -499,16 +529,17 @@ mod tests {
     async fn test_create_warehouse_default_true_clears_existing_default() {
         let state = setup_state().await;
         let collection = warehouses_collection();
+        let seller_id = unique_seller_id();
         state
             .db
             .create_document(
                 &collection,
                 json!({
-                    "parent_id": warehouse_parent("seller_1"),
+                    "parent_id": warehouse_parent(&seller_id),
                     "label": "Old Default",
                     "type": "warehouse",
                     fields::IS_DEFAULT: true,
-                    fields::CREATED_AT: "2026-01-01T00:00:00Z",
+                    db_fields::CREATED_AT: "2026-01-01T00:00:00Z",
                 }),
             )
             .await
@@ -516,8 +547,9 @@ mod tests {
 
         let Json(resp) = create_warehouse(
             State(state.clone()),
+            auth(&seller_id, "user"),
             Json(CreateWarehouseRequest {
-                user_id: "seller_1".into(),
+                user_id: seller_id.clone(),
                 label: "New Default".into(),
                 warehouse_type: "warehouse".into(),
                 address: sample_address(),
@@ -529,10 +561,11 @@ mod tests {
 
         let rows = state
             .db
-            .query_bind_value(
-                "SELECT * FROM $collection WHERE parent_id = $parent_id",
-                json!({"collection": collection, "parent_id": warehouse_parent("seller_1")}),
-            )
+            .query_raw(&format!(
+                "SELECT * FROM {} WHERE data->>'parent_id' = '{}'",
+                collection,
+                ob_core::escape_sql_string(&warehouse_parent(&seller_id))
+            ))
             .await
             .unwrap();
         assert_eq!(rows.len(), 2);
@@ -548,32 +581,33 @@ mod tests {
     async fn test_update_warehouse_requires_at_least_one_field() {
         let state = setup_state().await;
         let collection = warehouses_collection();
+        let seller_id = unique_seller_id();
         let created = state
             .db
             .create_document(
                 &collection,
                 json!({
-                    "parent_id": warehouse_parent("seller_1"),
+                    "parent_id": warehouse_parent(&seller_id),
                     "label": "Primary",
                     "type": "warehouse",
                     fields::ADDRESS: sanitize_address(&sample_address()).unwrap(),
                     fields::IS_DEFAULT: false,
-                    fields::CREATED_AT: "2026-01-01T00:00:00Z",
+                    db_fields::CREATED_AT: "2026-01-01T00:00:00Z",
                 }),
             )
             .await
             .unwrap();
-        let warehouse_id = created["id"]
-            .as_str()
-            .unwrap()
+        let raw_wid = created[db_fields::ID].as_str().unwrap();
+        let warehouse_id = raw_wid
             .strip_prefix(&format!("{collection}:"))
-            .unwrap()
+            .unwrap_or(raw_wid)
             .to_string();
 
         let err = update_warehouse(
             State(state),
+            auth(&seller_id, "user"),
             Json(UpdateWarehouseRequest {
-                user_id: "seller_1".into(),
+                user_id: seller_id.clone(),
                 warehouse_id,
                 label: None,
                 warehouse_type: None,
@@ -590,16 +624,17 @@ mod tests {
     async fn test_delete_default_warehouse_promotes_oldest_remaining() {
         let state = setup_state().await;
         let collection = warehouses_collection();
+        let seller_id = unique_seller_id();
         let first = state
             .db
             .create_document(
                 &collection,
                 json!({
-                    "parent_id": warehouse_parent("seller_1"),
+                    "parent_id": warehouse_parent(&seller_id),
                     "label": "Default",
                     "type": "warehouse",
                     fields::IS_DEFAULT: true,
-                    fields::CREATED_AT: "2026-01-01T00:00:00Z",
+                    db_fields::CREATED_AT: "2026-01-01T00:00:00Z",
                 }),
             )
             .await
@@ -609,32 +644,31 @@ mod tests {
             .create_document(
                 &collection,
                 json!({
-                    "parent_id": warehouse_parent("seller_1"),
+                    "parent_id": warehouse_parent(&seller_id),
                     "label": "Backup",
                     "type": "warehouse",
                     fields::IS_DEFAULT: false,
-                    fields::CREATED_AT: "2026-01-02T00:00:00Z",
+                    db_fields::CREATED_AT: "2026-01-02T00:00:00Z",
                 }),
             )
             .await
             .unwrap();
-        let first_id = first["id"]
-            .as_str()
-            .unwrap()
+        let raw_first = first[db_fields::ID].as_str().unwrap();
+        let first_id = raw_first
             .strip_prefix(&format!("{collection}:"))
-            .unwrap()
+            .unwrap_or(raw_first)
             .to_string();
-        let second_id = second["id"]
-            .as_str()
-            .unwrap()
+        let raw_second = second[db_fields::ID].as_str().unwrap();
+        let second_id = raw_second
             .strip_prefix(&format!("{collection}:"))
-            .unwrap()
+            .unwrap_or(raw_second)
             .to_string();
 
         let _ = delete_warehouse(
             State(state.clone()),
+            auth(&seller_id, "user"),
             Json(DeleteWarehouseRequest {
-                user_id: "seller_1".into(),
+                user_id: seller_id.clone(),
                 warehouse_id: first_id,
             }),
         )
@@ -653,33 +687,34 @@ mod tests {
     async fn test_delete_warehouse_blocked_when_products_reference_it() {
         let state = setup_state().await;
         let collection = warehouses_collection();
+        let seller_id = unique_seller_id();
+        let product_id = Uuid::new_v4().to_string();
         let created = state
             .db
             .create_document(
                 &collection,
                 json!({
-                    "parent_id": warehouse_parent("seller_1"),
+                    "parent_id": warehouse_parent(&seller_id),
                     "label": "Primary",
                     "type": "warehouse",
                     fields::IS_DEFAULT: false,
-                    fields::CREATED_AT: "2026-01-01T00:00:00Z",
+                    db_fields::CREATED_AT: "2026-01-01T00:00:00Z",
                 }),
             )
             .await
             .unwrap();
-        let warehouse_id = created["id"]
-            .as_str()
-            .unwrap()
+        let raw_wid = created[db_fields::ID].as_str().unwrap();
+        let warehouse_id = raw_wid
             .strip_prefix(&format!("{collection}:"))
-            .unwrap()
+            .unwrap_or(raw_wid)
             .to_string();
         state
             .db
             .upsert_document(
                 collections::PRODUCTS,
-                "prod_1",
+                &product_id,
                 json!({
-                    fields::SELLER_ID: "seller_1",
+                    db_fields::SELLER_ID: seller_id,
                     "warehouseIds": [warehouse_id.clone()],
                 }),
             )
@@ -688,8 +723,9 @@ mod tests {
 
         let err = delete_warehouse(
             State(state),
+            auth(&seller_id, "user"),
             Json(DeleteWarehouseRequest {
-                user_id: "seller_1".into(),
+                user_id: seller_id.clone(),
                 warehouse_id,
             }),
         )
@@ -780,27 +816,28 @@ mod tests {
     async fn test_load_owned_warehouse_wrong_user() {
         let state = setup_state().await;
         let collection = warehouses_collection();
+        let seller_id = unique_seller_id();
+        let other_seller = unique_seller_id();
         let created = state
             .db
             .create_document(
                 &collection,
                 json!({
-                    "parent_id": warehouse_parent("seller_1"),
+                    "parent_id": warehouse_parent(&seller_id),
                     "label": "Test",
                     "type": "warehouse",
                     fields::IS_DEFAULT: false,
-                    fields::CREATED_AT: "2026-01-01T00:00:00Z",
+                    db_fields::CREATED_AT: "2026-01-01T00:00:00Z",
                 }),
             )
             .await
             .unwrap();
-        let wid = created["id"]
-            .as_str()
-            .unwrap()
+        let raw_wid_ref = created[db_fields::ID].as_str().unwrap();
+        let wid = raw_wid_ref
             .strip_prefix(&format!("{collection}:"))
-            .unwrap();
+            .unwrap_or(raw_wid_ref);
 
-        let err = load_owned_warehouse(&state, "seller_2", wid).await;
+        let err = load_owned_warehouse(&state, &other_seller, wid).await;
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("not found"));
     }
@@ -810,27 +847,27 @@ mod tests {
     async fn test_load_owned_warehouse_success() {
         let state = setup_state().await;
         let collection = warehouses_collection();
+        let seller_id = unique_seller_id();
         let created = state
             .db
             .create_document(
                 &collection,
                 json!({
-                    "parent_id": warehouse_parent("seller_1"),
+                    "parent_id": warehouse_parent(&seller_id),
                     "label": "Test",
                     "type": "warehouse",
                     fields::IS_DEFAULT: false,
-                    fields::CREATED_AT: "2026-01-01T00:00:00Z",
+                    db_fields::CREATED_AT: "2026-01-01T00:00:00Z",
                 }),
             )
             .await
             .unwrap();
-        let wid = created["id"]
-            .as_str()
-            .unwrap()
+        let raw_wid_ref = created[db_fields::ID].as_str().unwrap();
+        let wid = raw_wid_ref
             .strip_prefix(&format!("{collection}:"))
-            .unwrap();
+            .unwrap_or(raw_wid_ref);
 
-        let result = load_owned_warehouse(&state, "seller_1", wid).await;
+        let result = load_owned_warehouse(&state, &seller_id, wid).await;
         assert!(result.is_ok());
     }
 
@@ -838,10 +875,12 @@ mod tests {
     #[tokio::test]
     async fn test_create_warehouse_not_default() {
         let state = setup_state().await;
+        let seller_id = unique_seller_id();
         let Json(resp) = create_warehouse(
             State(state),
+            auth(&seller_id, "user"),
             Json(CreateWarehouseRequest {
-                user_id: "seller_1".into(),
+                user_id: seller_id.clone(),
                 label: "My Warehouse".into(),
                 warehouse_type: "personal".into(),
                 address: sample_address(),
@@ -860,32 +899,33 @@ mod tests {
     async fn test_update_warehouse_all_fields() {
         let state = setup_state().await;
         let collection = warehouses_collection();
+        let seller_id = unique_seller_id();
         let created = state
             .db
             .create_document(
                 &collection,
                 json!({
-                    "parent_id": warehouse_parent("seller_1"),
+                    "parent_id": warehouse_parent(&seller_id),
                     "label": "Primary",
                     "type": "warehouse",
                     fields::ADDRESS: sanitize_address(&sample_address()).unwrap(),
                     fields::IS_DEFAULT: false,
-                    fields::CREATED_AT: "2026-01-01T00:00:00Z",
+                    db_fields::CREATED_AT: "2026-01-01T00:00:00Z",
                 }),
             )
             .await
             .unwrap();
-        let warehouse_id = created["id"]
-            .as_str()
-            .unwrap()
+        let raw_wid = created[db_fields::ID].as_str().unwrap();
+        let warehouse_id = raw_wid
             .strip_prefix(&format!("{collection}:"))
-            .unwrap()
+            .unwrap_or(raw_wid)
             .to_string();
 
         let Json(resp) = update_warehouse(
             State(state),
+            auth(&seller_id, "user"),
             Json(UpdateWarehouseRequest {
-                user_id: "seller_1".into(),
+                user_id: seller_id.clone(),
                 warehouse_id: warehouse_id.clone(),
                 label: Some("Updated Label".into()),
                 warehouse_type: Some("personal".into()),
@@ -905,16 +945,17 @@ mod tests {
     async fn test_update_warehouse_set_default_clears_others() {
         let state = setup_state().await;
         let collection = warehouses_collection();
+        let seller_id = unique_seller_id();
         let first = state
             .db
             .create_document(
                 &collection,
                 json!({
-                    "parent_id": warehouse_parent("seller_1"),
+                    "parent_id": warehouse_parent(&seller_id),
                     "label": "First",
                     "type": "warehouse",
                     fields::IS_DEFAULT: true,
-                    fields::CREATED_AT: "2026-01-01T00:00:00Z",
+                    db_fields::CREATED_AT: "2026-01-01T00:00:00Z",
                 }),
             )
             .await
@@ -924,26 +965,26 @@ mod tests {
             .create_document(
                 &collection,
                 json!({
-                    "parent_id": warehouse_parent("seller_1"),
+                    "parent_id": warehouse_parent(&seller_id),
                     "label": "Second",
                     "type": "warehouse",
                     fields::IS_DEFAULT: false,
-                    fields::CREATED_AT: "2026-01-02T00:00:00Z",
+                    db_fields::CREATED_AT: "2026-01-02T00:00:00Z",
                 }),
             )
             .await
             .unwrap();
-        let second_id = second["id"]
-            .as_str()
-            .unwrap()
+        let raw_sid = second[db_fields::ID].as_str().unwrap();
+        let second_id = raw_sid
             .strip_prefix(&format!("{collection}:"))
-            .unwrap()
+            .unwrap_or(raw_sid)
             .to_string();
 
         let Json(resp) = update_warehouse(
             State(state.clone()),
+            auth(&seller_id, "user"),
             Json(UpdateWarehouseRequest {
-                user_id: "seller_1".into(),
+                user_id: seller_id.clone(),
                 warehouse_id: second_id.clone(),
                 label: None,
                 warehouse_type: None,
@@ -957,11 +998,10 @@ mod tests {
         assert!(resp.success);
 
         // Check only second is default now
-        let first_id = first["id"]
-            .as_str()
-            .unwrap()
+        let raw_fid = first[db_fields::ID].as_str().unwrap();
+        let first_id = raw_fid
             .strip_prefix(&format!("{collection}:"))
-            .unwrap();
+            .unwrap_or(raw_fid);
         let first_doc = state.db.get_document(&collection, first_id).await.unwrap();
         assert_eq!(first_doc[fields::IS_DEFAULT], false);
     }
@@ -974,31 +1014,32 @@ mod tests {
     async fn test_update_warehouse_label_only() {
         let state = setup_state().await;
         let collection = warehouses_collection();
+        let seller_id = unique_seller_id();
         let created = state
             .db
             .create_document(
                 &collection,
                 json!({
-                    "parent_id": warehouse_parent("seller_1"),
+                    "parent_id": warehouse_parent(&seller_id),
                     "label": "Old",
                     "type": "warehouse",
                     fields::IS_DEFAULT: false,
-                    fields::CREATED_AT: "2026-01-01T00:00:00Z",
+                    db_fields::CREATED_AT: "2026-01-01T00:00:00Z",
                 }),
             )
             .await
             .unwrap();
-        let warehouse_id = created["id"]
-            .as_str()
-            .unwrap()
+        let raw_wid = created[db_fields::ID].as_str().unwrap();
+        let warehouse_id = raw_wid
             .strip_prefix(&format!("{collection}:"))
-            .unwrap()
+            .unwrap_or(raw_wid)
             .to_string();
 
         let Json(resp) = update_warehouse(
             State(state),
+            auth(&seller_id, "user"),
             Json(UpdateWarehouseRequest {
-                user_id: "seller_1".into(),
+                user_id: seller_id.clone(),
                 warehouse_id: warehouse_id.clone(),
                 label: Some("New Label".into()),
                 warehouse_type: None,
@@ -1018,31 +1059,32 @@ mod tests {
     async fn test_delete_default_warehouse_no_other_to_promote() {
         let state = setup_state().await;
         let collection = warehouses_collection();
+        let seller_id = unique_seller_id();
         let created = state
             .db
             .create_document(
                 &collection,
                 json!({
-                    "parent_id": warehouse_parent("seller_1"),
+                    "parent_id": warehouse_parent(&seller_id),
                     "label": "Only Default",
                     "type": "warehouse",
                     fields::IS_DEFAULT: true,
-                    fields::CREATED_AT: "2026-01-01T00:00:00Z",
+                    db_fields::CREATED_AT: "2026-01-01T00:00:00Z",
                 }),
             )
             .await
             .unwrap();
-        let warehouse_id = created["id"]
-            .as_str()
-            .unwrap()
+        let raw_wid = created[db_fields::ID].as_str().unwrap();
+        let warehouse_id = raw_wid
             .strip_prefix(&format!("{collection}:"))
-            .unwrap()
+            .unwrap_or(raw_wid)
             .to_string();
 
         let Json(resp) = delete_warehouse(
             State(state),
+            auth(&seller_id, "user"),
             Json(DeleteWarehouseRequest {
-                user_id: "seller_1".into(),
+                user_id: seller_id.clone(),
                 warehouse_id: warehouse_id.clone(),
             }),
         )
@@ -1058,16 +1100,17 @@ mod tests {
     async fn test_list_warehouses_success() {
         let state = setup_state().await;
         let collection = warehouses_collection();
+        let seller_id = unique_seller_id();
         state
             .db
             .create_document(
                 &collection,
                 json!({
-                    "parent_id": warehouse_parent("seller_1"),
+                    "parent_id": warehouse_parent(&seller_id),
                     "label": "Warehouse A",
                     "type": "warehouse",
                     fields::IS_DEFAULT: true,
-                    fields::CREATED_AT: "2026-01-01T00:00:00Z",
+                    db_fields::CREATED_AT: "2026-01-01T00:00:00Z",
                 }),
             )
             .await
@@ -1077,11 +1120,11 @@ mod tests {
             .create_document(
                 &collection,
                 json!({
-                    "parent_id": warehouse_parent("seller_1"),
+                    "parent_id": warehouse_parent(&seller_id),
                     "label": "Warehouse B",
                     "type": "personal",
                     fields::IS_DEFAULT: false,
-                    fields::CREATED_AT: "2026-01-02T00:00:00Z",
+                    db_fields::CREATED_AT: "2026-01-02T00:00:00Z",
                 }),
             )
             .await
@@ -1089,8 +1132,9 @@ mod tests {
 
         let Json(resp) = list_warehouses(
             State(state),
+            auth(&seller_id, "user"),
             Json(ListWarehousesRequest {
-                user_id: "seller_1".into(),
+                user_id: seller_id.clone(),
             }),
         )
         .await
@@ -1108,11 +1152,13 @@ mod tests {
     #[tokio::test]
     async fn test_list_warehouses_empty() {
         let state = setup_state().await;
+        let seller_id = unique_seller_id();
 
         let Json(resp) = list_warehouses(
             State(state),
+            auth(&seller_id, "user"),
             Json(ListWarehousesRequest {
-                user_id: "seller_no_warehouses".into(),
+                user_id: seller_id.clone(),
             }),
         )
         .await
@@ -1127,16 +1173,17 @@ mod tests {
     async fn test_list_warehouses_strips_collection_prefix() {
         let state = setup_state().await;
         let collection = warehouses_collection();
+        let seller_id = unique_seller_id();
         state
             .db
             .create_document(
                 &collection,
                 json!({
-                    "parent_id": warehouse_parent("seller_1"),
+                    "parent_id": warehouse_parent(&seller_id),
                     "label": "Test",
                     "type": "warehouse",
                     fields::IS_DEFAULT: false,
-                    fields::CREATED_AT: "2026-01-01T00:00:00Z",
+                    db_fields::CREATED_AT: "2026-01-01T00:00:00Z",
                 }),
             )
             .await
@@ -1144,8 +1191,9 @@ mod tests {
 
         let Json(resp) = list_warehouses(
             State(state),
+            auth(&seller_id, "user"),
             Json(ListWarehousesRequest {
-                user_id: "seller_1".into(),
+                user_id: seller_id.clone(),
             }),
         )
         .await
@@ -1164,6 +1212,7 @@ mod tests {
 
         let result = list_warehouses(
             State(state),
+            auth("", "user"),
             Json(ListWarehousesRequest { user_id: "".into() }),
         )
         .await;
@@ -1176,31 +1225,32 @@ mod tests {
     async fn test_delete_non_default_warehouse() {
         let state = setup_state().await;
         let collection = warehouses_collection();
+        let seller_id = unique_seller_id();
         let created = state
             .db
             .create_document(
                 &collection,
                 json!({
-                    "parent_id": warehouse_parent("seller_1"),
+                    "parent_id": warehouse_parent(&seller_id),
                     "label": "Not Default",
                     "type": "warehouse",
                     fields::IS_DEFAULT: false,
-                    fields::CREATED_AT: "2026-01-01T00:00:00Z",
+                    db_fields::CREATED_AT: "2026-01-01T00:00:00Z",
                 }),
             )
             .await
             .unwrap();
-        let warehouse_id = created["id"]
-            .as_str()
-            .unwrap()
+        let raw_id = created[db_fields::ID].as_str().unwrap();
+        let warehouse_id = raw_id
             .strip_prefix(&format!("{collection}:"))
-            .unwrap()
+            .unwrap_or(raw_id)
             .to_string();
 
         let Json(resp) = delete_warehouse(
             State(state),
+            auth(&seller_id, "user"),
             Json(DeleteWarehouseRequest {
-                user_id: "seller_1".into(),
+                user_id: seller_id.clone(),
                 warehouse_id: warehouse_id.clone(),
             }),
         )

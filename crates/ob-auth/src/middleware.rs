@@ -1,8 +1,56 @@
 use axum::{extract::Request, http::header::AUTHORIZATION, middleware::Next, response::Response};
 use ob_core::Error;
 use std::sync::Arc;
+use tracing::warn;
 
 use crate::jwt::{Claims, JwtKeys, verify_token};
+
+/// Panics at startup if JWT secret is the default placeholder, empty, or too short in production.
+pub fn assert_jwt_secret_configured(jwt_secret: &str) {
+    let environment = std::env::var("ENVIRONMENT").unwrap_or_default();
+    if environment == "production" {
+        if jwt_secret.is_empty() {
+            panic!(
+                "FATAL: JWT secret is empty in production. Set OB_AUTH__JWT_SECRET to a strong random value (at least 32 bytes)."
+            );
+        }
+        if jwt_secret == "CHANGE_ME_IN_PRODUCTION" {
+            panic!(
+                "FATAL: JWT secret is still the default 'CHANGE_ME_IN_PRODUCTION' in production. Set OB_AUTH__JWT_SECRET to a strong random value."
+            );
+        }
+        if jwt_secret.len() < 32 {
+            panic!(
+                "FATAL: JWT secret is only {} bytes in production. Use at least 32 bytes for adequate security.",
+                jwt_secret.len()
+            );
+        }
+    }
+}
+
+/// Panics at startup if a live Stripe key is used in non-production.
+pub fn assert_no_live_stripe_in_dev(stripe_key: &str) {
+    let environment = std::env::var("ENVIRONMENT").unwrap_or_default();
+    if environment != "production" && stripe_key.starts_with("sk_live_") {
+        panic!(
+            "FATAL: Live Stripe key (sk_live_) detected in {} environment. Use sk_test_ for non-production.",
+            environment
+        );
+    }
+}
+
+/// Panics at startup if OB_TEST_MODE=1 in anything other than development or test.
+/// Call this during server initialization to prevent accidental auth bypass.
+pub fn assert_test_mode_not_in_production() {
+    let test_mode = std::env::var("OB_TEST_MODE").unwrap_or_default() == "1";
+    let environment = std::env::var("ENVIRONMENT").unwrap_or_default();
+    if test_mode && environment != "development" && environment != "test" {
+        panic!(
+            "FATAL: OB_TEST_MODE=1 is only allowed in development or test environments. \
+             Current environment: '{environment}'. This bypasses authentication and is a critical security risk."
+        );
+    }
+}
 
 /// Extracted auth context available to handlers.
 #[derive(Debug, Clone)]
@@ -47,6 +95,7 @@ impl AuthContext {
 /// Anonymous requests (no Authorization header) are allowed — security rules enforce access control.
 pub async fn auth_extractor(mut request: Request, next: Next) -> Result<Response, Error> {
     let jwt_keys = request.extensions().get::<Arc<JwtKeys>>().cloned();
+    let test_mode = std::env::var("OB_TEST_MODE").unwrap_or_default() == "1";
 
     let auth_context = if let Some(auth_header) = request.headers().get(AUTHORIZATION) {
         let header_str = auth_header
@@ -57,21 +106,49 @@ pub async fn auth_extractor(mut request: Request, next: Next) -> Result<Response
             if let Some(keys) = &jwt_keys {
                 match verify_token(token, keys) {
                     Ok(claims) if claims.typ == "access" => AuthContext::from_claims(claims),
+                    Ok(_) if test_mode => {
+                        warn!(
+                            "OB_TEST_MODE: bypassing auth for invalid token type — falling back to anonymous"
+                        );
+                        AuthContext::anonymous()
+                    }
                     Ok(_) => return Err(Error::Auth("Invalid token type".into())),
                     Err(e) => {
-                        // CRITICAL FIX: Authorization header present but JWT invalid → 401
-                        // Do NOT silently become anonymous
-                        return Err(Error::Auth(format!("Invalid or expired token: {e}")));
+                        if test_mode {
+                            warn!(
+                                "OB_TEST_MODE: bypassing auth for invalid JWT ({e}) — falling back to anonymous"
+                            );
+                            AuthContext::anonymous()
+                        } else {
+                            // CRITICAL FIX: Authorization header present but JWT invalid → 401
+                            // Do NOT silently become anonymous.
+                            // Log the full error server-side but return a generic message
+                            // to avoid leaking JWT internals (algorithm, expiry details, etc.)
+                            warn!(error = %e, "JWT verification failed");
+                            return Err(Error::Auth("Invalid or expired token".into()));
+                        }
                     }
                 }
             } else {
                 // JWT keys not available, but Authorization header was present
                 // Return error instead of silently becoming anonymous
-                return Err(Error::Auth("JWT validation keys not configured".into()));
+                if test_mode {
+                    warn!("OB_TEST_MODE: JWT keys not configured — falling back to anonymous");
+                    AuthContext::anonymous()
+                } else {
+                    return Err(Error::Auth("JWT validation keys not configured".into()));
+                }
             }
         } else {
             // Authorization header present but doesn't start with "Bearer "
-            return Err(Error::Auth("Invalid Authorization header format".into()));
+            if test_mode {
+                warn!(
+                    "OB_TEST_MODE: invalid Authorization header format — falling back to anonymous"
+                );
+                AuthContext::anonymous()
+            } else {
+                return Err(Error::Auth("Invalid Authorization header format".into()));
+            }
         }
     } else {
         // No Authorization header → anonymous is OK

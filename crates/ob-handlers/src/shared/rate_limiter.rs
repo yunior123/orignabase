@@ -7,7 +7,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::shared::schema::collections;
+use crate::shared::schema::{collections, fields};
 use ob_database::DatabaseClient;
 
 const TRUSTED_PROXY_IP: &str = "127.0.0.1";
@@ -70,6 +70,14 @@ pub async fn check_user_rate_limit(
     max_requests: u64,
     window_minutes: i64,
 ) -> Result<(), ob_core::Error> {
+    // Keep the OB_TEST_MODE bypass out of unit tests so parallel test cases that
+    // mutate process-wide environment variables do not make these checks flaky.
+    // Integration tests still build this crate without `cfg(test)`, so they retain
+    // the bypass behavior when explicitly requested.
+    if !cfg!(test) && std::env::var("OB_TEST_MODE").unwrap_or_default() == "1" {
+        return Ok(());
+    }
+
     // Use Unix timestamps (i64) instead of RFC3339 strings for reliable comparisons
     let now_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -78,7 +86,7 @@ pub async fn check_user_rate_limit(
     let window_start = now_secs - (window_minutes * 60);
 
     let query = format!(
-        "SELECT count() FROM {} WHERE userId = $user_id AND action = $action AND createdAt >= $window_start GROUP ALL",
+        "SELECT COUNT(*) FROM {} WHERE data->>'userId' = $user_id AND data->>'action' = $action AND (data->>'createdAt')::bigint >= ($window_start)::bigint",
         collections::RATE_LIMITS
     );
 
@@ -109,9 +117,9 @@ pub async fn check_user_rate_limit(
         .create_document(
             collections::RATE_LIMITS,
             serde_json::json!({
-                "userId": user_id,
-                "action": action,
-                "createdAt": now_secs,
+                fields::USER_ID: user_id,
+                fields::ACTION: action,
+                fields::CREATED_AT: now_secs,
             }),
         )
         .await;
@@ -196,9 +204,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_database_rate_limiter() {
+        // Ensure OB_TEST_MODE doesn't bypass rate limiting in unit tests
+        unsafe {
+            std::env::remove_var("OB_TEST_MODE");
+        }
         let db = DatabaseClient::new_mem().await;
-        let user_id = "user_123";
-        let action = "test_action";
+        let user_id = &uuid::Uuid::new_v4().to_string();
+        let action = &format!("test_action_{}", uuid::Uuid::new_v4());
 
         // First 2 requests should be allowed
         assert!(
@@ -269,12 +281,16 @@ mod tests {
     async fn test_rate_limit_single_request_allowed() {
         let db = DatabaseClient::new_mem().await;
         // Single request with limit of 1 should pass
-        let result = check_user_rate_limit(&db, "user_single", "checkout", 1, 1).await;
+        let uid = uuid::Uuid::new_v4().to_string();
+        let result = check_user_rate_limit(&db, &uid, "checkout", 1, 1).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_rate_limit_error_message_content() {
+        unsafe {
+            std::env::remove_var("OB_TEST_MODE");
+        }
         let db = DatabaseClient::new_mem().await;
         // Exhaust the limit
         let _ = check_user_rate_limit(&db, "user_msg", "webhook", 1, 1).await;
@@ -287,6 +303,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_rate_limit_zero_max_requests_blocks_immediately() {
+        unsafe {
+            std::env::remove_var("OB_TEST_MODE");
+        }
         let db = DatabaseClient::new_mem().await;
         // max_requests=0 means no requests allowed
         let result = check_user_rate_limit(&db, "user_zero", "action", 0, 1).await;

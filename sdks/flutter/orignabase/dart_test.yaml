@@ -1,0 +1,7 @@
+tags:
+  live:
+    # Live integration tests require a running OrignaBase server.
+    # Run explicitly: flutter test --tags live
+
+# Exclude live tests from default `flutter test` runs.
+exclude_tags: live

@@ -67,7 +67,7 @@ See `INTEGRATION.md` for:
 
 All tools preserve existing OrignaBase schemas:
 - Money: **integer cents** (no float conversion)
-- SurrealDB IDs: `collection:record_id` format preserved
+- PostgreSQL IDs: `collection:record_id` format preserved
 - Timestamps: `createdAt` (orders), `dateCreated` (products), `timestamp` (webhooks)
 
 ## Development

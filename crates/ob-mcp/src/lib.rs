@@ -6,7 +6,7 @@
 //! Architecture:
 //! - Tools reuse existing ob-handlers, ob-database, ob-auth logic
 //! - All monetary values remain integer cents (no conversion)
-//! - SurrealDB IDs: collection:record_id format preserved
+//! - PostgreSQL IDs: UUID format
 //! - Authentication via JWT middleware
 //! - Safeguards: idempotency keys, confirmation tokens, spend limits
 
@@ -20,6 +20,7 @@ pub mod transport;
 pub use server::OrignaGtaMcp;
 pub use transport::McpRouter;
 
+use ob_auth::JwtKeys;
 use ob_core::Config;
 use ob_database::DatabaseClient;
 use ob_search::SearchClient;
@@ -31,6 +32,7 @@ pub struct McpState {
     pub db: Arc<DatabaseClient>,
     pub search: Option<Arc<SearchClient>>,
     pub config: Arc<Config>,
+    pub jwt_keys: Arc<JwtKeys>,
 }
 
 impl McpState {
@@ -39,7 +41,13 @@ impl McpState {
         db: Arc<DatabaseClient>,
         search: Option<Arc<SearchClient>>,
         config: Arc<Config>,
+        jwt_keys: Arc<JwtKeys>,
     ) -> Self {
-        Self { db, search, config }
+        Self {
+            db,
+            search,
+            config,
+            jwt_keys,
+        }
     }
 }

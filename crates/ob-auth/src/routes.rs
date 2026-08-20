@@ -6,7 +6,10 @@ use axum::{
 };
 use chrono::Utc;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use ob_core::constants::collections as c;
+use ob_core::constants::fields as f;
 use ob_core::{Error, Result};
+use ob_database::fields;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
@@ -44,6 +47,8 @@ pub struct AuthState {
     pub base_url: String,
     /// Short-lived OAuth state nonce store to reject replayed callbacks.
     pub oauth_state_nonces: Arc<dashmap::DashMap<String, i64>>,
+    /// Whether test mode is enabled (disables certain security checks)
+    pub test_mode: bool,
     /// Cloudflare Turnstile secret key
     pub turnstile_secret_key: Option<String>,
     pub http_client: reqwest::Client,
@@ -103,17 +108,19 @@ struct GoogleOAuthStateClaims {
 }
 
 fn google_client_id_configured(state: &AuthState) -> bool {
-    state
-        .google_client_id
-        .as_deref()
-        .is_some_and(|value| !value.trim().is_empty())
+    state.google_client_id.as_deref().is_some_and(|value| {
+        let trimmed = value.trim();
+        !trimmed.is_empty()
+            && trimmed.contains('.')
+            && trimmed.ends_with(".apps.googleusercontent.com")
+    })
 }
 
 fn google_client_secret_configured(state: &AuthState) -> bool {
-    state
-        .google_client_secret
-        .as_deref()
-        .is_some_and(|value| !value.trim().is_empty())
+    state.google_client_secret.as_deref().is_some_and(|value| {
+        let trimmed = value.trim();
+        !trimmed.is_empty() && trimmed.starts_with("GOCSPX-")
+    })
 }
 
 fn google_web_provider_enabled(state: &AuthState) -> bool {
@@ -166,7 +173,7 @@ fn frontend_fallback_redirect(state: &AuthState) -> String {
     let fallback = match host {
         "api.orignagta.ca" => "https://orignagta.ca",
         "api-staging.orignagta.ca" => "https://orignagta-staging.web.app",
-        "localhost" | "127.0.0.1" => "http://localhost:5001",
+        "localhost" | "127.0.0.1" if state.test_mode => "http://localhost:5001",
         _ if host.starts_with("api.") => {
             return format!(
                 "{}://{}",
@@ -272,13 +279,32 @@ fn build_redirect_with_fragment(base: &str, fragment: &str) -> Redirect {
 }
 
 fn ensure_user_not_disabled(user: &serde_json::Value) -> Result<()> {
+    // ignore-magic: ob-auth has no access to ob-handlers schema constants
     if user["disabled"].as_bool().unwrap_or(false) {
         return Err(Error::Auth("Account is disabled".into()));
     }
     Ok(())
 }
 
-/// POST /auth/register
+/// Registers a new email/password user and optionally issues auth tokens.
+///
+/// Parameters:
+/// - `state`: auth subsystem state containing config, DB access, JWT keys, and
+///   optional email/Turnstile services.
+/// - `body`: registration payload with email, password, display name, and
+///   Turnstile token.
+///
+/// Returns:
+/// - `Ok(Json<AuthResponse>)` with either auth tokens or an
+///   email-verification-required payload, depending on configuration.
+/// - `Err(...)` when bot protection, validation, password hashing, or DB writes fail.
+///
+/// Gotchas:
+/// - Duplicate emails intentionally return a generic validation failure rather than
+///   exposing whether the account exists.
+/// - When `require_email_verification` is enabled, registration succeeds without
+///   issuing usable access or refresh tokens.
+/// - Verification email delivery is best-effort and does not roll back user creation.
 pub async fn register(
     State(state): State<AuthState>,
     Json(body): Json<RegisterRequest>,
@@ -288,7 +314,7 @@ pub async fn register(
         if let Some(ref secret) = state.turnstile_secret_key {
             crate::turnstile::validate_turnstile_token(token, secret).await?;
         }
-    } else if std::env::var("OB_TEST_MODE").unwrap_or_default() != "1" {
+    } else if !state.test_mode {
         // Require Turnstile token in production
         return Err(Error::Validation("Turnstile token is required".into()));
     }
@@ -297,11 +323,7 @@ pub async fn register(
     if !body.email.contains('@') || body.email.len() < 5 {
         return Err(Error::Validation("Invalid email address".into()));
     }
-    if body.password.len() < 8 {
-        return Err(Error::Validation(
-            "Password must be at least 8 characters".into(),
-        ));
-    }
+    crate::password::validate_password_strength(&body.password)?;
 
     // Check if email already exists (parameterized query — safe from injection)
     let existing = state
@@ -318,30 +340,33 @@ pub async fn register(
     // Hash password
     let password_hash = password::hash_password(&body.password)?;
 
+    // ignore-magic: ob-auth has no access to ob-handlers schema constants
     // Create user document
     let user_data = json!({
-        "email": body.email,
-        "password_hash": password_hash,
-        "display_name": body.display_name.unwrap_or_default(),
-        "roles": ["user"],
-        "email_verified": false,
-        "mfa_enabled": false,
-        "created_at": chrono::Utc::now().to_rfc3339(),
+        (f::EMAIL): body.email,
+        "password_hash": password_hash, // ignore-magic: internal auth field, not in schema constants
+        "display_name": body.display_name.unwrap_or_default(), // ignore-magic: user registration field
+        (f::ROLES): ["user"],
+        (f::EMAIL_VERIFIED): false,
+        (f::MFA_ENABLED): false,
+        (f::CREATED_AT): chrono::Utc::now().to_rfc3339(),
     });
 
-    let user = state.db.create_document("users", user_data).await?;
-    let user_id = user["id"]
+    let user = state.db.create_document(c::USERS, user_data).await?;
+    let user_id = user[fields::ID]
         .as_str()
         .map(|s| s.to_string())
-        .unwrap_or_else(|| user["id"].to_string());
+        .unwrap_or_else(|| user[fields::ID].to_string());
 
     // Send verification email if email service is configured
     let verification_token = jwt::issue_verification_token(&user_id, &state.jwt_keys)?;
 
-    if let Some(ref email_service) = state.email_service {
-        let _ = email_service
-            .send_verification_email(&body.email, &verification_token, &state.base_url)
-            .await;
+    if let Some(ref email_service) = state.email_service
+        && let Err(error) = email_service
+            .send_verification_email(&body.email, &verification_token, &state.base_url, "en")
+            .await
+    {
+        tracing::warn!(email = %body.email, %error, "Failed to send verification email");
     }
 
     // Strip password hash from response
@@ -376,7 +401,22 @@ pub async fn register(
     }))
 }
 
-/// POST /auth/login
+/// Authenticates an email/password user and starts MFA when required.
+///
+/// Parameters:
+/// - `state`: auth subsystem state with DB, JWT keys, and security configuration.
+/// - `headers`: request headers used for IP/device extraction and login tracking.
+/// - `body`: login payload containing email, password, and Turnstile token.
+///
+/// Returns:
+/// - `Ok(Json<AuthResponse>)` with full auth tokens for normal logins.
+/// - `Ok(Json<AuthResponse>)` with an MFA challenge token when the account requires TOTP.
+/// - `Err(...)` for lockout, validation, password, or account-state failures.
+///
+/// Gotchas:
+/// - Account lockout is checked before password verification to avoid wasting CPU.
+/// - Unknown users still trigger a dummy password verification to reduce timing leaks.
+/// - Successful logins record session and device history on a best-effort basis.
 pub async fn login(
     State(state): State<AuthState>,
     headers: HeaderMap,
@@ -387,10 +427,14 @@ pub async fn login(
         if let Some(ref secret) = state.turnstile_secret_key {
             crate::turnstile::validate_turnstile_token(token, secret).await?;
         }
-    } else if std::env::var("OB_TEST_MODE").unwrap_or_default() != "1" {
+    } else if !state.test_mode {
         // Require Turnstile token in production
         return Err(Error::Validation("Turnstile token is required".into()));
     }
+
+    // Check account lockout BEFORE any password verification (DoS protection —
+    // prevents bcrypt computation on locked accounts)
+    login_tracking::check_account_lockout(&state.db, &body.email).await?;
 
     // Find user by email (parameterized query — safe from injection)
     let users = state
@@ -404,6 +448,8 @@ pub async fn login(
     let user = match users.first() {
         Some(u) => u,
         None => {
+            // Record failed attempt for lockout tracking (best-effort)
+            login_tracking::record_failed_login_for_lockout(&state.db, &body.email).await;
             // Timing attack prevention: run a dummy argon2id hash so the response
             // time is indistinguishable from a real password verification.
             // This prevents email enumeration via timing side-channel.
@@ -412,6 +458,7 @@ pub async fn login(
         }
     };
 
+    // ignore-magic: ob-auth has no access to ob-handlers schema constants
     // Verify password
     let hash = user["password_hash"]
         .as_str()
@@ -419,13 +466,15 @@ pub async fn login(
 
     ensure_user_not_disabled(user)?;
 
-    let user_id = user["id"]
+    let user_id = user[fields::ID]
         .as_str()
         .map(|s| s.to_string())
-        .unwrap_or_else(|| user["id"].to_string());
+        .unwrap_or_else(|| user[fields::ID].to_string());
 
     if !password::verify_password(&body.password, hash)? {
-        // Record failed login attempt (best-effort)
+        // Record failed login attempt for lockout tracking (best-effort)
+        login_tracking::record_failed_login_for_lockout(&state.db, &body.email).await;
+        // Record failed login attempt for device tracking (best-effort)
         login_tracking::on_login_failure(&state.db, &user_id, &headers).await;
         return Err(Error::Auth("Invalid email or password".into()));
     }
@@ -440,7 +489,7 @@ pub async fn login(
         .unwrap_or_default();
 
     // Check email verification requirement
-    let email_verified = user["email_verified"].as_bool().unwrap_or(false);
+    let email_verified = user[f::EMAIL_VERIFIED].as_bool().unwrap_or(false);
     if state.require_email_verification && !email_verified {
         return Err(Error::Auth(
             "Email not verified. Please check your inbox.".into(),
@@ -462,7 +511,7 @@ pub async fn login(
     }
 
     let custom_claims = user
-        .get("custom_claims")
+        .get(f::CUSTOM_CLAIMS)
         .cloned()
         .unwrap_or(serde_json::Value::Null);
 
@@ -494,24 +543,51 @@ pub async fn login(
     }))
 }
 
-/// POST /auth/refresh
+/// Exchanges a valid refresh token for a new access/refresh token pair.
+///
+/// Parameters:
+/// - `state`: auth subsystem state with JWT keys, DB access, and token TTLs.
+/// - `body`: refresh payload containing the previous refresh token.
+///
+/// Returns:
+/// - `Ok(Json<Value>)` with `access_token` and `refresh_token`.
+/// - `Err(...)` when the token is invalid, revoked, or the backing user cannot be used.
+///
+/// Gotchas:
+/// - The old refresh token is revoked only after new tokens are issued.
+/// - Revocation failure is logged and tolerated so active sessions are not stranded.
+/// - User roles and custom claims are reloaded from storage on every refresh.
 pub async fn refresh(
     State(state): State<AuthState>,
     Json(body): Json<RefreshRequest>,
 ) -> Result<Json<serde_json::Value>> {
+    tracing::info!("refresh: acquiring rotation lock");
+    let rotation_lock =
+        crate::revocation::acquire_refresh_rotation_lock(&state.db, &body.refresh_token).await?;
+    tracing::info!("refresh: verifying token");
     let claims = jwt::verify_token(&body.refresh_token, &state.jwt_keys)?;
+    tracing::info!(typ = %claims.typ, sub = %claims.sub, "refresh: token verified");
 
     if claims.typ != "refresh" {
         return Err(Error::Auth("Invalid token type".into()));
     }
 
+    // Check if the refresh token has been revoked
+    tracing::info!("refresh: checking revocation");
+    if crate::revocation::is_token_revoked(&state.db, &body.refresh_token).await? {
+        tracing::warn!("Attempted refresh with revoked token");
+        return Err(Error::Auth("Token has been revoked".into()));
+    }
+    tracing::info!("refresh: token not revoked, looking up user");
+
     // Look up user to get current roles
-    // Use type::thing() to convert the string record ID back to a RecordId
+    let bare_uid = claims.sub.split(':').next_back().unwrap_or(&claims.sub);
+    tracing::info!(bare_uid = %bare_uid, "refresh: querying user");
     let users = state
         .db
         .query_bind(
-            "SELECT * FROM type::thing($uid)",
-            json!({ "uid": claims.sub }),
+            "SELECT * FROM users WHERE id = $uid",
+            json!({ "uid": bare_uid }),
         )
         .await?;
 
@@ -519,6 +595,20 @@ pub async fn refresh(
         .first()
         .ok_or_else(|| Error::Auth("User not found".into()))?;
     ensure_user_not_disabled(user)?;
+
+    // Reject refresh tokens issued before the last password change.
+    // This ensures a password reset invalidates all pre-existing sessions.
+    if let Some(pw_changed) = user["password_changed_at"].as_i64()
+        && claims.iat < pw_changed
+    {
+        tracing::warn!(
+            user_id = %claims.sub,
+            "Refresh token rejected: issued before password change"
+        );
+        return Err(Error::Auth(
+            "Session invalidated by password change. Please log in again.".into(),
+        ));
+    }
 
     let roles: Vec<String> = user["roles"]
         .as_array()
@@ -529,9 +619,9 @@ pub async fn refresh(
         })
         .unwrap_or_default();
 
-    let email_verified = user["email_verified"].as_bool().unwrap_or(false);
+    let email_verified = user[f::EMAIL_VERIFIED].as_bool().unwrap_or(false);
     let custom_claims = user
-        .get("custom_claims")
+        .get(f::CUSTOM_CLAIMS)
         .cloned()
         .unwrap_or(serde_json::Value::Null);
 
@@ -543,11 +633,49 @@ pub async fn refresh(
         email_verified,
         custom_claims,
     )?;
-    let refresh_token = jwt::issue_refresh_token(&claims.sub, &state.jwt_keys, state.refresh_ttl)?;
+    let new_refresh_token =
+        jwt::issue_refresh_token(&claims.sub, &state.jwt_keys, state.refresh_ttl)?;
+
+    crate::revocation::revoke_token(&state.db, &body.refresh_token, state.refresh_ttl).await?;
+
+    rotation_lock
+        .commit()
+        .await
+        .map_err(|e| Error::Database(format!("Failed to release refresh lock transaction: {e}")))?;
 
     Ok(Json(json!({
         "access_token": access_token,
-        "refresh_token": refresh_token,
+        "refresh_token": new_refresh_token,
+    })))
+}
+
+/// Logout a user by revoking their refresh token.
+///
+/// POST /auth/logout
+/// Request body: { "refresh_token": "..." }
+///
+/// This endpoint revokes the refresh token, preventing further token refresh attempts.
+/// The token is hashed before storage to avoid storing plaintext tokens.
+#[derive(Deserialize)]
+pub struct LogoutRequest {
+    pub refresh_token: String,
+}
+
+pub async fn logout(
+    State(state): State<AuthState>,
+    Json(body): Json<LogoutRequest>,
+) -> Result<Json<serde_json::Value>> {
+    // Validate that the refresh token is well-formed (basic check)
+    if body.refresh_token.is_empty() {
+        return Err(Error::Auth("Refresh token is required".into()));
+    }
+
+    // Revoke the token
+    crate::revocation::revoke_token(&state.db, &body.refresh_token, state.refresh_ttl).await?;
+
+    tracing::info!("User logged out successfully");
+    Ok(Json(json!({
+        "message": "Logged out successfully"
     })))
 }
 
@@ -559,6 +687,7 @@ async fn record_session(
     user_id: &str,
     method: &str,
 ) -> Result<()> {
+    // ignore-magic: ob-auth has no access to ob-handlers schema constants
     let session_data = json!({
         "user_id": user_id,
         "method": method,
@@ -666,12 +795,12 @@ pub async fn google_oauth_start(
     let client_id = state
         .google_client_id
         .as_deref()
-        .filter(|value| !value.trim().is_empty())
+        .filter(|_| google_client_id_configured(&state))
         .ok_or_else(|| Error::Config("Google OAuth client ID not configured".into()))?;
     let _client_secret = state
         .google_client_secret
         .as_deref()
-        .filter(|value| !value.trim().is_empty())
+        .filter(|_| google_client_secret_configured(&state))
         .ok_or_else(|| Error::Config("Google OAuth client secret not configured".into()))?;
 
     let redirect_to = validate_google_redirect_target(&state, &query.redirect_to)?;
@@ -695,7 +824,21 @@ pub async fn google_oauth_start(
     Ok(Redirect::temporary(google_url.as_str()))
 }
 
-/// GET /auth/google/callback — finish the backend-owned Google OAuth web flow.
+/// Completes the backend-owned Google OAuth redirect flow and returns tokens to the frontend.
+///
+/// Parameters:
+/// - `state`: auth subsystem state containing OAuth client config, JWT keys, and DB access.
+/// - `query`: callback query parameters from Google, including `code`, `state`, or `error`.
+///
+/// Returns:
+/// - `Ok(Redirect)` to the frontend target with either token fragments or OAuth error details.
+/// - `Err(...)` when state validation, provider exchange, or local user resolution fails.
+///
+/// Gotchas:
+/// - The redirect target is recovered from the signed OAuth state token, not trusted
+///   directly from query parameters.
+/// - Provider-side errors are converted into fragment params instead of failing with JSON.
+/// - Successful completion delegates to [`oauth_find_or_create_user`] before redirecting.
 pub async fn google_oauth_callback(
     State(state): State<AuthState>,
     Query(query): Query<GoogleOAuthCallbackRequest>,
@@ -765,6 +908,7 @@ pub async fn google_sign_in(
     let client_id = state
         .google_client_id
         .as_deref()
+        .filter(|_| google_client_id_configured(&state))
         .ok_or_else(|| Error::Config("Google OAuth not configured".into()))?;
 
     let user_info = oauth::verify_google_id_token(&body.id_token, client_id).await?;
@@ -797,8 +941,13 @@ pub async fn apple_sign_in(
     let client_secret =
         oauth::generate_apple_client_secret(team_id, key_id, service_id, private_key)?;
 
-    let mut user_info =
-        oauth::verify_apple_auth_code(&body.authorization_code, service_id, &client_secret).await?;
+    let mut user_info = oauth::verify_apple_auth_code(
+        &body.authorization_code,
+        service_id,
+        &state.base_url,
+        &client_secret,
+    )
+    .await?;
 
     // Apple only sends display_name on first sign-in (from client)
     if user_info.display_name.is_none() {
@@ -822,14 +971,28 @@ pub async fn oidc_sign_in(
     oauth_find_or_create_user(&state, user_info).await
 }
 
-/// Shared logic: find existing user by provider+provider_id, or create new one.
-/// Returns auth tokens.
+/// Finds or creates the local user record for an OAuth identity and issues tokens.
+///
+/// Parameters:
+/// - `state`: auth subsystem state with DB, JWT keys, and token TTLs.
+/// - `info`: normalized provider identity returned by Google, Apple, or generic OIDC flows.
+///
+/// Returns:
+/// - `Ok(Json<AuthResponse>)` with local auth tokens and a sanitized user payload.
+/// - `Err(...)` if account linking, creation, or token issuance fails.
+///
+/// Gotchas:
+/// - Existing email/password accounts are linked to the OAuth provider instead of
+///   creating a duplicate user.
+/// - OAuth users are treated as email-verified by default unless the user record says otherwise.
+/// - Session recording is best-effort and does not block successful sign-in.
 async fn oauth_find_or_create_user(
     state: &AuthState,
     info: OAuthUserInfo,
 ) -> Result<Json<AuthResponse>> {
     let provider = info.provider.to_string();
 
+    // ignore-magic: ob-auth has no access to ob-handlers schema constants
     // Look up by provider + provider_id
     let existing = state
         .db
@@ -858,15 +1021,15 @@ async fn oauth_find_or_create_user(
 
         if let Some(mut user) = email_user {
             // Link OAuth to existing email account
-            let user_id = user["id"]
+            let user_id = user[fields::ID]
                 .as_str()
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| user["id"].to_string());
+                .unwrap_or_else(|| user[fields::ID].to_string());
 
             state
                 .db
                 .update_document(
-                    "users",
+                    c::USERS,
                     &user_id,
                     json!({
                         "oauth_provider": provider,
@@ -889,14 +1052,14 @@ async fn oauth_find_or_create_user(
                 "roles": ["user"],
                 "created_at": chrono::Utc::now().to_rfc3339(),
             });
-            state.db.create_document("users", user_data).await?
+            state.db.create_document(c::USERS, user_data).await?
         }
     };
 
-    let user_id = user["id"]
+    let user_id = user[fields::ID]
         .as_str()
         .map(|s| s.to_string())
-        .unwrap_or_else(|| user["id"].to_string());
+        .unwrap_or_else(|| user[fields::ID].to_string());
     ensure_user_not_disabled(&user)?;
 
     let roles: Vec<String> = user["roles"]
@@ -909,7 +1072,7 @@ async fn oauth_find_or_create_user(
         .unwrap_or_default();
 
     // OAuth users are considered email-verified (provider already verified)
-    let email_verified = user["email_verified"].as_bool().unwrap_or(true);
+    let email_verified = user[f::EMAIL_VERIFIED].as_bool().unwrap_or(true);
 
     let access_token = jwt::issue_access_token(
         &user_id,
@@ -958,7 +1121,7 @@ pub async fn forgot_password(
     let users = state
         .db
         .query_bind(
-            "SELECT id FROM users WHERE email = $email",
+            "SELECT id, data->>'email' AS email, data->>'preferredLanguage' AS \"preferredLanguage\" FROM users WHERE email = $email",
             json!({ "email": body.email }),
         )
         .await?;
@@ -970,34 +1133,41 @@ pub async fn forgot_password(
         ));
     };
 
-    let user_id = user["id"]
+    let user_id = user[fields::ID]
         .as_str()
         .map(|s| s.to_string())
-        .unwrap_or_else(|| user["id"].to_string());
+        .unwrap_or_else(|| user[fields::ID].to_string());
 
     // Generate a short-lived reset token (1 hour)
     let reset_token = jwt::issue_reset_token(&user_id, &state.jwt_keys)?;
 
+    // ignore-magic: ob-auth has no access to ob-handlers schema constants
     // Store the reset token hash in the user record
     let token_hash = hash_token(&reset_token);
     state
         .db
         .update_document(
-            "users",
+            c::USERS,
             &user_id,
             json!({
                 "reset_token_hash": token_hash,
                 "reset_token_expires": chrono::Utc::now().timestamp() + 3600,
+                "reset_token_used": false,
+                "reset_token_used_at": null,
             }),
         )
         .await?;
 
     // Send reset email if service is configured
     if let Some(ref email_service) = state.email_service {
-        let email = user["email"].as_str().unwrap_or_default();
-        let _ = email_service
-            .send_reset_email(email, &reset_token, &state.base_url)
-            .await;
+        let email = user[fields::EMAIL].as_str().unwrap_or_default();
+        let lang = user["preferredLanguage"].as_str().unwrap_or("en");
+        if let Err(error) = email_service
+            .send_reset_email(email, &reset_token, &state.base_url, lang)
+            .await
+        {
+            tracing::warn!(email = %email, %error, "Failed to send reset email");
+        }
         Ok(Json(json!({
             "message": "If the email exists, a reset link has been sent",
         })))
@@ -1010,16 +1180,26 @@ pub async fn forgot_password(
     }
 }
 
-/// POST /auth/reset-password — Reset password using a valid reset token.
+/// Resets a password using a signed reset token that is still pending in storage.
+///
+/// Parameters:
+/// - `state`: auth subsystem state with DB and JWT keys.
+/// - `body`: reset payload containing the reset token and new password.
+///
+/// Returns:
+/// - `Ok(Json<Value>)` with a success message when the password is updated.
+/// - `Err(...)` when the token is invalid, expired, reused, or the new password is rejected.
+///
+/// Gotchas:
+/// - The JWT token is necessary but not sufficient; its SHA-256 hash must also match
+///   the stored pending reset token.
+/// - Tokens are one-time use and are marked consumed during the password update.
+/// - No session tokens are issued here; callers must sign in again after success.
 pub async fn reset_password(
     State(state): State<AuthState>,
     Json(body): Json<ResetPasswordRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    if body.new_password.len() < 8 {
-        return Err(Error::Validation(
-            "Password must be at least 8 characters".into(),
-        ));
-    }
+    crate::password::validate_password_strength(&body.new_password)?;
 
     // Verify the reset token
     let claims = jwt::verify_token(&body.token, &state.jwt_keys)?;
@@ -1031,7 +1211,7 @@ pub async fn reset_password(
     let users = state
         .db
         .query_bind(
-            "SELECT * FROM type::thing($uid)",
+            "SELECT * FROM users WHERE id = $uid",
             json!({ "uid": claims.sub }),
         )
         .await?;
@@ -1040,12 +1220,14 @@ pub async fn reset_password(
         .first()
         .ok_or_else(|| Error::Auth("User not found".into()))?;
 
+    // ignore-magic: ob-auth has no access to ob-handlers schema constants
     let stored_hash = user["reset_token_hash"]
         .as_str()
         .ok_or_else(|| Error::Auth("No reset token pending".into()))?;
 
     let token_hash = hash_token(&body.token);
-    if stored_hash != token_hash {
+    // SECURITY: Use constant-time comparison to prevent timing attacks
+    if !constant_time_eq(stored_hash, &token_hash) {
         return Err(Error::Auth("Invalid or expired reset token".into()));
     }
 
@@ -1067,11 +1249,15 @@ pub async fn reset_password(
     let new_hash = password::hash_password(&body.new_password)?;
     let user_id = claims.sub;
 
+    // ignore-magic: ob-auth has no access to ob-handlers schema constants
     // CRITICAL FIX: Mark token as USED BEFORE updating password (atomic operation)
+    // Also set password_changed_at so existing refresh tokens are invalidated —
+    // the refresh endpoint rejects tokens issued before this timestamp.
+    let password_changed_at = chrono::Utc::now().timestamp();
     state
         .db
         .update_document(
-            "users",
+            c::USERS,
             &user_id,
             json!({
                 "password_hash": new_hash,
@@ -1079,9 +1265,12 @@ pub async fn reset_password(
                 "reset_token_expires": null,
                 "reset_token_used": true,
                 "reset_token_used_at": chrono::Utc::now().to_rfc3339(),
+                "password_changed_at": password_changed_at,
             }),
         )
         .await?;
+
+    tracing::info!(user_id = %user_id, "Password reset: all pre-existing sessions invalidated");
 
     Ok(Json(json!({ "message": "Password reset successfully" })))
 }
@@ -1092,6 +1281,20 @@ fn hash_token(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+/// Constant-time string comparison to prevent timing attacks on token hashes.
+/// Returns `true` if the two strings are equal, using XOR accumulation to
+/// prevent short-circuit evaluation from leaking information about which
+/// bytes differ.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.bytes()
+        .zip(b.bytes())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
 // ── Email Verification ──
@@ -1113,22 +1316,37 @@ pub async fn verify_email(
         ));
     }
 
-    // Mark user as email verified
+    // Look up the user to check if already verified (prevents token replay)
     let users = state
         .db
         .query_bind(
-            "SELECT * FROM type::thing($uid)",
+            "SELECT * FROM users WHERE id = $uid",
             json!({ "uid": claims.sub }),
         )
         .await?;
 
-    let _user = users
+    let user = users
         .first()
         .ok_or_else(|| Error::Auth("User not found".into()))?;
 
+    // SECURITY: If already verified, return early — prevents replaying the same
+    // JWT verification token until it expires.
+    let already_verified = user[f::EMAIL_VERIFIED].as_bool().unwrap_or(false);
+    if already_verified {
+        return Ok(Json(json!({ "message": "Email already verified" })));
+    }
+
+    // Mark user as email verified with a timestamp to record when it happened
     state
         .db
-        .update_document("users", &claims.sub, json!({ "email_verified": true }))
+        .update_document(
+            c::USERS,
+            &claims.sub,
+            json!({
+                (f::EMAIL_VERIFIED): true,
+                "email_verified_at": chrono::Utc::now().to_rfc3339(),
+            }),
+        )
         .await?;
 
     Ok(Json(json!({ "message": "Email verified successfully" })))
@@ -1159,21 +1377,25 @@ pub async fn send_verification(
         ));
     };
 
-    if user["email_verified"].as_bool().unwrap_or(false) {
+    if user[f::EMAIL_VERIFIED].as_bool().unwrap_or(false) {
         return Ok(Json(json!({ "message": "Email is already verified" })));
     }
 
-    let user_id = user["id"]
+    let user_id = user[fields::ID]
         .as_str()
         .map(|s| s.to_string())
-        .unwrap_or_else(|| user["id"].to_string());
+        .unwrap_or_else(|| user[fields::ID].to_string());
 
     let verification_token = jwt::issue_verification_token(&user_id, &state.jwt_keys)?;
 
     if let Some(ref email_service) = state.email_service {
-        let _ = email_service
-            .send_verification_email(&body.email, &verification_token, &state.base_url)
-            .await;
+        let lang = user["preferredLanguage"].as_str().unwrap_or("en");
+        if let Err(error) = email_service
+            .send_verification_email(&body.email, &verification_token, &state.base_url, lang)
+            .await
+        {
+            tracing::warn!(email = %body.email, %error, "Failed to resend verification email");
+        }
     }
 
     Ok(Json(
@@ -1206,7 +1428,7 @@ pub async fn mfa_setup(
     let users = state
         .db
         .query_bind(
-            "SELECT * FROM type::thing($uid)",
+            "SELECT * FROM users WHERE id = $uid",
             json!({ "uid": auth.user_id }),
         )
         .await?;
@@ -1219,7 +1441,7 @@ pub async fn mfa_setup(
         return Err(Error::Validation("MFA is already enabled".into()));
     }
 
-    let account = user["email"].as_str().unwrap_or(&auth.user_id);
+    let account = user[fields::EMAIL].as_str().unwrap_or(&auth.user_id);
 
     // Generate TOTP secret
     let secret = totp::generate_secret();
@@ -1227,17 +1449,20 @@ pub async fn mfa_setup(
     let qr_code_base64 = totp::generate_qr_base64(&secret, "OrignaBase", account)?;
     let manual_key = totp::secret_to_base32(&secret);
 
-    // Store encrypted secret as pending
-    let encrypted = if let Some(ref key) = state.totp_encryption_key {
-        totp::encrypt_secret(&secret, key)?
-    } else {
-        secret.clone()
+    // Store encrypted secret as pending — encryption key is REQUIRED
+    let encrypted = match state.totp_encryption_key.as_ref() {
+        Some(key) => totp::encrypt_secret(&secret, key)?,
+        None => {
+            return Err(ob_core::Error::Validation(
+                "MFA is not available: TOTP encryption key not configured".into(),
+            ));
+        }
     };
 
     state
         .db
         .update_document(
-            "users",
+            c::USERS,
             &auth.user_id,
             json!({
                 "mfa_pending_secret": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &encrypted),
@@ -1263,8 +1488,21 @@ pub struct MfaVerifySetupResponse {
     pub recovery_codes: Vec<String>,
 }
 
-/// POST /auth/mfa/verify-setup — Verify TOTP code to activate MFA.
-/// Returns recovery codes on success.
+/// Verifies the first TOTP code for MFA setup and activates MFA permanently.
+///
+/// Parameters:
+/// - `state`: auth subsystem state with DB, encryption key, and optional email service.
+/// - `auth`: authenticated user context for the account being updated.
+/// - `body`: setup verification payload containing the first TOTP code.
+///
+/// Returns:
+/// - `Ok(Json<MfaVerifySetupResponse>)` with plaintext recovery codes to show once.
+/// - `Err(...)` if setup is missing, secrets cannot be decrypted, or the code is invalid.
+///
+/// Gotchas:
+/// - Recovery codes are returned only in this response; only hashes are stored afterward.
+/// - The pending secret is re-encrypted into the permanent MFA field before activation.
+/// - MFA alert email delivery is best-effort and does not affect the successful response.
 pub async fn mfa_verify_setup(
     State(state): State<AuthState>,
     Extension(auth): Extension<AuthContext>,
@@ -1277,7 +1515,7 @@ pub async fn mfa_verify_setup(
     let users = state
         .db
         .query_bind(
-            "SELECT * FROM type::thing($uid)",
+            "SELECT * FROM users WHERE id = $uid",
             json!({ "uid": auth.user_id }),
         )
         .await?;
@@ -1293,10 +1531,13 @@ pub async fn mfa_verify_setup(
     let encrypted = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, pending_b64)
         .map_err(|e| Error::Internal(format!("Failed to decode pending secret: {e}")))?;
 
-    let secret = if let Some(ref key) = state.totp_encryption_key {
-        totp::decrypt_secret(&encrypted, key)?
-    } else {
-        encrypted
+    let secret = match state.totp_encryption_key.as_ref() {
+        Some(key) => totp::decrypt_secret(&encrypted, key)?,
+        None => {
+            return Err(Error::Internal(
+                "TOTP encryption key not configured — set OB_AUTH__TOTP_ENCRYPTION_KEY".into(),
+            ));
+        }
     };
 
     // Verify the code
@@ -1310,37 +1551,38 @@ pub async fn mfa_verify_setup(
     }
 
     // Re-encrypt secret for permanent storage
-    let permanent_encrypted = if let Some(ref key) = state.totp_encryption_key {
-        base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            &totp::encrypt_secret(&secret, key)?,
-        )
-    } else {
-        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &secret)
-    };
+    let key = state
+        .totp_encryption_key
+        .as_ref()
+        .ok_or_else(|| Error::Internal("TOTP encryption key not configured".into()))?;
+    let permanent_encrypted = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        &totp::encrypt_secret(&secret, key)?,
+    );
 
     // Activate MFA
     state
         .db
         .update_document(
-            "users",
+            c::USERS,
             &auth.user_id,
             json!({
-                "mfa_enabled": true,
-                "mfa_secret": permanent_encrypted,
-                "mfa_recovery_codes": hashed_codes,
-                "mfa_last_used_step": null,
-                "mfa_pending_secret": null,
-                "mfa_pending_at": null,
-                "mfa_enabled_at": chrono::Utc::now().to_rfc3339(),
+                (f::MFA_ENABLED): true,
+                (f::MFA_SECRET): permanent_encrypted,
+                (f::MFA_RECOVERY_CODES): hashed_codes,
+                (f::MFA_LAST_USED_STEP): null,
+                "mfa_pending_secret": null, // ignore-magic: transient MFA setup field
+                "mfa_pending_at": null, // ignore-magic: transient MFA setup field
+                "mfa_enabled_at": chrono::Utc::now().to_rfc3339(), // ignore-magic: MFA audit timestamp
             }),
         )
         .await?;
 
     // Send MFA alert email
     if let Some(ref email_service) = state.email_service {
-        let email = user["email"].as_str().unwrap_or_default();
-        let _ = email_service.send_mfa_alert(email, "enabled").await;
+        let email = user[fields::EMAIL].as_str().unwrap_or_default();
+        let lang = user["preferredLanguage"].as_str().unwrap_or("en");
+        let _ = email_service.send_mfa_alert(email, "enabled", lang).await;
     }
 
     Ok(Json(MfaVerifySetupResponse { recovery_codes }))
@@ -1352,7 +1594,20 @@ pub struct MfaChallengeRequest {
     pub code: String,
 }
 
-/// POST /auth/mfa/challenge — Verify TOTP during login. Returns real tokens.
+/// Completes an MFA login challenge by verifying a TOTP code and issuing real tokens.
+///
+/// Parameters:
+/// - `state`: auth subsystem state with DB, encryption key, JWT keys, and rate limiting.
+/// - `body`: challenge payload containing the short-lived MFA challenge token and TOTP code.
+///
+/// Returns:
+/// - `Ok(Json<AuthResponse>)` with full access and refresh tokens after TOTP succeeds.
+/// - `Err(...)` when the challenge token, rate limit, secret state, or code verification fails.
+///
+/// Gotchas:
+/// - Challenge tokens must have type `mfa_challenge`; normal access tokens are rejected.
+/// - Successful verification persists `mfa_last_used_step` to block same-window replay.
+/// - Exceeded rate limits can mark the user as MFA-locked before returning the error.
 pub async fn mfa_challenge(
     State(state): State<AuthState>,
     Json(body): Json<MfaChallengeRequest>,
@@ -1380,7 +1635,7 @@ pub async fn mfa_challenge(
         let _ = state
             .db
             .update_document(
-                "users",
+                c::USERS,
                 user_id,
                 json!({
                     "mfa_locked": true,
@@ -1395,7 +1650,7 @@ pub async fn mfa_challenge(
     let users = state
         .db
         .query_bind(
-            "SELECT * FROM type::thing($uid)",
+            "SELECT * FROM users WHERE id = $uid",
             json!({ "uid": claims.sub }),
         )
         .await?;
@@ -1403,6 +1658,36 @@ pub async fn mfa_challenge(
     let user = users
         .first()
         .ok_or_else(|| Error::Auth("User not found".into()))?;
+
+    // Enforce MFA brute-force lock: if mfa_locked is true, check if 15 min have elapsed
+    if user["mfa_locked"].as_bool() == Some(true) {
+        let should_unlock = user["mfa_locked_at"]
+            .as_str()
+            .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+            .map(|locked_at| {
+                chrono::Utc::now().signed_duration_since(locked_at) > chrono::Duration::minutes(15)
+            })
+            .unwrap_or(false);
+
+        if should_unlock {
+            // Auto-unlock: clear the lock flag
+            let _ = state
+                .db
+                .update_document(
+                    c::USERS,
+                    user_id,
+                    json!({
+                        "mfa_locked": false,
+                    }),
+                )
+                .await;
+        } else {
+            return Err(Error::TooManyRequests(
+                "Account temporarily locked due to too many failed MFA attempts. Try again later."
+                    .into(),
+            ));
+        }
+    }
 
     let mfa_secret_b64 = user["mfa_secret"]
         .as_str()
@@ -1412,13 +1697,16 @@ pub async fn mfa_challenge(
         base64::Engine::decode(&base64::engine::general_purpose::STANDARD, mfa_secret_b64)
             .map_err(|e| Error::Internal(format!("Failed to decode MFA secret: {e}")))?;
 
-    let secret = if let Some(ref key) = state.totp_encryption_key {
-        totp::decrypt_secret(&encrypted, key)?
-    } else {
-        encrypted
+    let secret = match state.totp_encryption_key.as_ref() {
+        Some(key) => totp::decrypt_secret(&encrypted, key)?,
+        None => {
+            return Err(Error::Internal(
+                "TOTP encryption key not configured — set OB_AUTH__TOTP_ENCRYPTION_KEY".into(),
+            ));
+        }
     };
 
-    let last_used_step = user["mfa_last_used_step"].as_u64();
+    let last_used_step = user[f::MFA_LAST_USED_STEP].as_u64();
 
     // Verify TOTP
     let step = totp::verify_totp(&secret, &body.code, last_used_step)?;
@@ -1426,7 +1714,11 @@ pub async fn mfa_challenge(
     // Update last used step
     state
         .db
-        .update_document("users", &claims.sub, json!({ "mfa_last_used_step": step }))
+        .update_document(
+            c::USERS,
+            &claims.sub,
+            json!({ (f::MFA_LAST_USED_STEP): step }),
+        )
         .await?;
 
     // Issue real tokens
@@ -1439,9 +1731,9 @@ pub async fn mfa_challenge(
         })
         .unwrap_or_default();
 
-    let email_verified = user["email_verified"].as_bool().unwrap_or(false);
+    let email_verified = user[f::EMAIL_VERIFIED].as_bool().unwrap_or(false);
     let custom_claims = user
-        .get("custom_claims")
+        .get(f::CUSTOM_CLAIMS)
         .cloned()
         .unwrap_or(serde_json::Value::Null);
 
@@ -1462,7 +1754,7 @@ pub async fn mfa_challenge(
     if let Some(obj) = safe_user.as_object_mut() {
         obj.remove("password_hash");
         obj.remove("mfa_secret");
-        obj.remove("mfa_recovery_codes");
+        obj.remove(f::MFA_RECOVERY_CODES);
         obj.remove("mfa_pending_secret");
     }
 
@@ -1479,7 +1771,20 @@ pub struct MfaRecoveryRequest {
     pub recovery_code: String,
 }
 
-/// POST /auth/mfa/recovery — Use a recovery code to bypass TOTP.
+/// Completes an MFA login challenge with a recovery code instead of a TOTP code.
+///
+/// Parameters:
+/// - `state`: auth subsystem state with DB and JWT keys.
+/// - `body`: challenge payload containing the MFA challenge token and plaintext recovery code.
+///
+/// Returns:
+/// - `Ok(Json<AuthResponse>)` with full auth tokens when a recovery code matches.
+/// - `Err(...)` if the challenge token is invalid or no stored recovery code matches.
+///
+/// Gotchas:
+/// - Recovery codes are stored hashed and are consumed permanently on first successful use.
+/// - Unlike [`mfa_challenge`], this path does not update `mfa_last_used_step`.
+/// - The sanitized user payload omits MFA secrets and recovery code hashes.
 pub async fn mfa_recovery(
     State(state): State<AuthState>,
     Json(body): Json<MfaRecoveryRequest>,
@@ -1489,10 +1794,18 @@ pub async fn mfa_recovery(
         return Err(Error::Auth("Invalid challenge token".into()));
     }
 
+    // P1-NEW-4: Rate limit recovery code attempts (3 per 15 min per user)
+    let rate_limit_result =
+        crate::rate_limit::check_rate_limit(&state.db, &claims.sub, "mfa_recovery", 3, 900).await;
+    if let Err(e) = rate_limit_result {
+        tracing::warn!(user_id = %claims.sub, "MFA recovery rate limit exceeded");
+        return Err(e);
+    }
+
     let users = state
         .db
         .query_bind(
-            "SELECT * FROM type::thing($uid)",
+            "SELECT * FROM users WHERE id = $uid",
             json!({ "uid": claims.sub }),
         )
         .await?;
@@ -1501,7 +1814,7 @@ pub async fn mfa_recovery(
         .first()
         .ok_or_else(|| Error::Auth("User not found".into()))?;
 
-    let hashed_codes: Vec<String> = user["mfa_recovery_codes"]
+    let hashed_codes: Vec<String> = user[f::MFA_RECOVERY_CODES]
         .as_array()
         .map(|arr| {
             arr.iter()
@@ -1528,9 +1841,9 @@ pub async fn mfa_recovery(
     state
         .db
         .update_document(
-            "users",
+            c::USERS,
             &claims.sub,
-            json!({ "mfa_recovery_codes": remaining_codes }),
+            json!({ (f::MFA_RECOVERY_CODES): remaining_codes }),
         )
         .await?;
 
@@ -1544,9 +1857,9 @@ pub async fn mfa_recovery(
         })
         .unwrap_or_default();
 
-    let email_verified = user["email_verified"].as_bool().unwrap_or(false);
+    let email_verified = user[f::EMAIL_VERIFIED].as_bool().unwrap_or(false);
     let custom_claims = user
-        .get("custom_claims")
+        .get(f::CUSTOM_CLAIMS)
         .cloned()
         .unwrap_or(serde_json::Value::Null);
 
@@ -1566,7 +1879,7 @@ pub async fn mfa_recovery(
     if let Some(obj) = safe_user.as_object_mut() {
         obj.remove("password_hash");
         obj.remove("mfa_secret");
-        obj.remove("mfa_recovery_codes");
+        obj.remove(f::MFA_RECOVERY_CODES);
     }
 
     Ok(Json(AuthResponse {
@@ -1581,7 +1894,21 @@ pub struct MfaDisableRequest {
     pub code: String,
 }
 
-/// DELETE /auth/mfa — Disable MFA (requires current TOTP code).
+/// Disables MFA for the authenticated user after verifying a current TOTP code.
+///
+/// Parameters:
+/// - `state`: auth subsystem state with DB, encryption key, and optional email service.
+/// - `auth`: authenticated user context for the account being modified.
+/// - `body`: disable payload containing a current TOTP code.
+///
+/// Returns:
+/// - `Ok(Json<Value>)` with a success message once MFA state is cleared.
+/// - `Err(...)` when the caller is unauthenticated, MFA is not enabled, or the code fails.
+///
+/// Gotchas:
+/// - The stored secret must still be decryptable with the configured TOTP encryption key.
+/// - Disabling MFA clears the secret, recovery codes, pending setup data, and replay state.
+/// - Alert email delivery is best-effort and does not block a successful disable operation.
 pub async fn mfa_disable(
     State(state): State<AuthState>,
     Extension(auth): Extension<AuthContext>,
@@ -1594,7 +1921,7 @@ pub async fn mfa_disable(
     let users = state
         .db
         .query_bind(
-            "SELECT * FROM type::thing($uid)",
+            "SELECT * FROM users WHERE id = $uid",
             json!({ "uid": auth.user_id }),
         )
         .await?;
@@ -1615,35 +1942,40 @@ pub async fn mfa_disable(
         base64::Engine::decode(&base64::engine::general_purpose::STANDARD, mfa_secret_b64)
             .map_err(|e| Error::Internal(format!("Failed to decode MFA secret: {e}")))?;
 
-    let secret = if let Some(ref key) = state.totp_encryption_key {
-        totp::decrypt_secret(&encrypted, key)?
-    } else {
-        encrypted
+    let secret = match state.totp_encryption_key.as_ref() {
+        Some(key) => totp::decrypt_secret(&encrypted, key)?,
+        None => {
+            return Err(Error::Internal(
+                "TOTP encryption key not configured — set OB_AUTH__TOTP_ENCRYPTION_KEY".into(),
+            ));
+        }
     };
 
-    // Verify current TOTP code
-    let _step = totp::verify_totp(&secret, &body.code, None)?;
+    // Verify current TOTP code (with replay protection using stored last_used_step)
+    let last_used_step = user["mfa_last_used_step"].as_u64();
+    let _step = totp::verify_totp(&secret, &body.code, last_used_step)?;
 
     // Disable MFA
     state
         .db
         .update_document(
-            "users",
+            c::USERS,
             &auth.user_id,
             json!({
-                "mfa_enabled": false,
-                "mfa_secret": null,
-                "mfa_recovery_codes": null,
-                "mfa_last_used_step": null,
-                "mfa_pending_secret": null,
+                (f::MFA_ENABLED): false,
+                (f::MFA_SECRET): null,
+                (f::MFA_RECOVERY_CODES): null,
+                (f::MFA_LAST_USED_STEP): null,
+                "mfa_pending_secret": null, // ignore-magic: transient MFA setup field
             }),
         )
         .await?;
 
     // Send MFA alert email
     if let Some(ref email_service) = state.email_service {
-        let email = user["email"].as_str().unwrap_or_default();
-        let _ = email_service.send_mfa_alert(email, "disabled").await;
+        let email = user[fields::EMAIL].as_str().unwrap_or_default();
+        let lang = user["preferredLanguage"].as_str().unwrap_or("en");
+        let _ = email_service.send_mfa_alert(email, "disabled", lang).await;
     }
 
     Ok(Json(json!({ "message": "MFA disabled successfully" })))
@@ -1654,10 +1986,8 @@ pub async fn mfa_disable(
 // auth.delete_user(), auth.list_users(), auth.get_user()
 
 /// Require the calling user to have the "admin" role.
+/// Admin routes are never allowed to bypass authentication, even in test mode.
 fn require_admin(auth: &AuthContext) -> Result<()> {
-    if std::env::var("OB_TEST_MODE").unwrap_or_default() == "1" {
-        return Ok(());
-    }
     if !auth.authenticated {
         return Err(Error::Auth("Authentication required".into()));
     }
@@ -1679,6 +2009,14 @@ fn default_limit() -> usize {
     50
 }
 
+fn admin_list_users_query(limit: usize, offset: usize) -> String {
+    format!(
+        "SELECT id, COALESCE(data->>'email', '') AS email, COALESCE(NULLIF(data->>'display_name', ''), '') AS display_name, COALESCE(data->'roles', '[]'::jsonb)::text AS roles, COALESCE(NULLIF(data->>'email_verified', '')::boolean, false) AS email_verified, COALESCE(NULLIF(data->>'mfa_enabled', '')::boolean, false) AS mfa_enabled, created_at, COALESCE(data->'custom_claims', jsonb_build_object())::text AS custom_claims FROM users ORDER BY created_at DESC LIMIT {limit} OFFSET {offset}"
+    )
+}
+
+const ADMIN_GET_USER_QUERY: &str = "SELECT id, COALESCE(data->>'email', '') AS email, COALESCE(NULLIF(data->>'display_name', ''), '') AS display_name, COALESCE(data->'roles', '[]'::jsonb) AS roles, COALESCE(NULLIF(data->>'email_verified', '')::boolean, false) AS email_verified, COALESCE(NULLIF(data->>'mfa_enabled', '')::boolean, false) AS mfa_enabled, created_at, COALESCE(data->'custom_claims', jsonb_build_object()) AS custom_claims, COALESCE(data->>'oauth_provider', '') AS oauth_provider FROM users WHERE id = $uid";
+
 /// GET /admin/users — List users (admin only).
 pub async fn admin_list_users(
     State(state): State<AuthState>,
@@ -1688,30 +2026,24 @@ pub async fn admin_list_users(
     require_admin(&auth)?;
 
     let limit = params.limit.min(100);
-    let query = format!(
-        "SELECT id, email, display_name, roles, email_verified, mfa_enabled, created_at, custom_claims FROM users ORDER BY created_at DESC LIMIT {limit} START {offset}",
-        offset = params.offset
-    );
-    let users = state.db.query_raw(&query).await?;
+    let users = state
+        .db
+        .query_raw(&admin_list_users_query(limit, params.offset))
+        .await?;
 
     // Count total
-    let count_result = state
+    let count_rows = state
         .db
-        .query_raw_value("SELECT count() AS count FROM users GROUP ALL")
+        .query_raw("SELECT COUNT(*) AS count FROM users")
         .await?;
-    let total = count_result
-        .get("count")
-        .or_else(|| {
-            count_result
-                .as_array()
-                .and_then(|items| items.first())
-                .and_then(|item| item.get("count"))
-        })
+    let total = count_rows
+        .first()
+        .and_then(|row| row.get(f::COUNT))
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
 
     Ok(Json(json!({
-        "users": users,
+        c::USERS: users,
         "total": total,
         "limit": limit,
         "offset": params.offset,
@@ -1733,10 +2065,7 @@ pub async fn admin_get_user(
 
     let users = state
         .db
-        .query_bind(
-            "SELECT id, email, display_name, roles, email_verified, mfa_enabled, created_at, custom_claims, oauth_provider FROM type::thing($uid)",
-            json!({ "uid": path.user_id }),
-        )
+        .query_bind(ADMIN_GET_USER_QUERY, json!({ "uid": path.user_id }))
         .await?;
 
     let user = users
@@ -1766,9 +2095,9 @@ pub async fn admin_set_claims(
     state
         .db
         .update_document(
-            "users",
+            c::USERS,
             &path.user_id,
-            json!({ "custom_claims": body.custom_claims }),
+            json!({ (f::CUSTOM_CLAIMS): body.custom_claims }),
         )
         .await?;
 
@@ -1800,19 +2129,19 @@ pub async fn admin_update_user(
 
     let mut updates = serde_json::Map::new();
     if let Some(email) = body.email {
-        updates.insert("email".into(), json!(email));
+        updates.insert(fields::EMAIL.into(), json!(email));
     }
     if let Some(name) = body.display_name {
         updates.insert("display_name".into(), json!(name));
     }
     if let Some(roles) = body.roles {
-        updates.insert("roles".into(), json!(roles));
+        updates.insert(f::ROLES.into(), json!(roles));
     }
     if let Some(verified) = body.email_verified {
-        updates.insert("email_verified".into(), json!(verified));
+        updates.insert(f::EMAIL_VERIFIED.into(), json!(verified));
     }
     if let Some(disabled) = body.disabled {
-        updates.insert("disabled".into(), json!(disabled));
+        updates.insert("disabled".into(), json!(disabled)); // ignore-magic: admin user management field
     }
 
     if updates.is_empty() {
@@ -1821,7 +2150,7 @@ pub async fn admin_update_user(
 
     state
         .db
-        .update_document("users", &path.user_id, serde_json::Value::Object(updates))
+        .update_document(c::USERS, &path.user_id, serde_json::Value::Object(updates))
         .await?;
 
     Ok(Json(json!({ "message": "User updated" })))
@@ -1913,16 +2242,13 @@ pub async fn admin_delete_user(
             .query_bind(query, json!({ "uid": user_id }))
             .await
             .map_err(|e| {
-                eprintln!(
-                    "Warning: Failed to delete related data for {}: {}",
-                    user_id, e
-                );
+                tracing::warn!("Failed to delete related data for {}: {}", user_id, e);
                 // Don't fail entire deletion if a related delete fails, but log it
             });
     }
 
     // Finally delete the user account itself
-    state.db.delete_document("users", user_id).await?;
+    state.db.delete_document(c::USERS, user_id).await?;
 
     // Log admin deletion action for audit trail
     let audit_log = json!({
@@ -1933,7 +2259,7 @@ pub async fn admin_delete_user(
         "ip_address": "unknown", // Should come from request header in real impl
         "status": "success",
         "deleted_collections": [
-            "users", "_sessions", "orders", "addresses", "seller_profiles",
+            c::USERS, "_sessions", "orders", "addresses", "seller_profiles",
             "cart", "products", "return_requests", "payouts", "user_fcm_tokens",
             "chat_rooms", "chat_messages", "coupons", "product_questions",
             "notification_prefs", "reviews", "wishlist", "buyer_addresses"
@@ -1945,13 +2271,13 @@ pub async fn admin_delete_user(
         .create_document("admin_audit_logs", audit_log)
         .await
         .map_err(|e| {
-            eprintln!("Warning: Failed to log admin action: {}", e);
+            tracing::warn!("Failed to log admin action: {}", e);
         });
 
     Ok(Json(json!({
         "message": "User and all related data deleted successfully",
         "deleted_collections": [
-            "users", "_sessions", "orders", "addresses", "seller_profiles",
+            c::USERS, "_sessions", "orders", "addresses", "seller_profiles",
             "cart", "products", "return_requests", "payouts", "user_fcm_tokens",
             "chat_rooms", "chat_messages", "coupons", "product_questions",
             "notification_prefs", "reviews", "wishlist", "buyer_addresses"
@@ -1984,11 +2310,7 @@ pub async fn admin_create_user(
     if !body.email.contains('@') || body.email.len() < 5 {
         return Err(Error::Validation("Invalid email address".into()));
     }
-    if body.password.len() < 8 {
-        return Err(Error::Validation(
-            "Password must be at least 8 characters".into(),
-        ));
-    }
+    crate::password::validate_password_strength(&body.password)?;
 
     // Check duplicate
     let existing = state
@@ -2006,17 +2328,17 @@ pub async fn admin_create_user(
     let roles = body.roles.unwrap_or_else(|| vec!["user".to_string()]);
 
     let user_data = json!({
-        "email": body.email,
-        "password_hash": password_hash,
-        "display_name": body.display_name.unwrap_or_default(),
-        "roles": roles,
-        "email_verified": body.email_verified.unwrap_or(false),
-        "mfa_enabled": false,
-        "custom_claims": body.custom_claims.unwrap_or(json!({})),
-        "created_at": chrono::Utc::now().to_rfc3339(),
+        (f::EMAIL): body.email,
+        "password_hash": password_hash, // ignore-magic: internal auth field
+        "display_name": body.display_name.unwrap_or_default(), // ignore-magic: admin user creation field
+        (f::ROLES): roles,
+        (f::EMAIL_VERIFIED): body.email_verified.unwrap_or(false),
+        (f::MFA_ENABLED): false,
+        (f::CUSTOM_CLAIMS): body.custom_claims.unwrap_or(json!({})),
+        (f::CREATED_AT): chrono::Utc::now().to_rfc3339(),
     });
 
-    let user = state.db.create_document("users", user_data).await?;
+    let user = state.db.create_document(c::USERS, user_data).await?;
 
     let mut safe_user = user.clone();
     if let Some(obj) = safe_user.as_object_mut() {
@@ -2117,21 +2439,21 @@ pub async fn anonymous_sign_in(State(state): State<AuthState>) -> Result<Json<Au
     let now = chrono::Utc::now().to_rfc3339();
 
     let user_data = json!({
-        "email": null,
-        "password_hash": null,
-        "display_name": format!("Anonymous {}", &anon_id[..8]),
-        "roles": ["anonymous"],
-        "email_verified": false,
-        "mfa_enabled": false,
-        "is_anonymous": true,
-        "created_at": now,
+        (f::EMAIL): null,
+        "password_hash": null, // ignore-magic: internal auth field
+        "display_name": format!("Anonymous {}", &anon_id[..8]), // ignore-magic: user creation field
+        (f::ROLES): ["anonymous"],
+        (f::EMAIL_VERIFIED): false,
+        (f::MFA_ENABLED): false,
+        "is_anonymous": true, // ignore-magic: anonymous auth field
+        (f::CREATED_AT): now,
     });
 
-    let user = state.db.create_document("users", user_data).await?;
-    let user_id = user["id"]
+    let user = state.db.create_document(c::USERS, user_data).await?;
+    let user_id = user[fields::ID]
         .as_str()
         .map(|s| s.to_string())
-        .unwrap_or_else(|| user["id"].to_string());
+        .unwrap_or_else(|| user[fields::ID].to_string());
 
     let roles = vec!["anonymous".to_string()];
     let access_token =
@@ -2172,11 +2494,7 @@ pub async fn anonymous_upgrade(
     if !body.email.contains('@') || body.email.len() < 5 {
         return Err(Error::Validation("Invalid email address".into()));
     }
-    if body.password.len() < 8 {
-        return Err(Error::Validation(
-            "Password must be at least 8 characters".into(),
-        ));
-    }
+    crate::password::validate_password_strength(&body.password)?;
 
     // Check email not taken
     let existing = state
@@ -2203,14 +2521,14 @@ pub async fn anonymous_upgrade(
 
     state
         .db
-        .update_document("users", &auth.user_id, update_data)
+        .update_document(c::USERS, &auth.user_id, update_data)
         .await?;
 
-    // Send verification email
+    // Send verification email (default "en" for new user upgrades)
     let verification_token = jwt::issue_verification_token(&auth.user_id, &state.jwt_keys)?;
     if let Some(ref email_service) = state.email_service {
         let _ = email_service
-            .send_verification_email(&body.email, &verification_token, &state.base_url)
+            .send_verification_email(&body.email, &verification_token, &state.base_url, "en")
             .await;
     }
 
@@ -2229,7 +2547,7 @@ pub async fn anonymous_upgrade(
     let user = state
         .db
         .query_bind(
-            "SELECT * FROM type::thing('users', $uid) LIMIT 1",
+            "SELECT * FROM users WHERE id = $uid LIMIT 1",
             json!({ "uid": auth.user_id }),
         )
         .await?;
@@ -2282,10 +2600,23 @@ pub async fn send_magic_link(
     });
     state.db.create_document("_magic_links", token_data).await?;
 
+    // Resolve user's preferred language for bilingual email
+    let lang = state
+        .db
+        .query_bind(
+            "SELECT preferredLanguage FROM users WHERE email = $email LIMIT 1",
+            json!({ "email": body.email }),
+        )
+        .await
+        .ok()
+        .and_then(|rows| rows.first().cloned())
+        .and_then(|row| row["preferredLanguage"].as_str().map(String::from))
+        .unwrap_or_else(|| "en".to_string());
+
     // Send the email
     if let Some(ref email_service) = state.email_service {
         let _ = email_service
-            .send_magic_link_email(&body.email, &token_id, &state.base_url)
+            .send_magic_link_email(&body.email, &token_id, &state.base_url, &lang)
             .await;
     }
 
@@ -2326,17 +2657,14 @@ pub async fn verify_magic_link(
     }
 
     // Mark token as used (single-use)
-    let token_db_id = token_doc["id"].as_str().unwrap_or("");
+    let token_db_id = token_doc[fields::ID].as_str().unwrap_or("");
     state
         .db
-        .query_bind(
-            "UPDATE type::thing('_magic_links', $tid) SET used = true",
-            json!({ "tid": token_db_id }),
-        )
+        .update_document("_magic_links", token_db_id, json!({ "used": true }))
         .await?;
 
     // Find or create user by email
-    let email = token_doc["email"]
+    let email = token_doc[fields::EMAIL]
         .as_str()
         .ok_or_else(|| Error::Auth("Invalid token".into()))?;
 
@@ -2349,10 +2677,10 @@ pub async fn verify_magic_link(
         .await?;
 
     let (user_id, user, roles) = if let Some(existing_user) = existing.first() {
-        let uid = existing_user["id"]
+        let uid = existing_user[fields::ID]
             .as_str()
             .map(|s| s.to_string())
-            .unwrap_or_else(|| existing_user["id"].to_string());
+            .unwrap_or_else(|| existing_user[fields::ID].to_string());
         let roles: Vec<String> = existing_user["roles"]
             .as_array()
             .map(|arr| {
@@ -2365,10 +2693,7 @@ pub async fn verify_magic_link(
         // Mark email as verified (they proved ownership via magic link)
         state
             .db
-            .query_bind(
-                "UPDATE type::thing('users', $uid) SET email_verified = true",
-                json!({ "uid": uid }),
-            )
+            .update_document(c::USERS, &uid, json!({ f::EMAIL_VERIFIED: true }))
             .await?;
 
         (uid, existing_user.clone(), roles)
@@ -2376,25 +2701,25 @@ pub async fn verify_magic_link(
         // Create new user (passwordless account)
         let now = chrono::Utc::now().to_rfc3339();
         let user_data = json!({
-            "email": email,
-            "password_hash": null,
-            "display_name": email.split('@').next().unwrap_or("User"),
-            "roles": ["user"],
-            "email_verified": true,
-            "mfa_enabled": false,
-            "is_anonymous": false,
-            "created_at": now,
+            (f::EMAIL): email,
+            "password_hash": null, // ignore-magic: internal auth field
+            "display_name": email.split('@').next().unwrap_or("User"), // ignore-magic: user creation field
+            (f::ROLES): ["user"],
+            (f::EMAIL_VERIFIED): true,
+            (f::MFA_ENABLED): false,
+            "is_anonymous": false, // ignore-magic: magic link auth field
+            (f::CREATED_AT): now,
         });
 
-        let user = state.db.create_document("users", user_data).await?;
-        let uid = user["id"]
+        let user = state.db.create_document(c::USERS, user_data).await?;
+        let uid = user[fields::ID]
             .as_str()
             .map(|s| s.to_string())
-            .unwrap_or_else(|| user["id"].to_string());
+            .unwrap_or_else(|| user[fields::ID].to_string());
 
-        // Send welcome email
+        // Send welcome email (new user via magic link — default "en")
         if let Some(ref email_service) = state.email_service {
-            let _ = email_service.send_welcome_email(email).await;
+            let _ = email_service.send_welcome_email(email, "en").await;
         }
 
         (uid, user, vec!["user".to_string()])
@@ -2402,7 +2727,7 @@ pub async fn verify_magic_link(
 
     // Get custom claims
     let custom_claims = user
-        .get("custom_claims")
+        .get(f::CUSTOM_CLAIMS)
         .cloned()
         .unwrap_or(serde_json::Value::Null);
 
@@ -2430,105 +2755,133 @@ pub async fn verify_magic_link(
 
 /// Build the auth router.
 pub fn auth_router(state: AuthState) -> axum::Router {
+    use crate::rate_limit::{RateLimiter, rate_limit_middleware};
+    use std::time::Duration;
+
     let jwt_keys = Arc::new(state.jwt_keys.clone());
-    axum::Router::new()
-        .route("/auth/register", axum::routing::post(register))
+
+    // Per-IP rate limiters for sensitive auth endpoints
+    let login_limiter = RateLimiter::new(5, Duration::from_secs(60));
+    let register_limiter = RateLimiter::new(3, Duration::from_secs(60));
+    let forgot_password_limiter = RateLimiter::new(3, Duration::from_secs(60));
+
+    // Rate-limited auth routes (applied per-route via nested routers)
+    let rate_limited_routes = axum::Router::new()
         .route("/auth/login", axum::routing::post(login))
-        .route("/auth/refresh", axum::routing::post(refresh))
+        .layer(Extension(login_limiter))
+        .layer(axum::middleware::from_fn(rate_limit_middleware));
+
+    let rate_limited_register = axum::Router::new()
+        .route("/auth/register", axum::routing::post(register))
+        .layer(Extension(register_limiter))
+        .layer(axum::middleware::from_fn(rate_limit_middleware));
+
+    let rate_limited_forgot = axum::Router::new()
         .route(
             "/auth/forgot-password",
             axum::routing::post(forgot_password),
         )
-        .route("/auth/reset-password", axum::routing::post(reset_password))
-        .route("/auth/providers", axum::routing::get(auth_providers))
-        .route("/auth/google/start", axum::routing::get(google_oauth_start))
-        .route(
-            "/auth/google/callback",
-            axum::routing::get(google_oauth_callback),
-        )
-        .route("/auth/google", axum::routing::post(google_sign_in))
-        .route("/auth/apple", axum::routing::post(apple_sign_in))
-        .route("/auth/oidc", axum::routing::post(oidc_sign_in))
-        // Email verification
-        .route("/auth/verify-email", axum::routing::post(verify_email))
-        .route(
-            "/auth/send-verification",
-            axum::routing::post(send_verification),
-        )
-        // MFA / TOTP
-        .route("/auth/mfa/setup", axum::routing::post(mfa_setup))
-        .route(
-            "/auth/mfa/verify-setup",
-            axum::routing::post(mfa_verify_setup),
-        )
-        .route("/auth/mfa/challenge", axum::routing::post(mfa_challenge))
-        .route("/auth/mfa/recovery", axum::routing::post(mfa_recovery))
-        .route("/auth/mfa", axum::routing::delete(mfa_disable))
-        // Anonymous auth
-        .route("/auth/anonymous", axum::routing::post(anonymous_sign_in))
-        .route(
-            "/auth/anonymous/upgrade",
-            axum::routing::post(anonymous_upgrade),
-        )
-        // Magic link (passwordless)
-        .route("/auth/magic-link", axum::routing::post(send_magic_link))
-        .route(
-            "/auth/verify-magic-link",
-            axum::routing::post(verify_magic_link),
-        )
-        // Admin user management
-        .route("/admin/users", axum::routing::get(admin_list_users))
-        .route("/admin/users", axum::routing::post(admin_create_user))
-        .route("/admin/users/{user_id}", axum::routing::get(admin_get_user))
-        .route(
-            "/admin/users/{user_id}",
-            axum::routing::patch(admin_update_user),
-        )
-        .route(
-            "/admin/users/{user_id}",
-            axum::routing::delete(admin_delete_user),
-        )
-        .route(
-            "/admin/users/{user_id}/claims",
-            axum::routing::put(admin_set_claims),
-        )
-        // Admin email templates
-        .route(
-            "/admin/email-templates",
-            axum::routing::get(admin_list_templates),
-        )
-        .route(
-            "/admin/email-templates/{template_name}",
-            axum::routing::get(admin_get_template),
-        )
-        .route(
-            "/admin/email-templates/{template_name}",
-            axum::routing::put(admin_update_template),
-        )
-        .route(
-            "/admin/email-templates/{template_name}/reset",
-            axum::routing::post(admin_reset_template),
-        )
-        // Security / login tracking
-        .route(
-            "/api/security/login-history",
-            axum::routing::get(login_tracking::get_login_history),
-        )
-        .route(
-            "/api/security/known-devices",
-            axum::routing::get(login_tracking::get_known_devices),
-        )
-        .route(
-            "/api/security/known-devices/{id}",
-            axum::routing::delete(login_tracking::delete_known_device),
-        )
-        .route(
-            "/api/security/alerts",
-            axum::routing::get(login_tracking::get_security_alerts),
-        )
-        .route(
-            "/api/security/alerts/{id}/acknowledge",
-            axum::routing::post(login_tracking::acknowledge_alert),
+        .layer(Extension(forgot_password_limiter))
+        .layer(axum::middleware::from_fn(rate_limit_middleware));
+
+    rate_limited_routes
+        .merge(rate_limited_register)
+        .merge(rate_limited_forgot)
+        .merge(
+            axum::Router::new()
+                .route("/auth/refresh", axum::routing::post(refresh))
+                .route("/auth/logout", axum::routing::post(logout))
+                .route("/auth/reset-password", axum::routing::post(reset_password))
+                .route("/auth/providers", axum::routing::get(auth_providers))
+                .route("/auth/google/start", axum::routing::get(google_oauth_start))
+                .route(
+                    "/auth/google/callback",
+                    axum::routing::get(google_oauth_callback),
+                )
+                .route("/auth/google", axum::routing::post(google_sign_in))
+                .route("/auth/apple", axum::routing::post(apple_sign_in))
+                .route("/auth/oidc", axum::routing::post(oidc_sign_in))
+                // Email verification
+                .route("/auth/verify-email", axum::routing::post(verify_email))
+                .route(
+                    "/auth/send-verification",
+                    axum::routing::post(send_verification),
+                )
+                // MFA / TOTP
+                .route("/auth/mfa/setup", axum::routing::post(mfa_setup))
+                .route(
+                    "/auth/mfa/verify-setup",
+                    axum::routing::post(mfa_verify_setup),
+                )
+                .route("/auth/mfa/challenge", axum::routing::post(mfa_challenge))
+                .route("/auth/mfa/recovery", axum::routing::post(mfa_recovery))
+                .route("/auth/mfa", axum::routing::delete(mfa_disable))
+                // Anonymous auth
+                .route("/auth/anonymous", axum::routing::post(anonymous_sign_in))
+                .route(
+                    "/auth/anonymous/upgrade",
+                    axum::routing::post(anonymous_upgrade),
+                )
+                // Magic link (passwordless)
+                .route("/auth/magic-link", axum::routing::post(send_magic_link))
+                .route(
+                    "/auth/verify-magic-link",
+                    axum::routing::post(verify_magic_link),
+                )
+                // Admin user management
+                .route("/admin/users", axum::routing::get(admin_list_users))
+                .route("/admin/users", axum::routing::post(admin_create_user))
+                .route("/admin/users/{user_id}", axum::routing::get(admin_get_user))
+                .route(
+                    "/admin/users/{user_id}",
+                    axum::routing::patch(admin_update_user),
+                )
+                .route(
+                    "/admin/users/{user_id}",
+                    axum::routing::delete(admin_delete_user),
+                )
+                .route(
+                    "/admin/users/{user_id}/claims",
+                    axum::routing::put(admin_set_claims),
+                )
+                // Admin email templates
+                .route(
+                    "/admin/email-templates",
+                    axum::routing::get(admin_list_templates),
+                )
+                .route(
+                    "/admin/email-templates/{template_name}",
+                    axum::routing::get(admin_get_template),
+                )
+                .route(
+                    "/admin/email-templates/{template_name}",
+                    axum::routing::put(admin_update_template),
+                )
+                .route(
+                    "/admin/email-templates/{template_name}/reset",
+                    axum::routing::post(admin_reset_template),
+                )
+                // Security / login tracking
+                .route(
+                    "/api/security/login-history",
+                    axum::routing::get(login_tracking::get_login_history),
+                )
+                .route(
+                    "/api/security/known-devices",
+                    axum::routing::get(login_tracking::get_known_devices),
+                )
+                .route(
+                    "/api/security/known-devices/{id}",
+                    axum::routing::delete(login_tracking::delete_known_device),
+                )
+                .route(
+                    "/api/security/alerts",
+                    axum::routing::get(login_tracking::get_security_alerts),
+                )
+                .route(
+                    "/api/security/alerts/{id}/acknowledge",
+                    axum::routing::post(login_tracking::acknowledge_alert),
+                ),
         )
         .with_state(state)
         .layer(axum::middleware::from_fn(auth_extractor))
@@ -2608,7 +2961,7 @@ mod tests {
         let val = serde_json::to_value(&resp).unwrap();
         assert_eq!(val["access_token"], "at_123");
         assert_eq!(val["refresh_token"], "rt_456");
-        assert_eq!(val["user"]["id"], "u1");
+        assert_eq!(val["user"][fields::ID], "u1");
     }
 
     #[test]
@@ -2750,7 +3103,7 @@ mod tests {
             jwt_keys: JwtKeys::from_secret("test-secret"),
             access_ttl: 900,
             refresh_ttl: 604800,
-            google_client_id: Some("google-client-id".into()),
+            google_client_id: Some("test-client.apps.googleusercontent.com".into()),
             google_client_secret: None,
             apple_team_id: None,
             apple_key_id: None,
@@ -2763,6 +3116,7 @@ mod tests {
             totp_encryption_key: None,
             base_url: "https://example.com".into(),
             oauth_state_nonces: Arc::new(dashmap::DashMap::new()),
+            test_mode: std::env::var("OB_TEST_MODE").unwrap_or_default() == "1",
             turnstile_secret_key: None,
             http_client: reqwest::Client::new(),
         };
@@ -2776,14 +3130,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_auth_providers_rejects_invalid_google_client_id_format() {
+        let state = AuthState {
+            db: ob_database::DatabaseClient::new_mem().await,
+            jwt_keys: JwtKeys::from_secret("test-secret"),
+            access_ttl: 900,
+            refresh_ttl: 604800,
+            google_client_id: Some("a1f5ad754-779c-4c45-b6f2-ac185df13e19".into()),
+            google_client_secret: Some("GOCSPX-test-secret".into()),
+            apple_team_id: None,
+            apple_key_id: None,
+            apple_service_id: None,
+            apple_private_key: None,
+            oidc_issuer_url: None,
+            oidc_client_id: None,
+            email_service: None,
+            require_email_verification: false,
+            totp_encryption_key: None,
+            base_url: "https://example.com".into(),
+            oauth_state_nonces: Arc::new(dashmap::DashMap::new()),
+            test_mode: std::env::var("OB_TEST_MODE").unwrap_or_default() == "1",
+            turnstile_secret_key: None,
+            http_client: reqwest::Client::new(),
+        };
+
+        let Json(response) = auth_providers(State(state)).await;
+        assert!(!response.google.enabled);
+        assert!(!response.google.client_id_configured);
+        assert!(response.google.client_secret_configured);
+    }
+
+    #[tokio::test]
     async fn test_google_oauth_start_rejects_unapproved_redirect_origin() {
         let state = AuthState {
             db: ob_database::DatabaseClient::new_mem().await,
             jwt_keys: JwtKeys::from_secret("test-secret"),
             access_ttl: 900,
             refresh_ttl: 604800,
-            google_client_id: Some("google-client-id".into()),
-            google_client_secret: Some("google-secret".into()),
+            google_client_id: Some("test-client.apps.googleusercontent.com".into()),
+            google_client_secret: Some("GOCSPX-test-secret".into()),
             apple_team_id: None,
             apple_key_id: None,
             apple_service_id: None,
@@ -2795,6 +3180,7 @@ mod tests {
             totp_encryption_key: None,
             base_url: "https://api.orignagta.ca".into(),
             oauth_state_nonces: Arc::new(dashmap::DashMap::new()),
+            test_mode: std::env::var("OB_TEST_MODE").unwrap_or_default() == "1",
             turnstile_secret_key: None,
             http_client: reqwest::Client::new(),
         };
@@ -2895,6 +3281,15 @@ mod tests {
         });
         let req: AnonymousUpgradeRequest = serde_json::from_value(json).unwrap();
         assert!(req.display_name.is_none());
+    }
+
+    #[test]
+    fn test_admin_user_queries_tolerate_empty_string_booleans() {
+        let list_query = admin_list_users_query(50, 0);
+        assert!(list_query.contains("NULLIF(data->>'email_verified', '')::boolean"));
+        assert!(list_query.contains("NULLIF(data->>'mfa_enabled', '')::boolean"));
+        assert!(ADMIN_GET_USER_QUERY.contains("NULLIF(data->>'email_verified', '')::boolean"));
+        assert!(ADMIN_GET_USER_QUERY.contains("NULLIF(data->>'mfa_enabled', '')::boolean"));
     }
 
     // ── Magic Link ──────────────────────────────────────────────────

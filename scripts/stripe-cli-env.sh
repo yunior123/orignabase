@@ -12,11 +12,11 @@ fi
 case "$MODE" in
   test)
     api_key_field="test_mode_api_key"
-    publishable_key_field="test_mode_publishable_key"
+    publishable_key_field="test_mode_pub_key"
     ;;
   live)
     api_key_field="live_mode_api_key"
-    publishable_key_field="live_mode_publishable_key"
+    publishable_key_field="live_mode_pub_key"
     ;;
   *)
     echo "Usage: $0 [test|live]" >&2

@@ -1,13 +1,16 @@
 //! Shipping approval workflow handlers.
 //! Ported from: functions/handlers/orders.py::approve_shipping_cost, update_shipping_cost
 
-use axum::{Json, Router, extract::State, routing::post};
+use axum::{Json, Router, extract::Extension, extract::State, routing::post};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{error, info, warn};
 
+use ob_auth::middleware::AuthContext;
+
 use crate::HandlersState;
+use crate::shared::auth::resolve_self_user_id;
 use crate::shared::schema::{collections, fields};
 use crate::shared::validation::{sanitize_html, validate_uid};
 
@@ -16,7 +19,15 @@ use crate::shared::validation::{sanitize_html, validate_uid};
 // ---------------------------------------------------------------------------
 
 /// Threshold above which shipping cost increase requires buyer approval (20%).
+/// Kept for backward compatibility reference; prefer SHIPPING_APPROVAL_THRESHOLD_BPS.
+#[allow(dead_code)]
 const SHIPPING_APPROVAL_THRESHOLD: f64 = 0.20;
+
+/// 20% threshold in basis points (20% * 10_000 = 2_000).
+const SHIPPING_APPROVAL_THRESHOLD_BPS: i64 = 2_000;
+
+/// Basis points multiplier for max shipping: (1.0 + 0.20) * 100 = 120.
+const SHIPPING_APPROVAL_MULTIPLIER_BPS: i64 = 120;
 
 /// Absolute max shipping in cents ($500 CAD hard cap for free-shipping orders).
 const ABSOLUTE_MAX_SHIPPING_CENTS: i64 = 50_000;
@@ -49,8 +60,8 @@ pub struct ApproveShippingResponse {
 pub struct UpdateShippingCostRequest {
     pub order_id: String,
     pub user_id: String,
-    /// New shipping cost in dollars (float).
-    pub new_shipping_cost: f64,
+    /// New shipping cost in cents
+    pub new_shipping_cost_cents: i64,
     #[serde(default)]
     pub reason: Option<String>,
 }
@@ -66,6 +77,8 @@ pub struct UpdateShippingCostResponse {
 // Router
 // ---------------------------------------------------------------------------
 
+/// Builds the shipping-adjustment router used for buyer approvals and seller
+/// shipping cost updates.
 pub fn router(state: HandlersState) -> Router {
     Router::new()
         .route("/api/orders/approve-shipping", post(approve_shipping_cost))
@@ -98,29 +111,92 @@ fn items_array(order: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+async fn restore_stock_for_items(
+    state: &HandlersState,
+    items: &[Value],
+    updated_at: &str,
+) -> Result<(), ob_core::Error> {
+    for item in items {
+        if item
+            .get(fields::IS_DIGITAL)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+
+        let product_id = str_field(item, fields::PRODUCT_ID);
+        let quantity = item
+            .get(fields::QUANTITY)
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1);
+        if product_id.is_empty() || quantity <= 0 {
+            continue;
+        }
+
+        let mut restored = false;
+        for _attempt in 0..3 {
+            let product = state
+                .db
+                .get_document(collections::PRODUCTS, product_id)
+                .await
+                .unwrap_or_default();
+            let current_stock = product
+                .get(fields::STOCK_QUANTITY)
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let cas_result = state
+                .db
+                .update_document_cas(
+                    collections::PRODUCTS,
+                    product_id,
+                    json!({
+                        fields::STOCK_QUANTITY: current_stock + quantity,
+                        fields::UPDATED_AT: updated_at,
+                    }),
+                    fields::STOCK_QUANTITY,
+                    &json!(current_stock),
+                )
+                .await?;
+            if cas_result.is_some() {
+                restored = true;
+                break;
+            }
+        }
+
+        if !restored {
+            return Err(ob_core::Error::Database(format!(
+                "Failed to restore stock for product {product_id}"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 fn max_allowed_shipping_cents(old_seller_cents: i64) -> i64 {
     if old_seller_cents == 0 {
         ABSOLUTE_MAX_SHIPPING_CENTS
     } else {
-        (old_seller_cents as f64 * (1.0 + SHIPPING_APPROVAL_THRESHOLD)).round() as i64
+        // Integer arithmetic: old * (1 + threshold) = (old * multiplier_bps + 50) / 100 (rounded)
+        (old_seller_cents * SHIPPING_APPROVAL_MULTIPLIER_BPS + 50) / 100
     }
 }
 
 fn shipping_update_requires_approval(original_seller_cents: i64, new_shipping_cents: i64) -> bool {
     if original_seller_cents > 0 {
-        let increase_ratio =
-            (new_shipping_cents - original_seller_cents) as f64 / original_seller_cents as f64;
-        increase_ratio > SHIPPING_APPROVAL_THRESHOLD
+        // Integer basis-point arithmetic: increase > 20% means
+        // (new - old) * 10_000 / old > 2_000
+        let diff = new_shipping_cents - original_seller_cents;
+        diff * 10_000 / original_seller_cents > SHIPPING_APPROVAL_THRESHOLD_BPS
     } else {
         new_shipping_cents > 0
     }
 }
 
-fn shipping_tax_difference_cents(difference_cents: i64, province: &str) -> i64 {
-    (difference_cents as f64 * get_tax_rate(province)).round() as i64
-}
-
-/// Canadian tax rates by province (combined GST+HST or GST+PST).
+/// Canadian tax rates by province (combined GST+HST or GST+PST) as f64.
+/// DEPRECATED: prefer get_tax_rate_bps() for integer arithmetic.
+#[allow(dead_code)]
 fn get_tax_rate(province: &str) -> f64 {
     match province {
         "AB" | "NT" | "NU" | "YT" => 0.05, // GST only
@@ -130,8 +206,37 @@ fn get_tax_rate(province: &str) -> f64 {
         "QC" => 0.14975,                   // GST 5% + QST 9.975%
         "ON" => 0.13,                      // HST
         "NB" | "NL" | "NS" | "PE" => 0.15, // HST
-        _ => 0.13,                         // Default to ON HST
+        other => {
+            tracing::warn!(province = %other, "Unknown province code — falling back to 15% HST (deprecated fn)");
+            0.15
+        }
     }
+}
+
+/// Canadian tax rates by province in permyriad (1/100_000 units).
+/// 100_000 = 100%. This scale preserves Quebec's 3-decimal precision (14.975%).
+fn get_tax_rate_bps(province: &str) -> i64 {
+    match province {
+        "AB" | "NT" | "NU" | "YT" => 5_000,  // 5% GST only
+        "BC" => 12_000,                      // 12%
+        "MB" => 12_000,                      // 12%
+        "SK" => 11_000,                      // 11%
+        "QC" => 14_975,                      // 14.975%
+        "ON" => 13_000,                      // 13% HST
+        "NB" | "NL" | "NS" | "PE" => 15_000, // 15% HST
+        other => {
+            // Log unrecognized province so ops can investigate — fall back to
+            // highest common rate (HST 15%) to avoid under-collecting tax.
+            tracing::warn!(province = %other, "Unknown province code — falling back to 15% HST");
+            15_000
+        }
+    }
+}
+
+fn shipping_tax_difference_cents(difference_cents: i64, province: &str) -> i64 {
+    // Integer arithmetic: (cents * rate_permyriad + 50_000 * sign) / 100_000 for rounding
+    let rate = get_tax_rate_bps(province);
+    (difference_cents * rate + 50_000 * difference_cents.signum()) / 100_000
 }
 
 async fn stripe_modify_pi(
@@ -172,16 +277,22 @@ async fn stripe_modify_pi(
 // approve_shipping_cost
 // ---------------------------------------------------------------------------
 
+/// Confirms or rejects a pending shipping-cost increase from the buyer side.
+///
+/// The handler enforces ownership, verifies the quoted amount the buyer saw,
+/// recalculates any tax delta, and updates the order plus Stripe authorization
+/// when the buyer accepts the new shipping cost.
 async fn approve_shipping_cost(
     State(state): State<HandlersState>,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<ApproveShippingRequest>,
 ) -> Result<Json<ApproveShippingResponse>, ob_core::Error> {
     validate_uid("orderId", &req.order_id)?;
-    validate_uid("userId", &req.user_id)?;
+    let user_id = resolve_self_user_id(&auth, Some(req.user_id.as_str()), "userId")?;
 
     crate::shared::rate_limiter::check_user_rate_limit(
         &state.db,
-        &req.user_id,
+        &user_id,
         "approve_shipping_cost",
         10,
         1,
@@ -205,7 +316,7 @@ async fn approve_shipping_cost(
     }
 
     // Only buyer can approve/reject
-    if str_field(&order, "userId") != req.user_id {
+    if str_field(&order, fields::USER_ID) != user_id {
         return Err(ob_core::Error::Forbidden("Not your order".into()));
     }
 
@@ -215,7 +326,7 @@ async fn approve_shipping_cost(
         .ok_or_else(|| ob_core::Error::Validation("No shipping approval data".into()))?;
 
     let approval_status = approval
-        .get("status")
+        .get(fields::STATUS)
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
@@ -295,14 +406,14 @@ async fn approve_shipping_cost(
             tax_difference_cents = shipping_tax_difference_cents(difference_cents, state_code);
         }
 
-        let old_tax = i64_field(&order, "taxAmountCents");
+        let old_tax = i64_field(&order, fields::TAX_AMOUNT_CENTS);
         let new_tax = old_tax + tax_difference_cents;
         let new_total =
-            i64_field(&order, "totalAmountCents") + difference_cents + tax_difference_cents;
+            i64_field(&order, fields::TOTAL_AMOUNT_CENTS) + difference_cents + tax_difference_cents;
 
         let payment_status = str_field(&order, fields::PAYMENT_STATUS);
-        let payment_intent_id = str_field(&order, "paymentIntentId");
-        let pi_modify_blocked = payment_status == "CAPTURED" || payment_status == "AUTHORIZED";
+        let payment_intent_id = str_field(&order, fields::PAYMENT_INTENT_ID);
+        let pi_modify_blocked = payment_status == "captured" || payment_status == "authorized";
 
         let mut requires_manual_review = false;
         let total_delta_cents = difference_cents + tax_difference_cents;
@@ -328,10 +439,10 @@ async fn approve_shipping_cost(
         let mut update_data = json!({
             "sellerShippingCosts": seller_shipping_map,
             fields::SHIPPING_COST_CENTS: new_total_shipping,
-            "taxAmountCents": new_tax,
-            "totalAmountCents": new_total,
+            fields::TAX_AMOUNT_CENTS: new_tax,
+            fields::TOTAL_AMOUNT_CENTS: new_total,
             "shippingApproval": {
-                "status": "approved",
+                fields::STATUS: "approved",
                 "respondedAt": now,
             },
             "shippingApprovalStatus": "approved",
@@ -352,20 +463,25 @@ async fn approve_shipping_cost(
             .map_err(|e| ob_core::Error::Database(format!("Failed to update order: {e}")))?;
     } else {
         // Buyer rejected — cancel order atomically with stock restore
+        let stock_restored = order
+            .get(fields::STOCK_RESTORED)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let mut update_data = json!({
             "shippingApproval": {
-                "status": "rejected",
+                fields::STATUS: "rejected",
                 "respondedAt": now,
             },
             "shippingApprovalStatus": "rejected",
-            "orderStatus": "CANCELLED",
+            fields::ORDER_STATUS: "cancelled",
             "cancellationReason": "Buyer rejected shipping cost",
+            fields::STOCK_RESTORED: true,
             fields::UPDATED_AT: now,
         });
 
         // If payment was already captured, issue a Stripe refund
         let payment_status = str_field(&order, fields::PAYMENT_STATUS);
-        if payment_status == "CAPTURED" {
+        if payment_status == "captured" {
             let payment_intent_id = str_field(&order, "paymentIntentId");
             if !payment_intent_id.is_empty() {
                 let idempotency_key = format!("reject-shipping-{}", req.order_id);
@@ -380,7 +496,7 @@ async fn approve_shipping_cost(
                 .await
                 {
                     Ok(_) => {
-                        update_data["paymentStatus"] = json!("REFUNDED");
+                        update_data[fields::PAYMENT_STATUS] = json!("refunded");
                     }
                     Err(e) => {
                         warn!(
@@ -397,45 +513,35 @@ async fn approve_shipping_cost(
             }
         }
 
-        let mut tx = ob_database::Transaction::new();
-        tx.add(
-            &format!(
-                "UPDATE {}:{} MERGE $data",
-                collections::ORDERS,
-                req.order_id
-            ),
-            Some(json!({"data": update_data})),
-        );
+        let updated_orders = state
+            .db
+            .query_bind(
+                &format!(
+                    "UPDATE {} SET data = data || $update::jsonb WHERE id = $order_id AND COALESCE(data->'shippingApproval'->>'status', '') = 'pending' RETURNING id, data::TEXT, created_at, updated_at",
+                    collections::ORDERS
+                ),
+                json!({
+                    "order_id": req.order_id,
+                    "update": update_data,
+                }),
+            )
+            .await
+            .map_err(|e| {
+                ob_core::Error::Database(format!(
+                    "Failed to reject shipping and restore stock: {e}"
+                ))
+            })?;
 
-        // Restore stock for all physical items
-        let items = items_array(&order);
-        for item in &items {
-            if item
-                .get("isDigital")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            let pid = str_field(item, fields::PRODUCT_ID);
-            let qty = item.get("quantity").and_then(|v| v.as_i64()).unwrap_or(1);
-            if !pid.is_empty() && qty > 0 {
-                tx.add(
-                    &format!(
-                        "UPDATE {}:{} SET stockQuantity += {}, updatedAt = '{}'",
-                        collections::PRODUCTS,
-                        pid,
-                        qty,
-                        now
-                    ),
-                    None,
-                );
-            }
+        if updated_orders.is_empty() {
+            return Err(ob_core::Error::Validation(
+                "No pending shipping approval".into(),
+            ));
         }
 
-        tx.commit(&state.db).await.map_err(|e| {
-            ob_core::Error::Database(format!("Failed to reject shipping and restore stock: {e}"))
-        })?;
+        if !stock_restored {
+            let items = items_array(&order);
+            restore_stock_for_items(&state, &items, &now).await?;
+        }
     }
 
     info!(
@@ -454,23 +560,30 @@ async fn approve_shipping_cost(
 // update_shipping_cost
 // ---------------------------------------------------------------------------
 
+/// Updates seller-proposed shipping costs for an order and determines whether
+/// the new amount requires explicit buyer approval.
+///
+/// The handler validates bounds, records the requested change, and either
+/// applies the updated totals immediately or transitions the order into the
+/// pending-approval flow.
 async fn update_shipping_cost(
     State(state): State<HandlersState>,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<UpdateShippingCostRequest>,
 ) -> Result<Json<UpdateShippingCostResponse>, ob_core::Error> {
     validate_uid("orderId", &req.order_id)?;
-    validate_uid("userId", &req.user_id)?;
+    let user_id = resolve_self_user_id(&auth, Some(req.user_id.as_str()), "userId")?;
 
     crate::shared::rate_limiter::check_user_rate_limit(
         &state.db,
-        &req.user_id,
+        &user_id,
         "update_shipping_cost",
         10,
         1,
     )
     .await?;
 
-    if req.new_shipping_cost < 0.0 {
+    if req.new_shipping_cost_cents < 0 {
         return Err(ob_core::Error::Validation(
             "newShippingCost must be non-negative".into(),
         ));
@@ -492,7 +605,7 @@ async fn update_shipping_cost(
     let items = items_array(&order);
     let seller_items: Vec<&Value> = items
         .iter()
-        .filter(|it| str_field(it, fields::SELLER_ID) == req.user_id)
+        .filter(|it| str_field(it, fields::SELLER_ID) == user_id)
         .collect();
 
     if seller_items.is_empty() {
@@ -502,8 +615,8 @@ async fn update_shipping_cost(
     }
 
     // Only confirmed/processing orders
-    let order_status = str_field(&order, "orderStatus");
-    let allowed_statuses = ["CONFIRMED", "PROCESSING"];
+    let order_status = str_field(&order, fields::ORDER_STATUS);
+    let allowed_statuses = ["confirmed", "processing"];
     if !allowed_statuses.contains(&order_status) {
         return Err(ob_core::Error::Validation(
             "Can only update shipping on confirmed/processing orders".into(),
@@ -512,7 +625,7 @@ async fn update_shipping_cost(
 
     // Payment must be authorized or captured
     let payment_status = str_field(&order, fields::PAYMENT_STATUS);
-    if payment_status != "AUTHORIZED" && payment_status != "CAPTURED" {
+    if payment_status != "authorized" && payment_status != "captured" {
         return Err(ob_core::Error::Validation(format!(
             "Cannot update shipping cost: payment status is '{payment_status}'"
         )));
@@ -529,9 +642,9 @@ async fn update_shipping_cost(
         })
         .unwrap_or_default();
 
-    let original_seller_cents = *seller_shipping_map.get(&req.user_id).unwrap_or(&0);
-    let new_shipping_cents = (req.new_shipping_cost * 100.0).round() as i64;
-    seller_shipping_map.insert(req.user_id.clone(), new_shipping_cents);
+    let original_seller_cents = *seller_shipping_map.get(&user_id).unwrap_or(&0);
+    let new_shipping_cents = req.new_shipping_cost_cents;
+    seller_shipping_map.insert(user_id.clone(), new_shipping_cents);
     let new_total_shipping: i64 = seller_shipping_map.values().sum();
     let original_shipping = i64_field(&order, fields::SHIPPING_COST_CENTS);
 
@@ -544,12 +657,12 @@ async fn update_shipping_cost(
     if approval_required {
         let update_data = json!({
             "shippingApproval": {
-                "status": "pending",
-                "actualCost": req.new_shipping_cost,
+                fields::STATUS: "pending",
+                "actualCost": (new_shipping_cents as f64) / 100.0,
                 "originalCostCents": original_seller_cents,
                 "newCostCents": new_shipping_cents,
                 "reason": reason,
-                "requestedBy": req.user_id,
+                "requestedBy": user_id,
                 "requestedAt": now,
             },
             "shippingApprovalStatus": "pending",
@@ -577,7 +690,7 @@ async fn update_shipping_cost(
             tax_difference_cents = shipping_tax_difference_cents(difference_cents, state_code);
         }
 
-        let old_tax = i64_field(&order, "taxAmountCents");
+        let old_tax = i64_field(&order, fields::TAX_AMOUNT_CENTS);
         let new_tax = old_tax + tax_difference_cents;
         let new_total =
             i64_field(&order, "totalAmountCents") + difference_cents + tax_difference_cents;
@@ -590,13 +703,13 @@ async fn update_shipping_cost(
         });
 
         let payment_intent_id = str_field(&order, "paymentIntentId");
-        let pi_modify_blocked = payment_status == "CAPTURED" || payment_status == "AUTHORIZED";
+        let pi_modify_blocked = payment_status == "captured" || payment_status == "authorized";
         let mut requires_manual_review = false;
 
         // Only update totals if payment not yet captured
-        if payment_status != "CAPTURED" {
-            update_data["taxAmountCents"] = json!(new_tax);
-            update_data["totalAmountCents"] = json!(new_total);
+        if payment_status != "captured" {
+            update_data[fields::TAX_AMOUNT_CENTS] = json!(new_tax);
+            update_data[fields::TOTAL_AMOUNT_CENTS] = json!(new_total);
 
             let total_delta_cents = difference_cents + tax_difference_cents;
             if total_delta_cents > 0 {
@@ -646,12 +759,24 @@ async fn update_shipping_cost(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::extract::State;
+    use axum::extract::{Extension, State};
+    use ob_auth::middleware::AuthContext;
     use ob_core::Config;
     use ob_database::DatabaseClient;
     use std::sync::Arc;
 
+    fn auth(user_id: &str) -> Extension<AuthContext> {
+        Extension(AuthContext {
+            user_id: user_id.to_string(),
+            roles: vec![],
+            authenticated: true,
+            email_verified: false,
+            custom_claims: serde_json::Value::Null,
+        })
+    }
+
     async fn setup_state() -> HandlersState {
+        unsafe { std::env::set_var("OB_TEST_MODE", "1") };
         let db = DatabaseClient::new_mem().await;
         let mut config = Config::load(None).unwrap();
         config
@@ -676,13 +801,13 @@ mod tests {
         assert!((get_tax_rate("BC") - 0.12).abs() < 0.001);
         assert!((get_tax_rate("QC") - 0.14975).abs() < 0.001);
         assert!((get_tax_rate("NS") - 0.15).abs() < 0.001);
-        // Unknown defaults to ON
-        assert!((get_tax_rate("XX") - 0.13).abs() < 0.001);
+        // Unknown defaults to highest HST (15%) to avoid under-collecting
+        assert!((get_tax_rate("XX") - 0.15).abs() < 0.001);
     }
 
     #[test]
     fn test_approve_request_deserialize() {
-        let s = r#"{"orderId":"o1","userId":"u1","approved":true,"expectedCostCents":1500}"#;
+        let s = r#"{"orderId":"o1","userId":"u1","approved":true,"expectedCostCents":1500}"#; // ignore-magic
         let req: ApproveShippingRequest = serde_json::from_str(s).unwrap();
         assert!(req.approved);
         assert_eq!(req.expected_cost_cents, Some(1500));
@@ -690,7 +815,7 @@ mod tests {
 
     #[test]
     fn test_approve_request_without_expected_cost() {
-        let s = r#"{"orderId":"o1","userId":"u1","approved":false}"#;
+        let s = r#"{"orderId":"o1","userId":"u1","approved":false}"#; // ignore-magic
         let req: ApproveShippingRequest = serde_json::from_str(s).unwrap();
         assert!(!req.approved);
         assert!(req.expected_cost_cents.is_none());
@@ -698,9 +823,9 @@ mod tests {
 
     #[test]
     fn test_update_shipping_request_deserialize() {
-        let s = r#"{"orderId":"o1","userId":"u1","newShippingCost":15.99,"reason":"heavier"}"#;
+        let s = r#"{"orderId":"o1","userId":"u1","newShippingCostCents":1599,"reason":"heavier"}"#; // ignore-magic
         let req: UpdateShippingCostRequest = serde_json::from_str(s).unwrap();
-        assert!((req.new_shipping_cost - 15.99).abs() < 0.001);
+        assert_eq!(req.new_shipping_cost_cents, 1599);
         assert_eq!(req.reason, Some("heavier".to_string()));
     }
 
@@ -748,8 +873,9 @@ mod tests {
     }
 
     #[test]
-    fn test_tax_difference_uses_default_ontario_rate_for_unknown_province() {
-        assert_eq!(shipping_tax_difference_cents(1000, "??"), 130);
+    fn test_tax_difference_uses_default_highest_hst_for_unknown_province() {
+        // Unknown province falls back to 15% (15_000 permyriad)
+        assert_eq!(shipping_tax_difference_cents(1000, "??"), 150);
     }
 
     #[test]
@@ -800,16 +926,16 @@ mod tests {
                 json!({
                     "userId": "buyer_1",
                     "shippingApproval": {
-                        "status": "pending",
+                        fields::STATUS: "pending",
                         "newCostCents": 1250,
                         "actualCost": 12.50,
                         "requestedBy": "seller_1"
                     },
                     fields::SHIPPING_COST_CENTS: 1000,
                     "sellerShippingCosts": { "seller_1": 1000 },
-                    "taxAmountCents": 130,
-                    "totalAmountCents": 1130,
-                    fields::PAYMENT_STATUS: "PENDING",
+                    fields::TAX_AMOUNT_CENTS: 130,
+                    fields::TOTAL_AMOUNT_CENTS: 1130,
+                    fields::PAYMENT_STATUS: "awaiting_payment",
                 }),
             )
             .await
@@ -817,6 +943,7 @@ mod tests {
 
         let forbidden = approve_shipping_cost(
             State(state.clone()),
+            auth("seller_1"),
             Json(ApproveShippingRequest {
                 order_id: "ord_1".into(),
                 user_id: "seller_1".into(),
@@ -830,6 +957,7 @@ mod tests {
 
         let mismatch = approve_shipping_cost(
             State(state),
+            auth("buyer_1"),
             Json(ApproveShippingRequest {
                 order_id: "ord_1".into(),
                 user_id: "buyer_1".into(),
@@ -853,18 +981,18 @@ mod tests {
                 json!({
                     "userId": "buyer_2",
                     "shippingApproval": {
-                        "status": "pending",
+                        fields::STATUS: "pending",
                         "newCostCents": 1150,
                         "actualCost": 11.50,
                         "requestedBy": "seller_2"
                     },
                     fields::SHIPPING_COST_CENTS: 1000,
                     "sellerShippingCosts": { "seller_2": 1000 },
-                    "taxAmountCents": 130,
-                    "totalAmountCents": 1130,
-                    "shippingAddress": { "state": "ON" },
-                    fields::PAYMENT_STATUS: "AUTHORIZED",
-                    "paymentIntentId": "pi_123",
+                    fields::TAX_AMOUNT_CENTS: 130,
+                    fields::TOTAL_AMOUNT_CENTS: 1130,
+                    fields::SHIPPING_ADDRESS: { fields::PROVINCE: "ON" },
+                    fields::PAYMENT_STATUS: "authorized",
+                    fields::PAYMENT_INTENT_ID: "pi_123",
                 }),
             )
             .await
@@ -872,6 +1000,7 @@ mod tests {
 
         let Json(resp) = approve_shipping_cost(
             State(state.clone()),
+            auth("buyer_2"),
             Json(ApproveShippingRequest {
                 order_id: "ord_2".into(),
                 user_id: "buyer_2".into(),
@@ -895,14 +1024,16 @@ mod tests {
             Some(1150)
         );
         assert_eq!(
-            order.get("taxAmountCents").and_then(|v| v.as_i64()),
+            order.get(fields::TAX_AMOUNT_CENTS).and_then(|v| v.as_i64()),
             Some(150)
         );
         assert_eq!(
-            order.get("totalAmountCents").and_then(|v| v.as_i64()),
+            order
+                .get(fields::TOTAL_AMOUNT_CENTS)
+                .and_then(|v| v.as_i64()),
             Some(1300)
         );
-        assert_eq!(order["shippingApproval"]["status"], "approved");
+        assert_eq!(order["shippingApproval"][fields::STATUS], "approved");
         assert_eq!(
             order.get("requiresManualReview").and_then(|v| v.as_bool()),
             Some(true)
@@ -918,8 +1049,8 @@ mod tests {
                 collections::ORDERS,
                 "ord_3",
                 json!({
-                    "orderStatus": "CONFIRMED",
-                    fields::PAYMENT_STATUS: "AUTHORIZED",
+                    fields::ORDER_STATUS: "confirmed",
+                    fields::PAYMENT_STATUS: "authorized",
                     fields::ITEMS: [
                         { fields::SELLER_ID: "seller_a", fields::PRODUCT_ID: "prod_1" }
                     ],
@@ -932,10 +1063,11 @@ mod tests {
 
         let forbidden = update_shipping_cost(
             State(state.clone()),
+            auth("seller_b"),
             Json(UpdateShippingCostRequest {
                 order_id: "ord_3".into(),
                 user_id: "seller_b".into(),
-                new_shipping_cost: 9.0,
+                new_shipping_cost_cents: 900,
                 reason: None,
             }),
         )
@@ -945,10 +1077,11 @@ mod tests {
 
         let Json(resp) = update_shipping_cost(
             State(state.clone()),
+            auth("seller_a"),
             Json(UpdateShippingCostRequest {
                 order_id: "ord_3".into(),
                 user_id: "seller_a".into(),
-                new_shipping_cost: 9.0,
+                new_shipping_cost_cents: 900,
                 reason: Some("<b>heavy</b>".into()),
             }),
         )
@@ -961,9 +1094,9 @@ mod tests {
             .get_document(collections::ORDERS, "ord_3")
             .await
             .unwrap();
-        assert_eq!(order["shippingApproval"]["status"], "pending");
+        assert_eq!(order["shippingApproval"][fields::STATUS], "pending");
         assert_eq!(order["shippingApproval"]["newCostCents"], 900);
-        assert_eq!(order["shippingApproval"]["reason"], "heavy");
+        assert_eq!(order["shippingApproval"][fields::REASON], "heavy");
         assert_eq!(
             order
                 .get("shippingApprovalRequired")
@@ -981,16 +1114,16 @@ mod tests {
                 collections::ORDERS,
                 "ord_4",
                 json!({
-                    "orderStatus": "PROCESSING",
-                    fields::PAYMENT_STATUS: "CAPTURED",
-                    "paymentIntentId": "pi_locked",
+                    fields::ORDER_STATUS: "processing",
+                    fields::PAYMENT_STATUS: "captured",
+                    fields::PAYMENT_INTENT_ID: "pi_locked",
                     fields::ITEMS: [
                         { fields::SELLER_ID: "seller_c", fields::PRODUCT_ID: "prod_2" }
                     ],
-                    "shippingAddress": { "state": "ON" },
+                    fields::SHIPPING_ADDRESS: { fields::PROVINCE: "ON" },
                     fields::SHIPPING_COST_CENTS: 500,
-                    "taxAmountCents": 65,
-                    "totalAmountCents": 565,
+                    fields::TAX_AMOUNT_CENTS: 65,
+                    fields::TOTAL_AMOUNT_CENTS: 565,
                     "sellerShippingCosts": { "seller_c": 500 }
                 }),
             )
@@ -999,10 +1132,11 @@ mod tests {
 
         let Json(resp) = update_shipping_cost(
             State(state.clone()),
+            auth("seller_c"),
             Json(UpdateShippingCostRequest {
                 order_id: "ord_4".into(),
                 user_id: "seller_c".into(),
-                new_shipping_cost: 5.50,
+                new_shipping_cost_cents: 550,
                 reason: None,
             }),
         )
@@ -1027,7 +1161,9 @@ mod tests {
         );
         assert_eq!(order.get("taxDiffCents").and_then(|v| v.as_i64()), Some(7));
         assert_eq!(
-            order.get("totalAmountCents").and_then(|v| v.as_i64()),
+            order
+                .get(fields::TOTAL_AMOUNT_CENTS)
+                .and_then(|v| v.as_i64()),
             Some(565)
         );
         assert_eq!(
@@ -1109,8 +1245,9 @@ mod tests {
     }
 
     #[test]
-    fn test_tax_rate_empty_string_defaults_to_on() {
-        assert!((get_tax_rate("") - 0.13).abs() < 0.001);
+    fn test_tax_rate_empty_string_defaults_to_highest_hst() {
+        // Empty string falls back to 15% (highest HST) to avoid under-collecting
+        assert!((get_tax_rate("") - 0.15).abs() < 0.001);
     }
 
     // -----------------------------------------------------------------------
@@ -1148,29 +1285,29 @@ mod tests {
 
     #[test]
     fn test_approve_request_missing_required_fields() {
-        let s = r#"{"orderId":"o1"}"#;
+        let s = r#"{"orderId":"o1"}"#; // ignore-magic
         assert!(serde_json::from_str::<ApproveShippingRequest>(s).is_err());
     }
 
     #[test]
     fn test_update_shipping_request_missing_reason() {
-        let s = r#"{"orderId":"o1","userId":"u1","newShippingCost":5.0}"#;
+        let s = r#"{"orderId":"o1","userId":"u1","newShippingCostCents":500}"#; // ignore-magic
         let req: UpdateShippingCostRequest = serde_json::from_str(s).unwrap();
         assert!(req.reason.is_none());
     }
 
     #[test]
     fn test_update_shipping_request_missing_required_fields() {
-        // Missing newShippingCost
-        let s = r#"{"orderId":"o1","userId":"u1"}"#;
+        // Missing newShippingCostCents
+        let s = r#"{"orderId":"o1","userId":"u1"}"#; // ignore-magic
         assert!(serde_json::from_str::<UpdateShippingCostRequest>(s).is_err());
     }
 
     #[test]
     fn test_update_shipping_request_zero_cost() {
-        let s = r#"{"orderId":"o1","userId":"u1","newShippingCost":0.0}"#;
+        let s = r#"{"orderId":"o1","userId":"u1","newShippingCostCents":0}"#; // ignore-magic
         let req: UpdateShippingCostRequest = serde_json::from_str(s).unwrap();
-        assert!((req.new_shipping_cost).abs() < f64::EPSILON);
+        assert_eq!(req.new_shipping_cost_cents, 0);
     }
 
     // -----------------------------------------------------------------------
@@ -1240,7 +1377,7 @@ mod tests {
 
     #[test]
     fn test_expiry_check_missing_field() {
-        let order = json!({ "orderStatus": "CONFIRMED" });
+        let order = json!({ fields::ORDER_STATUS: "confirmed" });
         let expires_at = order.get("expiresAt").and_then(|v| v.as_str());
         assert!(
             expires_at.is_none(),
@@ -1271,6 +1408,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     async fn setup_state_with_mock(stripe_base_url: String) -> HandlersState {
+        unsafe { std::env::set_var("OB_TEST_MODE", "1") };
         let db = DatabaseClient::new_mem().await;
         let mut config = Config::load(None).unwrap();
         config
@@ -1361,8 +1499,8 @@ mod tests {
                 json!({
                     "userId": "buyer_1",
                     "expiresAt": past,
-                    "shippingApproval": { "status": "pending" },
-                    fields::PAYMENT_STATUS: "PENDING",
+                    "shippingApproval": { fields::STATUS: "pending" },
+                    fields::PAYMENT_STATUS: "awaiting_payment",
                 }),
             )
             .await
@@ -1370,6 +1508,7 @@ mod tests {
 
         let err = approve_shipping_cost(
             State(state),
+            auth("buyer_1"),
             Json(ApproveShippingRequest {
                 order_id: "ord_exp".into(),
                 user_id: "buyer_1".into(),
@@ -1392,8 +1531,8 @@ mod tests {
                 "ord_np",
                 json!({
                     "userId": "buyer_1",
-                    "shippingApproval": { "status": "approved" },
-                    fields::PAYMENT_STATUS: "PENDING",
+                    "shippingApproval": { fields::STATUS: "approved" },
+                    fields::PAYMENT_STATUS: "awaiting_payment",
                 }),
             )
             .await
@@ -1401,6 +1540,7 @@ mod tests {
 
         let err = approve_shipping_cost(
             State(state),
+            auth("buyer_1"),
             Json(ApproveShippingRequest {
                 order_id: "ord_np".into(),
                 user_id: "buyer_1".into(),
@@ -1424,16 +1564,16 @@ mod tests {
                 json!({
                     "userId": "buyer_1",
                     "shippingApproval": {
-                        "status": "pending",
+                        fields::STATUS: "pending",
                         "newCostCents": 2000,
                         "actualCost": 20.00,
                         "requestedBy": "seller_1"
                     },
                     fields::SHIPPING_COST_CENTS: 1000,
                     "sellerShippingCosts": { "seller_1": 1000 },
-                    "taxAmountCents": 130,
-                    "totalAmountCents": 1130,
-                    fields::PAYMENT_STATUS: "PENDING",
+                    fields::TAX_AMOUNT_CENTS: 130,
+                    fields::TOTAL_AMOUNT_CENTS: 1130,
+                    fields::PAYMENT_STATUS: "awaiting_payment",
                 }),
             )
             .await
@@ -1441,6 +1581,7 @@ mod tests {
 
         let err = approve_shipping_cost(
             State(state),
+            auth("buyer_1"),
             Json(ApproveShippingRequest {
                 order_id: "ord_max".into(),
                 user_id: "buyer_1".into(),
@@ -1478,18 +1619,18 @@ mod tests {
                 json!({
                     "userId": "buyer_1",
                     "shippingApproval": {
-                        "status": "pending",
+                        fields::STATUS: "pending",
                         "newCostCents": 1100,
                         "actualCost": 11.00,
                         "requestedBy": "seller_1"
                     },
                     fields::SHIPPING_COST_CENTS: 1000,
                     "sellerShippingCosts": { "seller_1": 1000 },
-                    "taxAmountCents": 130,
-                    "totalAmountCents": 1130,
-                    "shippingAddress": { "state": "ON" },
-                    fields::PAYMENT_STATUS: "PENDING",
-                    "paymentIntentId": "pi_mod",
+                    fields::TAX_AMOUNT_CENTS: 130,
+                    fields::TOTAL_AMOUNT_CENTS: 1130,
+                    fields::SHIPPING_ADDRESS: { fields::PROVINCE: "ON" },
+                    fields::PAYMENT_STATUS: "awaiting_payment",
+                    fields::PAYMENT_INTENT_ID: "pi_mod",
                 }),
             )
             .await
@@ -1497,6 +1638,7 @@ mod tests {
 
         let Json(resp) = approve_shipping_cost(
             State(state.clone()),
+            auth("buyer_1"),
             Json(ApproveShippingRequest {
                 order_id: "ord_pi".into(),
                 user_id: "buyer_1".into(),
@@ -1538,18 +1680,18 @@ mod tests {
                 json!({
                     "userId": "buyer_1",
                     "shippingApproval": {
-                        "status": "pending",
+                        fields::STATUS: "pending",
                         "newCostCents": 1100,
                         "actualCost": 11.00,
                         "requestedBy": "seller_1"
                     },
                     fields::SHIPPING_COST_CENTS: 1000,
                     "sellerShippingCosts": { "seller_1": 1000 },
-                    "taxAmountCents": 130,
-                    "totalAmountCents": 1130,
-                    "shippingAddress": { "state": "ON" },
-                    fields::PAYMENT_STATUS: "PENDING",
-                    "paymentIntentId": "pi_broken",
+                    fields::TAX_AMOUNT_CENTS: 130,
+                    fields::TOTAL_AMOUNT_CENTS: 1130,
+                    fields::SHIPPING_ADDRESS: { fields::PROVINCE: "ON" },
+                    fields::PAYMENT_STATUS: "awaiting_payment",
+                    fields::PAYMENT_INTENT_ID: "pi_broken",
                 }),
             )
             .await
@@ -1557,6 +1699,7 @@ mod tests {
 
         let Json(resp) = approve_shipping_cost(
             State(state.clone()),
+            auth("buyer_1"),
             Json(ApproveShippingRequest {
                 order_id: "ord_pif".into(),
                 user_id: "buyer_1".into(),
@@ -1590,18 +1733,18 @@ mod tests {
                 json!({
                     "userId": "buyer_1",
                     "shippingApproval": {
-                        "status": "pending",
+                        fields::STATUS: "pending",
                         "newCostCents": 1100,
                         "actualCost": 11.00,
                         "requestedBy": "seller_1"
                     },
                     fields::SHIPPING_COST_CENTS: 1000,
                     "sellerShippingCosts": { "seller_1": 1000 },
-                    "taxAmountCents": 130,
-                    "totalAmountCents": 1130,
-                    "shippingAddress": { "state": "ON" },
-                    fields::PAYMENT_STATUS: "CAPTURED",
-                    "paymentIntentId": "pi_locked",
+                    fields::TAX_AMOUNT_CENTS: 130,
+                    fields::TOTAL_AMOUNT_CENTS: 1130,
+                    fields::SHIPPING_ADDRESS: { fields::PROVINCE: "ON" },
+                    fields::PAYMENT_STATUS: "captured",
+                    fields::PAYMENT_INTENT_ID: "pi_locked",
                 }),
             )
             .await
@@ -1609,6 +1752,7 @@ mod tests {
 
         let Json(resp) = approve_shipping_cost(
             State(state.clone()),
+            auth("buyer_1"),
             Json(ApproveShippingRequest {
                 order_id: "ord_cap".into(),
                 user_id: "buyer_1".into(),
@@ -1637,10 +1781,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_approve_shipping_buyer_rejects_builds_rejection_data() {
-        // The rejection path (lines 347-432) builds update_data, runs stock restore
-        // via Transaction. We verify the code path is entered by checking the
-        // transaction attempts (SurrealDB mem DB has a MERGE $data serialization
-        // limitation, so we verify the error path on line 430-432 is covered).
         let state = setup_state().await;
         state
             .db
@@ -1650,15 +1790,15 @@ mod tests {
                 json!({
                     "userId": "buyer_1",
                     "shippingApproval": {
-                        "status": "pending",
+                        fields::STATUS: "pending",
                         "newCostCents": 2000,
                         "actualCost": 20.00,
                         "requestedBy": "seller_1"
                     },
                     fields::SHIPPING_COST_CENTS: 1000,
-                    fields::PAYMENT_STATUS: "PENDING",
+                    fields::PAYMENT_STATUS: "awaiting_payment",
                     fields::ITEMS: [
-                        { fields::PRODUCT_ID: "prod_1", "quantity": 2 },
+                        { fields::PRODUCT_ID: "prod_1", fields::QUANTITY: 2 },
                     ],
                 }),
             )
@@ -1669,13 +1809,14 @@ mod tests {
             .upsert_document(
                 collections::PRODUCTS,
                 "prod_1",
-                json!({ "stockQuantity": 5 }),
+                json!({ fields::STOCK_QUANTITY: 5 }),
             )
             .await
             .unwrap();
 
         let result = approve_shipping_cost(
             State(state.clone()),
+            auth("buyer_1"),
             Json(ApproveShippingRequest {
                 order_id: "ord_rej".into(),
                 user_id: "buyer_1".into(),
@@ -1685,19 +1826,32 @@ mod tests {
         )
         .await;
 
-        // The rejection path is entered (covering lines 349-432), transaction
-        // may fail in test env due to SurrealDB mem MERGE limitation
-        match result {
-            Ok(Json(resp)) => {
-                assert!(!resp.approved);
-            }
-            Err(e) => {
-                // Covers the .map_err on line 430-432
-                assert!(
-                    e.to_string().contains("reject shipping") || e.to_string().contains("Database")
-                );
-            }
-        }
+        let Json(resp) = result.unwrap();
+        assert!(!resp.approved);
+
+        let order = state
+            .db
+            .get_document(collections::ORDERS, "ord_rej")
+            .await
+            .unwrap();
+        assert_eq!(
+            order.get(fields::ORDER_STATUS).and_then(|v| v.as_str()),
+            Some("cancelled")
+        );
+        assert_eq!(
+            order.get(fields::STOCK_RESTORED).and_then(|v| v.as_bool()),
+            Some(true)
+        );
+
+        let product = state
+            .db
+            .get_document(collections::PRODUCTS, "prod_1")
+            .await
+            .unwrap();
+        assert_eq!(
+            product.get(fields::STOCK_QUANTITY).and_then(|v| v.as_i64()),
+            Some(7)
+        );
     }
 
     #[tokio::test]
@@ -1721,16 +1875,16 @@ mod tests {
                 json!({
                     "userId": "buyer_1",
                     "shippingApproval": {
-                        "status": "pending",
+                        fields::STATUS: "pending",
                         "newCostCents": 2000,
                         "actualCost": 20.00,
                         "requestedBy": "seller_1"
                     },
                     fields::SHIPPING_COST_CENTS: 1000,
-                    fields::PAYMENT_STATUS: "CAPTURED",
-                    "paymentIntentId": "pi_captured",
+                    fields::PAYMENT_STATUS: "captured",
+                    fields::PAYMENT_INTENT_ID: "pi_captured",
                     fields::ITEMS: [
-                        { fields::PRODUCT_ID: "prod_2", "quantity": 1 },
+                        { fields::PRODUCT_ID: "prod_2", fields::QUANTITY: 1 },
                     ],
                 }),
             )
@@ -1741,13 +1895,14 @@ mod tests {
             .upsert_document(
                 collections::PRODUCTS,
                 "prod_2",
-                json!({ "stockQuantity": 3 }),
+                json!({ fields::STOCK_QUANTITY: 3 }),
             )
             .await
             .unwrap();
 
         let result = approve_shipping_cost(
             State(state.clone()),
+            auth("buyer_1"),
             Json(ApproveShippingRequest {
                 order_id: "ord_rejcap".into(),
                 user_id: "buyer_1".into(),
@@ -1757,13 +1912,28 @@ mod tests {
         )
         .await;
 
-        // Covers refund path (lines 361-392) + transaction path
-        match result {
-            Ok(Json(resp)) => assert!(!resp.approved),
-            Err(e) => {
-                assert!(e.to_string().contains("Database") || e.to_string().contains("reject"))
-            }
-        }
+        let Json(resp) = result.unwrap();
+        assert!(!resp.approved);
+
+        let order = state
+            .db
+            .get_document(collections::ORDERS, "ord_rejcap")
+            .await
+            .unwrap();
+        assert_eq!(
+            order.get(fields::PAYMENT_STATUS).and_then(|v| v.as_str()),
+            Some("refunded")
+        );
+
+        let product = state
+            .db
+            .get_document(collections::PRODUCTS, "prod_2")
+            .await
+            .unwrap();
+        assert_eq!(
+            product.get(fields::STOCK_QUANTITY).and_then(|v| v.as_i64()),
+            Some(4)
+        );
     }
 
     #[tokio::test]
@@ -1787,16 +1957,16 @@ mod tests {
                 json!({
                     "userId": "buyer_1",
                     "shippingApproval": {
-                        "status": "pending",
+                        fields::STATUS: "pending",
                         "newCostCents": 2000,
                         "actualCost": 20.00,
                         "requestedBy": "seller_1"
                     },
                     fields::SHIPPING_COST_CENTS: 1000,
-                    fields::PAYMENT_STATUS: "CAPTURED",
-                    "paymentIntentId": "pi_fail",
+                    fields::PAYMENT_STATUS: "captured",
+                    fields::PAYMENT_INTENT_ID: "pi_fail",
                     fields::ITEMS: [
-                        { fields::PRODUCT_ID: "prod_3", "quantity": 1 },
+                        { fields::PRODUCT_ID: "prod_3", fields::QUANTITY: 1 },
                     ],
                 }),
             )
@@ -1807,13 +1977,14 @@ mod tests {
             .upsert_document(
                 collections::PRODUCTS,
                 "prod_3",
-                json!({ "stockQuantity": 5 }),
+                json!({ fields::STOCK_QUANTITY: 5 }),
             )
             .await
             .unwrap();
 
         let result = approve_shipping_cost(
             State(state.clone()),
+            auth("buyer_1"),
             Json(ApproveShippingRequest {
                 order_id: "ord_rejfail".into(),
                 user_id: "buyer_1".into(),
@@ -1823,13 +1994,32 @@ mod tests {
         )
         .await;
 
-        // Covers refund failure path (lines 376-392) + transaction
-        match result {
-            Ok(Json(resp)) => assert!(!resp.approved),
-            Err(e) => {
-                assert!(e.to_string().contains("Database") || e.to_string().contains("reject"))
-            }
-        }
+        let Json(resp) = result.unwrap();
+        assert!(!resp.approved);
+
+        let order = state
+            .db
+            .get_document(collections::ORDERS, "ord_rejfail")
+            .await
+            .unwrap();
+        assert_eq!(
+            order.get("requiresManualReview").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            order.get("manualReviewReason").and_then(|v| v.as_str()),
+            Some("Buyer rejected shipping but refund failed. Requires manual refund.")
+        );
+
+        let product = state
+            .db
+            .get_document(collections::PRODUCTS, "prod_3")
+            .await
+            .unwrap();
+        assert_eq!(
+            product.get(fields::STOCK_QUANTITY).and_then(|v| v.as_i64()),
+            Some(6)
+        );
     }
 
     #[tokio::test]
@@ -1840,7 +2030,7 @@ mod tests {
             .upsert_document(
                 collections::PRODUCTS,
                 "prod_phys",
-                json!({ "stockQuantity": 2 }),
+                json!({ fields::STOCK_QUANTITY: 2 }),
             )
             .await
             .unwrap();
@@ -1851,12 +2041,12 @@ mod tests {
                 "ord_dig",
                 json!({
                     "userId": "buyer_1",
-                    "shippingApproval": { "status": "pending" },
+                    "shippingApproval": { fields::STATUS: "pending" },
                     fields::SHIPPING_COST_CENTS: 500,
-                    fields::PAYMENT_STATUS: "PENDING",
+                    fields::PAYMENT_STATUS: "awaiting_payment",
                     fields::ITEMS: [
-                        { fields::PRODUCT_ID: "prod_phys", "quantity": 1 },
-                        { fields::PRODUCT_ID: "prod_dig", "quantity": 1, "isDigital": true },
+                        { fields::PRODUCT_ID: "prod_phys", fields::QUANTITY: 1 },
+                        { fields::PRODUCT_ID: "prod_dig", fields::QUANTITY: 1, fields::IS_DIGITAL: true },
                     ],
                 }),
             )
@@ -1865,6 +2055,7 @@ mod tests {
 
         let result = approve_shipping_cost(
             State(state.clone()),
+            auth("buyer_1"),
             Json(ApproveShippingRequest {
                 order_id: "ord_dig".into(),
                 user_id: "buyer_1".into(),
@@ -1874,13 +2065,75 @@ mod tests {
         )
         .await;
 
-        // Covers digital item skip (lines 407-413) + transaction
-        match result {
-            Ok(Json(resp)) => assert!(!resp.approved),
-            Err(e) => {
-                assert!(e.to_string().contains("Database") || e.to_string().contains("reject"))
-            }
-        }
+        let Json(resp) = result.unwrap();
+        assert!(!resp.approved);
+
+        let product = state
+            .db
+            .get_document(collections::PRODUCTS, "prod_phys")
+            .await
+            .unwrap();
+        assert_eq!(
+            product.get(fields::STOCK_QUANTITY).and_then(|v| v.as_i64()),
+            Some(3)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_approve_shipping_buyer_rejects_skips_stock_when_already_restored() {
+        let state = setup_state().await;
+        state
+            .db
+            .upsert_document(
+                collections::PRODUCTS,
+                "prod_done",
+                json!({ fields::STOCK_QUANTITY: 4 }),
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .upsert_document(
+                collections::ORDERS,
+                "ord_done",
+                json!({
+                    "userId": "buyer_1",
+                    fields::STOCK_RESTORED: true,
+                    "shippingApproval": { fields::STATUS: "pending" },
+                    fields::SHIPPING_COST_CENTS: 500,
+                    fields::PAYMENT_STATUS: "awaiting_payment",
+                    fields::ITEMS: [
+                        { fields::PRODUCT_ID: "prod_done", fields::QUANTITY: 2 },
+                    ],
+                }),
+            )
+            .await
+            .unwrap();
+
+        let Json(resp) = approve_shipping_cost(
+            State(state.clone()),
+            auth("buyer_1"),
+            Json(ApproveShippingRequest {
+                order_id: "ord_done".into(),
+                user_id: "buyer_1".into(),
+                approved: false,
+                expected_cost_cents: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(!resp.approved);
+
+        let product = state
+            .db
+            .get_document(collections::PRODUCTS, "prod_done")
+            .await
+            .unwrap();
+        assert_eq!(
+            product.get(fields::STOCK_QUANTITY).and_then(|v| v.as_i64()),
+            Some(4)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1892,10 +2145,11 @@ mod tests {
         let state = setup_state().await;
         let err = update_shipping_cost(
             State(state),
+            auth("seller_1"),
             Json(UpdateShippingCostRequest {
                 order_id: "ord_1".into(),
                 user_id: "seller_1".into(),
-                new_shipping_cost: -5.0,
+                new_shipping_cost_cents: -500,
                 reason: None,
             }),
         )
@@ -1913,8 +2167,8 @@ mod tests {
                 collections::ORDERS,
                 "ord_bad",
                 json!({
-                    "orderStatus": "DELIVERED",
-                    fields::PAYMENT_STATUS: "CAPTURED",
+                    fields::ORDER_STATUS: "delivered",
+                    fields::PAYMENT_STATUS: "captured",
                     fields::ITEMS: [
                         { fields::SELLER_ID: "seller_1", fields::PRODUCT_ID: "p1" }
                     ],
@@ -1925,10 +2179,11 @@ mod tests {
 
         let err = update_shipping_cost(
             State(state),
+            auth("seller_1"),
             Json(UpdateShippingCostRequest {
                 order_id: "ord_bad".into(),
                 user_id: "seller_1".into(),
-                new_shipping_cost: 10.0,
+                new_shipping_cost_cents: 1000,
                 reason: None,
             }),
         )
@@ -1946,8 +2201,8 @@ mod tests {
                 collections::ORDERS,
                 "ord_pay",
                 json!({
-                    "orderStatus": "CONFIRMED",
-                    fields::PAYMENT_STATUS: "REFUNDED",
+                    fields::ORDER_STATUS: "confirmed",
+                    fields::PAYMENT_STATUS: "refunded",
                     fields::ITEMS: [
                         { fields::SELLER_ID: "seller_1", fields::PRODUCT_ID: "p1" }
                     ],
@@ -1958,10 +2213,11 @@ mod tests {
 
         let err = update_shipping_cost(
             State(state),
+            auth("seller_1"),
             Json(UpdateShippingCostRequest {
                 order_id: "ord_pay".into(),
                 user_id: "seller_1".into(),
-                new_shipping_cost: 10.0,
+                new_shipping_cost_cents: 1000,
                 reason: None,
             }),
         )
@@ -1995,17 +2251,17 @@ mod tests {
                 collections::ORDERS,
                 "ord_auto",
                 json!({
-                    "orderStatus": "CONFIRMED",
-                    fields::PAYMENT_STATUS: "AUTHORIZED",
-                    "paymentIntentId": "pi_auto",
+                    fields::ORDER_STATUS: "confirmed",
+                    fields::PAYMENT_STATUS: "authorized",
+                    fields::PAYMENT_INTENT_ID: "pi_auto",
                     fields::ITEMS: [
                         { fields::SELLER_ID: "seller_1", fields::PRODUCT_ID: "p1" }
                     ],
                     fields::SHIPPING_COST_CENTS: 1000,
                     "sellerShippingCosts": { "seller_1": 1000 },
-                    "taxAmountCents": 130,
-                    "totalAmountCents": 1130,
-                    "shippingAddress": { "state": "BC" },
+                    fields::TAX_AMOUNT_CENTS: 130,
+                    fields::TOTAL_AMOUNT_CENTS: 1130,
+                    fields::SHIPPING_ADDRESS: { fields::PROVINCE: "BC" },
                 }),
             )
             .await
@@ -2013,10 +2269,11 @@ mod tests {
 
         let Json(resp) = update_shipping_cost(
             State(state.clone()),
+            auth("seller_1"),
             Json(UpdateShippingCostRequest {
                 order_id: "ord_auto".into(),
                 user_id: "seller_1".into(),
-                new_shipping_cost: 11.0, // 10% increase, auto-approve
+                new_shipping_cost_cents: 1100, // 10% increase, auto-approve
                 reason: Some("heavier".into()),
             }),
         )
@@ -2047,17 +2304,17 @@ mod tests {
                 collections::ORDERS,
                 "ord_aub",
                 json!({
-                    "orderStatus": "CONFIRMED",
-                    fields::PAYMENT_STATUS: "AUTHORIZED",
-                    "paymentIntentId": "pi_auth",
+                    fields::ORDER_STATUS: "confirmed",
+                    fields::PAYMENT_STATUS: "authorized",
+                    fields::PAYMENT_INTENT_ID: "pi_auth",
                     fields::ITEMS: [
                         { fields::SELLER_ID: "seller_1", fields::PRODUCT_ID: "p1" }
                     ],
                     fields::SHIPPING_COST_CENTS: 1000,
                     "sellerShippingCosts": { "seller_1": 1000 },
-                    "taxAmountCents": 130,
-                    "totalAmountCents": 1130,
-                    "shippingAddress": { "state": "ON" },
+                    fields::TAX_AMOUNT_CENTS: 130,
+                    fields::TOTAL_AMOUNT_CENTS: 1130,
+                    fields::SHIPPING_ADDRESS: { fields::PROVINCE: "ON" },
                 }),
             )
             .await
@@ -2065,10 +2322,11 @@ mod tests {
 
         let Json(resp) = update_shipping_cost(
             State(state.clone()),
+            auth("seller_1"),
             Json(UpdateShippingCostRequest {
                 order_id: "ord_aub".into(),
                 user_id: "seller_1".into(),
-                new_shipping_cost: 11.0,
+                new_shipping_cost_cents: 1100,
                 reason: None,
             }),
         )

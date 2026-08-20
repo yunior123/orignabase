@@ -6,6 +6,8 @@ pub mod status;
 use crate::HandlersState;
 use axum::Router;
 
+/// Aggregates all order-related routers: status updates, refunds, shipping,
+/// and returns.
 pub fn router(state: HandlersState) -> Router {
     Router::new()
         .merge(status::router(state.clone()))

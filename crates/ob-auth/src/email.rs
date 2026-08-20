@@ -4,6 +4,7 @@ use lettre::{
     transport::smtp::authentication::Credentials,
 };
 use ob_core::{Error, Result};
+use ob_database::fields;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -25,13 +26,33 @@ use std::collections::HashMap;
 //   {{ .UserName }}     — display name (if available)
 //   {{ .ExpiresIn }}    — human-readable expiry (e.g. "24 hours")
 
-/// Well-known template names.
+/// Well-known template names (English).
 pub const TEMPLATE_VERIFY_EMAIL: &str = "verify_email";
 pub const TEMPLATE_RESET_PASSWORD: &str = "reset_password";
 pub const TEMPLATE_MFA_ALERT: &str = "mfa_alert";
 pub const TEMPLATE_MAGIC_LINK: &str = "magic_link";
 pub const TEMPLATE_EMAIL_CHANGE: &str = "email_change";
 pub const TEMPLATE_WELCOME: &str = "welcome";
+
+/// Well-known template names (French — Bill 96 / Quebec compliance).
+pub const TEMPLATE_VERIFY_EMAIL_FR: &str = "verify_email_fr";
+pub const TEMPLATE_RESET_PASSWORD_FR: &str = "reset_password_fr";
+pub const TEMPLATE_MFA_ALERT_FR: &str = "mfa_alert_fr";
+pub const TEMPLATE_MAGIC_LINK_FR: &str = "magic_link_fr";
+pub const TEMPLATE_EMAIL_CHANGE_FR: &str = "email_change_fr";
+pub const TEMPLATE_WELCOME_FR: &str = "welcome_fr";
+
+/// CASL-compliant footer appended to all auth emails (bilingual).
+const CASL_FOOTER_HTML: &str = r#"
+<div style="margin-top:32px;padding-top:16px;border-top:1px solid #eee;font-size:12px;color:#666;text-align:center;">
+  <p>Origna Ventures Inc. | Montréal, QC, Canada</p>
+  <p><a href="https://orignagta.ca/unsubscribe" style="color:#2563eb;">Unsubscribe / Se désabonner</a> |
+     <a href="mailto:support@orignagta.ca" style="color:#2563eb;">support@orignagta.ca</a></p>
+  <p>This message was sent in compliance with CASL (Canada's Anti-Spam Legislation).<br>
+     Ce message a été envoyé conformément à la LCAP (Loi canadienne anti-pourriel).</p>
+</div>"#;
+
+const CASL_FOOTER_TEXT: &str = "\n\n---\nOrigna Ventures Inc. | Montréal, QC, Canada\nUnsubscribe / Se désabonner: https://orignagta.ca/unsubscribe\nsupport@orignagta.ca\nThis message was sent in compliance with CASL. / Ce message a été envoyé conformément à la LCAP.";
 
 /// An email template with subject, HTML body, and plain text body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +91,46 @@ fn replace_vars(template: &str, vars: &HashMap<String, String>) -> String {
     result
 }
 
+/// Insert the CASL footer just before the closing `</body>` tag.
+/// Falls back to appending at the end if no `</body>` is found.
+fn append_casl_footer_html(html: &str) -> String {
+    if let Some(pos) = html.rfind("</body>") {
+        let mut result = String::with_capacity(html.len() + CASL_FOOTER_HTML.len());
+        result.push_str(&html[..pos]);
+        result.push_str(CASL_FOOTER_HTML);
+        result.push_str(&html[pos..]);
+        result
+    } else {
+        [html, CASL_FOOTER_HTML].concat()
+    }
+}
+
+/// Resolve the template name for the user's preferred language.
+/// Returns the French variant if `lang == "fr"` and a French template exists.
+pub fn template_for_lang<'a>(base_name: &'a str, lang: &str) -> &'a str {
+    if lang == "fr" {
+        match base_name {
+            TEMPLATE_VERIFY_EMAIL => TEMPLATE_VERIFY_EMAIL_FR,
+            TEMPLATE_RESET_PASSWORD => TEMPLATE_RESET_PASSWORD_FR,
+            TEMPLATE_MFA_ALERT => TEMPLATE_MFA_ALERT_FR,
+            TEMPLATE_MAGIC_LINK => TEMPLATE_MAGIC_LINK_FR,
+            TEMPLATE_EMAIL_CHANGE => TEMPLATE_EMAIL_CHANGE_FR,
+            TEMPLATE_WELCOME => TEMPLATE_WELCOME_FR,
+            _ => base_name,
+        }
+    } else {
+        match base_name {
+            TEMPLATE_VERIFY_EMAIL => TEMPLATE_VERIFY_EMAIL,
+            TEMPLATE_RESET_PASSWORD => TEMPLATE_RESET_PASSWORD,
+            TEMPLATE_MFA_ALERT => TEMPLATE_MFA_ALERT,
+            TEMPLATE_MAGIC_LINK => TEMPLATE_MAGIC_LINK,
+            TEMPLATE_EMAIL_CHANGE => TEMPLATE_EMAIL_CHANGE,
+            TEMPLATE_WELCOME => TEMPLATE_WELCOME,
+            _ => base_name,
+        }
+    }
+}
+
 // ── Default Templates ──────────────────────────────────────────────
 
 pub fn default_templates() -> Vec<EmailTemplate> {
@@ -80,6 +141,13 @@ pub fn default_templates() -> Vec<EmailTemplate> {
         default_magic_link(),
         default_email_change(),
         default_welcome(),
+        // French (Bill 96 / Quebec compliance)
+        default_verify_email_fr(),
+        default_reset_password_fr(),
+        default_mfa_alert_fr(),
+        default_magic_link_fr(),
+        default_email_change_fr(),
+        default_welcome_fr(),
     ]
 }
 
@@ -267,6 +335,62 @@ fn default_welcome() -> EmailTemplate {
     }
 }
 
+// ── French Templates (Bill 96 / Quebec compliance) ─────────────────
+
+fn default_verify_email_fr() -> EmailTemplate {
+    EmailTemplate {
+        name: TEMPLATE_VERIFY_EMAIL_FR.into(),
+        subject: "Vérifiez votre courriel — {{ .AppName }}".into(),
+        text: "Bienvenue sur {{ .AppName }} !\n\nVeuillez vérifier votre courriel :\n\n{{ .ActionURL }}\n\nCe lien expire dans {{ .ExpiresIn }}.".into(),
+        html: r#"<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"></head><body style="font-family:sans-serif;margin:0;padding:0;background:#f5f5f5"><table width="100%" cellpadding="0" cellspacing="0" style="padding:40px 0"><tr><td align="center"><table width="600" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;padding:40px;border:1px solid #e0e0e0"><tr><td><h2 style="margin:0 0 20px;color:#1a1a1a">Vérifiez votre courriel</h2><p style="color:#333;line-height:1.6;margin:0 0 24px">Cliquez ci-dessous pour vérifier votre adresse courriel.</p><p style="margin:0 0 24px"><a href="{{ .ActionURL }}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 32px;border-radius:6px;text-decoration:none;font-weight:600">Vérifier</a></p><p style="color:#999;font-size:13px">Ce lien expire dans {{ .ExpiresIn }}.</p></td></tr></table></td></tr></table></body></html>"#.into(),
+    }
+}
+
+fn default_reset_password_fr() -> EmailTemplate {
+    EmailTemplate {
+        name: TEMPLATE_RESET_PASSWORD_FR.into(),
+        subject: "Réinitialiser votre mot de passe — {{ .AppName }}".into(),
+        text: "Réinitialisez votre mot de passe :\n\n{{ .ActionURL }}\n\nCe lien expire dans {{ .ExpiresIn }}.".into(),
+        html: r#"<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"></head><body style="font-family:sans-serif;margin:0;padding:0;background:#f5f5f5"><table width="100%" cellpadding="0" cellspacing="0" style="padding:40px 0"><tr><td align="center"><table width="600" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;padding:40px;border:1px solid #e0e0e0"><tr><td><h2 style="margin:0 0 20px;color:#1a1a1a">Réinitialiser le mot de passe</h2><p style="color:#333;line-height:1.6;margin:0 0 24px">Cliquez ci-dessous pour réinitialiser votre mot de passe.</p><p style="margin:0 0 24px"><a href="{{ .ActionURL }}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 32px;border-radius:6px;text-decoration:none;font-weight:600">Réinitialiser</a></p><p style="color:#999;font-size:13px">Ce lien expire dans {{ .ExpiresIn }}.</p></td></tr></table></td></tr></table></body></html>"#.into(),
+    }
+}
+
+fn default_mfa_alert_fr() -> EmailTemplate {
+    EmailTemplate {
+        name: TEMPLATE_MFA_ALERT_FR.into(),
+        subject: "Alerte de sécurité — {{ .AppName }}".into(),
+        text: "Un changement MFA a été détecté sur votre compte {{ .AppName }}.\n\nSi ce n'était pas vous, sécurisez votre compte immédiatement.".into(),
+        html: r#"<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"></head><body style="font-family:sans-serif;margin:0;padding:0;background:#f5f5f5"><table width="100%" cellpadding="0" cellspacing="0" style="padding:40px 0"><tr><td align="center"><table width="600" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;padding:40px;border:1px solid #e0e0e0"><tr><td><h2 style="margin:0 0 20px;color:#c0392b">Alerte de sécurité</h2><p style="color:#333;line-height:1.6;margin:0 0 24px">Un changement MFA a été détecté sur votre compte.</p><p style="color:#999;font-size:13px">Si ce n'était pas vous, sécurisez votre compte immédiatement.</p></td></tr></table></td></tr></table></body></html>"#.into(),
+    }
+}
+
+fn default_magic_link_fr() -> EmailTemplate {
+    EmailTemplate {
+        name: TEMPLATE_MAGIC_LINK_FR.into(),
+        subject: "Votre lien de connexion — {{ .AppName }}".into(),
+        text: "Connectez-vous à {{ .AppName }} :\n\n{{ .ActionURL }}\n\nCe lien expire dans {{ .ExpiresIn }}.".into(),
+        html: r#"<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"></head><body style="font-family:sans-serif;margin:0;padding:0;background:#f5f5f5"><table width="100%" cellpadding="0" cellspacing="0" style="padding:40px 0"><tr><td align="center"><table width="600" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;padding:40px;border:1px solid #e0e0e0"><tr><td><h2 style="margin:0 0 20px;color:#1a1a1a">Lien de connexion</h2><p style="color:#333;line-height:1.6;margin:0 0 24px">Cliquez ci-dessous pour vous connecter.</p><p style="margin:0 0 24px"><a href="{{ .ActionURL }}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 32px;border-radius:6px;text-decoration:none;font-weight:600">Se connecter</a></p><p style="color:#999;font-size:13px">Ce lien expire dans {{ .ExpiresIn }}.</p></td></tr></table></td></tr></table></body></html>"#.into(),
+    }
+}
+
+fn default_email_change_fr() -> EmailTemplate {
+    EmailTemplate {
+        name: TEMPLATE_EMAIL_CHANGE_FR.into(),
+        subject: "Confirmez le changement de courriel — {{ .AppName }}".into(),
+        text: "Confirmez le changement de courriel :\n\n{{ .ActionURL }}\n\nCe lien expire dans {{ .ExpiresIn }}.".into(),
+        html: r#"<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"></head><body style="font-family:sans-serif;margin:0;padding:0;background:#f5f5f5"><table width="100%" cellpadding="0" cellspacing="0" style="padding:40px 0"><tr><td align="center"><table width="600" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;padding:40px;border:1px solid #e0e0e0"><tr><td><h2 style="margin:0 0 20px;color:#1a1a1a">Changement de courriel</h2><p style="color:#333;line-height:1.6;margin:0 0 24px">Confirmez votre nouvelle adresse courriel.</p><p style="margin:0 0 24px"><a href="{{ .ActionURL }}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 32px;border-radius:6px;text-decoration:none;font-weight:600">Confirmer</a></p><p style="color:#999;font-size:13px">Ce lien expire dans {{ .ExpiresIn }}.</p></td></tr></table></td></tr></table></body></html>"#.into(),
+    }
+}
+
+fn default_welcome_fr() -> EmailTemplate {
+    EmailTemplate {
+        name: TEMPLATE_WELCOME_FR.into(),
+        subject: "Bienvenue sur {{ .AppName }} !".into(),
+        text: "Bienvenue sur {{ .AppName }}, {{ .UserName }} !\n\nVotre compte a été créé.\n\nCommencez : {{ .SiteURL }}".into(),
+        html: r#"<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"></head><body style="font-family:sans-serif;margin:0;padding:0;background:#f5f5f5"><table width="100%" cellpadding="0" cellspacing="0" style="padding:40px 0"><tr><td align="center"><table width="600" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;padding:40px;border:1px solid #e0e0e0"><tr><td><h2 style="margin:0 0 20px;color:#1a1a1a">Bienvenue sur {{ .AppName }} !</h2><p style="color:#333;line-height:1.6;margin:0 0 24px">Bonjour {{ .UserName }}, votre compte a été créé.</p><p style="margin:0 0 24px"><a href="{{ .SiteURL }}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 32px;border-radius:6px;text-decoration:none;font-weight:600">Commencer</a></p></td></tr></table></td></tr></table></body></html>"#.into(),
+    }
+}
+
 // ── Email Config ───────────────────────────────────────────────────
 
 /// Configuration for the email service.
@@ -274,7 +398,7 @@ fn default_welcome() -> EmailTemplate {
 /// ## Deliverability Checklist (DNS — not handled in code)
 ///
 /// To avoid spam folders, configure these DNS records for your sending domain:
-/// 1. **SPF**: `v=spf1 include:spf.mailjet.com ~all` (adjust for your provider)
+/// 1. **SPF**: `v=spf1 include:spf.email.com ~all` (adjust for your provider)
 /// 2. **DKIM**: Add the TXT record your SMTP provider gives you
 /// 3. **DMARC**: `v=DMARC1; p=quarantine; rua=mailto:dmarc@yourdomain.com`
 /// 4. **Return-Path**: Must match the From domain (automatic with most providers)
@@ -283,9 +407,9 @@ fn default_welcome() -> EmailTemplate {
 ///
 /// ## Provider Examples
 ///
-/// ### Mailjet (recommended)
+/// ### Postal (recommended)
 /// ```env
-/// OB_EMAIL__SMTP_HOST=in-v3.mailjet.com
+/// OB_EMAIL__SMTP_HOST=in-v3.email.com
 /// OB_EMAIL__SMTP_PORT=587
 /// OB_EMAIL__SMTP_USER=<your-api-key>
 /// OB_EMAIL__SMTP_PASSWORD=<your-secret-key>
@@ -405,14 +529,19 @@ impl EmailService {
     async fn get_template(&self, name: &str) -> EmailTemplate {
         // Try DB first
         if let Some(ref db) = self.db
-            && let Ok(results) = db
-                .query_bind(
-                    "SELECT * FROM _email_templates WHERE name = $name",
-                    serde_json::json!({ "name": name }),
-                )
-                .await
-            && let Some(doc) = results.first()
-            && let Ok(template) = serde_json::from_value::<EmailTemplate>(doc.clone())
+            && let Ok(doc) = db.get_document("_email_templates", name).await
+            && !doc.is_null()
+            && let Ok(template) = serde_json::from_value::<EmailTemplate>(doc)
+        {
+            return template;
+        }
+
+        if let Some(ref db) = self.db
+            && let Ok(results) = db.list_documents("_email_templates", None, None).await
+            && let Some(doc) = results
+                .into_iter()
+                .find(|row| row.get(fields::NAME).and_then(|value| value.as_str()) == Some(name))
+            && let Ok(template) = serde_json::from_value::<EmailTemplate>(doc)
         {
             return template;
         }
@@ -440,13 +569,16 @@ impl EmailService {
     }
 
     /// Send a verification email with a token link.
+    /// Uses French template if `lang == "fr"` (Bill 96 compliance).
     pub async fn send_verification_email(
         &self,
         to: &str,
         token: &str,
         base_url: &str,
+        lang: &str,
     ) -> Result<()> {
-        let template = self.get_template(TEMPLATE_VERIFY_EMAIL).await;
+        let tpl_name = template_for_lang(TEMPLATE_VERIFY_EMAIL, lang);
+        let template = self.get_template(tpl_name).await;
         let mut vars = self.base_vars();
         vars.insert(
             "ActionURL".into(),
@@ -454,7 +586,12 @@ impl EmailService {
         );
         vars.insert("Token".into(), token.into());
         vars.insert("Email".into(), to.into());
-        vars.insert("ExpiresIn".into(), "24 hours".into());
+        let expires = if lang == "fr" {
+            "24 heures"
+        } else {
+            "24 hours"
+        };
+        vars.insert("ExpiresIn".into(), expires.into());
         vars.insert("SiteURL".into(), base_url.into());
 
         let rendered = template.render(&vars);
@@ -463,8 +600,16 @@ impl EmailService {
     }
 
     /// Send a password reset email.
-    pub async fn send_reset_email(&self, to: &str, token: &str, base_url: &str) -> Result<()> {
-        let template = self.get_template(TEMPLATE_RESET_PASSWORD).await;
+    /// Uses French template if `lang == "fr"`.
+    pub async fn send_reset_email(
+        &self,
+        to: &str,
+        token: &str,
+        base_url: &str,
+        lang: &str,
+    ) -> Result<()> {
+        let tpl_name = template_for_lang(TEMPLATE_RESET_PASSWORD, lang);
+        let template = self.get_template(tpl_name).await;
         let mut vars = self.base_vars();
         vars.insert(
             "ActionURL".into(),
@@ -472,7 +617,8 @@ impl EmailService {
         );
         vars.insert("Token".into(), token.into());
         vars.insert("Email".into(), to.into());
-        vars.insert("ExpiresIn".into(), "1 hour".into());
+        let expires = if lang == "fr" { "1 heure" } else { "1 hour" };
+        vars.insert("ExpiresIn".into(), expires.into());
         vars.insert("SiteURL".into(), base_url.into());
 
         let rendered = template.render(&vars);
@@ -481,10 +627,21 @@ impl EmailService {
     }
 
     /// Send an MFA change alert.
-    pub async fn send_mfa_alert(&self, to: &str, action: &str) -> Result<()> {
-        let template = self.get_template(TEMPLATE_MFA_ALERT).await;
+    /// Uses French template if `lang == "fr"`.
+    pub async fn send_mfa_alert(&self, to: &str, action: &str, lang: &str) -> Result<()> {
+        let tpl_name = template_for_lang(TEMPLATE_MFA_ALERT, lang);
+        let template = self.get_template(tpl_name).await;
         let mut vars = self.base_vars();
-        vars.insert("Action".into(), action.into());
+        let action_label = if lang == "fr" {
+            match action {
+                "enabled" => "activée",
+                "disabled" => "désactivée",
+                _ => action,
+            }
+        } else {
+            action
+        };
+        vars.insert("Action".into(), action_label.into());
         vars.insert("Email".into(), to.into());
 
         let rendered = template.render(&vars);
@@ -493,8 +650,16 @@ impl EmailService {
     }
 
     /// Send a magic link sign-in email.
-    pub async fn send_magic_link_email(&self, to: &str, token: &str, base_url: &str) -> Result<()> {
-        let template = self.get_template(TEMPLATE_MAGIC_LINK).await;
+    /// Uses French template if `lang == "fr"`.
+    pub async fn send_magic_link_email(
+        &self,
+        to: &str,
+        token: &str,
+        base_url: &str,
+        lang: &str,
+    ) -> Result<()> {
+        let tpl_name = template_for_lang(TEMPLATE_MAGIC_LINK, lang);
+        let template = self.get_template(tpl_name).await;
         let mut vars = self.base_vars();
         vars.insert(
             "ActionURL".into(),
@@ -511,8 +676,10 @@ impl EmailService {
     }
 
     /// Send a welcome email to a newly created user.
-    pub async fn send_welcome_email(&self, to: &str) -> Result<()> {
-        let template = self.get_template(TEMPLATE_WELCOME).await;
+    /// Uses French template if `lang == "fr"`.
+    pub async fn send_welcome_email(&self, to: &str, lang: &str) -> Result<()> {
+        let tpl_name = template_for_lang(TEMPLATE_WELCOME, lang);
+        let template = self.get_template(tpl_name).await;
         let mut vars = self.base_vars();
         vars.insert("Email".into(), to.to_string());
         vars.insert(
@@ -526,7 +693,11 @@ impl EmailService {
     }
 
     /// Send a multipart HTML + plain text email with proper deliverability headers.
+    /// CASL footer is automatically appended to all auth emails.
     async fn send_multipart(&self, to: &str, subject: &str, plain: &str, html: &str) -> Result<()> {
+        // Append CASL footer for compliance
+        let plain = [plain, CASL_FOOTER_TEXT].concat();
+        let html = append_casl_footer_html(html);
         let mut builder = Message::builder()
             .from(
                 self.config
@@ -584,9 +755,8 @@ impl EmailService {
             return Ok(defaults);
         };
 
-        let custom: Vec<EmailTemplate> = db
-            .query_raw("SELECT * FROM _email_templates")
-            .await?
+        let raw = db.list_documents("_email_templates", None, None).await?;
+        let custom: Vec<EmailTemplate> = raw
             .into_iter()
             .filter_map(|v| serde_json::from_value(v).ok())
             .collect();
@@ -617,16 +787,10 @@ impl EmailService {
             .as_ref()
             .ok_or_else(|| Error::Internal("Database not configured for email templates".into()))?;
 
-        // Upsert: delete existing, then create
-        let _ = db
-            .query_bind(
-                "DELETE FROM _email_templates WHERE name = $name",
-                serde_json::json!({ "name": template.name }),
-            )
-            .await;
-
-        db.create_document(
+        let template_name = template.name.clone();
+        db.upsert_document(
             "_email_templates",
+            &template_name,
             serde_json::to_value(&template)
                 .map_err(|e| Error::Internal(format!("Template serialization failed: {e}")))?,
         )
@@ -642,12 +806,7 @@ impl EmailService {
             .as_ref()
             .ok_or_else(|| Error::Internal("Database not configured for email templates".into()))?;
 
-        let _ = db
-            .query_bind(
-                "DELETE FROM _email_templates WHERE name = $name",
-                serde_json::json!({ "name": name }),
-            )
-            .await;
+        let _ = db.delete_document("_email_templates", name).await;
 
         default_templates()
             .into_iter()
@@ -659,6 +818,9 @@ impl EmailService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_replace_vars_spaced() {
@@ -690,6 +852,29 @@ mod tests {
     }
 
     #[test]
+    fn test_replace_vars_empty_template() {
+        let vars = HashMap::new();
+        let result = replace_vars("", &vars);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_replace_vars_no_placeholders() {
+        let mut vars = HashMap::new();
+        vars.insert("Key".into(), "val".into());
+        let result = replace_vars("No placeholders here", &vars);
+        assert_eq!(result, "No placeholders here");
+    }
+
+    #[test]
+    fn test_replace_vars_multiple_same_key() {
+        let mut vars = HashMap::new();
+        vars.insert("Name".into(), "Alice".into());
+        let result = replace_vars("{{ .Name }} and {{ .Name }}", &vars);
+        assert_eq!(result, "Alice and Alice");
+    }
+
+    #[test]
     fn test_template_render() {
         let template = EmailTemplate {
             name: "test".into(),
@@ -708,7 +893,7 @@ mod tests {
     #[test]
     fn test_default_templates_count() {
         let templates = default_templates();
-        assert_eq!(templates.len(), 6);
+        assert_eq!(templates.len(), 12); // 6 English + 6 French
     }
 
     #[test]
@@ -726,7 +911,6 @@ mod tests {
     #[test]
     fn test_default_templates_have_variables() {
         for template in default_templates() {
-            // Every template should reference AppName
             assert!(
                 template.subject.contains("{{ .AppName }}")
                     || template.subject.contains("{{.AppName}}"),
@@ -757,7 +941,7 @@ mod tests {
     fn test_email_config_from_parts() {
         let config = EmailConfig {
             from: "MyApp <noreply@myapp.com>".into(),
-            smtp_host: "in-v3.mailjet.com".into(),
+            smtp_host: "in-v3.email.com".into(),
             smtp_port: 587,
             smtp_user: "api-key".into(),
             smtp_password: "secret-key".into(),
@@ -787,6 +971,24 @@ mod tests {
     }
 
     #[test]
+    fn test_email_service_with_db() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let db = rt.block_on(ob_database::DatabaseClient::new_mem());
+        let config = EmailConfig {
+            from: "Test <test@test.com>".into(),
+            smtp_host: "localhost".into(),
+            smtp_port: 25,
+            smtp_user: "u".into(),
+            smtp_password: "p".into(),
+            reply_to: None,
+            app_name: "Test".into(),
+            site_url: None,
+        };
+        let service = EmailService::with_db(config, db);
+        assert!(service.db.is_some());
+    }
+
+    #[test]
     fn test_base_vars() {
         let config = EmailConfig {
             from: "Test <test@test.com>".into(),
@@ -802,6 +1004,24 @@ mod tests {
         let vars = service.base_vars();
         assert_eq!(vars.get("AppName").unwrap(), "CoolApp");
         assert_eq!(vars.get("SiteURL").unwrap(), "https://cool.app");
+    }
+
+    #[test]
+    fn test_base_vars_without_site_url() {
+        let config = EmailConfig {
+            from: "Test <test@test.com>".into(),
+            smtp_host: "localhost".into(),
+            smtp_port: 25,
+            smtp_user: "u".into(),
+            smtp_password: "p".into(),
+            reply_to: None,
+            app_name: "TestApp".into(),
+            site_url: None,
+        };
+        let service = EmailService::new(config);
+        let vars = service.base_vars();
+        assert_eq!(vars.get("AppName").unwrap(), "TestApp");
+        assert!(!vars.contains_key("SiteURL"));
     }
 
     #[test]
@@ -821,11 +1041,377 @@ mod tests {
     fn test_email_template_serialization() {
         let template = default_verify_email();
         let json = serde_json::to_value(&template).unwrap();
-        assert_eq!(json["name"], TEMPLATE_VERIFY_EMAIL);
+        assert_eq!(json[fields::NAME], TEMPLATE_VERIFY_EMAIL);
         assert!(json["subject"].as_str().unwrap().contains("{{ .AppName }}"));
 
-        // Roundtrip
         let deserialized: EmailTemplate = serde_json::from_value(json).unwrap();
         assert_eq!(deserialized.name, template.name);
+    }
+
+    #[test]
+    fn test_reset_password_template_render() {
+        let template = default_reset_password();
+        let mut vars = HashMap::new();
+        vars.insert("AppName".into(), "MyApp".into());
+        vars.insert(
+            "ActionURL".into(),
+            "https://myapp.com/reset?token=xyz".into(),
+        );
+        vars.insert("ExpiresIn".into(), "1 hour".into());
+
+        let rendered = template.render(&vars);
+        assert!(rendered.subject.contains("MyApp"));
+        assert!(rendered.html.contains("Reset Password"));
+        assert!(rendered.text.contains("1 hour"));
+    }
+
+    #[test]
+    fn test_magic_link_template_render() {
+        let template = default_magic_link();
+        let mut vars = HashMap::new();
+        vars.insert("AppName".into(), "MyApp".into());
+        vars.insert(
+            "ActionURL".into(),
+            "https://myapp.com/magic?token=abc".into(),
+        );
+        vars.insert("ExpiresIn".into(), "15 minutes".into());
+
+        let rendered = template.render(&vars);
+        assert!(rendered.subject.contains("MyApp"));
+        assert!(rendered.html.contains("Sign In"));
+        assert!(rendered.text.contains("15 minutes"));
+    }
+
+    #[test]
+    fn test_email_change_template_render() {
+        let template = default_email_change();
+        let mut vars = HashMap::new();
+        vars.insert("AppName".into(), "MyApp".into());
+        vars.insert("NewEmail".into(), "new@example.com".into());
+        vars.insert("ActionURL".into(), "https://myapp.com/confirm".into());
+        vars.insert("ExpiresIn".into(), "24 hours".into());
+
+        let rendered = template.render(&vars);
+        assert!(rendered.html.contains("new@example.com"));
+        assert!(rendered.text.contains("new@example.com"));
+    }
+
+    #[test]
+    fn test_welcome_template_render() {
+        let template = default_welcome();
+        let mut vars = HashMap::new();
+        vars.insert("AppName".into(), "MyApp".into());
+        vars.insert("UserName".into(), "Alice".into());
+        vars.insert("SiteURL".into(), "https://myapp.com".into());
+
+        let rendered = template.render(&vars);
+        assert!(rendered.subject.contains("MyApp"));
+        assert!(rendered.html.contains("Alice"));
+        assert!(rendered.text.contains("Alice"));
+    }
+
+    #[test]
+    fn test_default_templates_all_have_text_and_html() {
+        for template in default_templates() {
+            assert!(
+                !template.text.is_empty(),
+                "Template '{}' has empty text",
+                template.name
+            );
+            assert!(
+                !template.html.is_empty(),
+                "Template '{}' has empty html",
+                template.name
+            );
+            assert!(
+                !template.subject.is_empty(),
+                "Template '{}' has empty subject",
+                template.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_email_config_from_env_missing_required() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        unsafe {
+            std::env::remove_var("OB_EMAIL__FROM");
+            std::env::remove_var("OB_EMAIL__SMTP_HOST");
+            std::env::remove_var("OB_EMAIL__SMTP_PORT");
+            std::env::remove_var("OB_EMAIL__SMTP_USER");
+            std::env::remove_var("OB_EMAIL__SMTP_PASSWORD");
+        }
+        let config = EmailConfig::from_env();
+        assert!(config.is_none());
+    }
+
+    #[test]
+    fn test_email_config_from_env_all_set() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        unsafe {
+            std::env::set_var("OB_EMAIL__FROM", "noreply@myapp.com");
+            std::env::set_var("OB_EMAIL__SMTP_HOST", "smtp.myapp.com");
+            std::env::set_var("OB_EMAIL__SMTP_PORT", "587");
+            std::env::set_var("OB_EMAIL__SMTP_USER", "user");
+            std::env::set_var("OB_EMAIL__SMTP_PASSWORD", "pass");
+            std::env::set_var("OB_EMAIL__APP_NAME", "TestApp");
+        }
+        let config = EmailConfig::from_env().unwrap();
+        assert_eq!(config.smtp_host, "smtp.myapp.com");
+        assert_eq!(config.smtp_port, 587);
+        assert_eq!(config.app_name, "TestApp");
+        assert!(config.from.contains("noreply@myapp.com"));
+
+        unsafe {
+            std::env::remove_var("OB_EMAIL__FROM");
+            std::env::remove_var("OB_EMAIL__SMTP_HOST");
+            std::env::remove_var("OB_EMAIL__SMTP_PORT");
+            std::env::remove_var("OB_EMAIL__SMTP_USER");
+            std::env::remove_var("OB_EMAIL__SMTP_PASSWORD");
+            std::env::remove_var("OB_EMAIL__APP_NAME");
+        }
+    }
+
+    #[test]
+    fn test_email_config_from_env_with_optional() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        unsafe {
+            std::env::set_var("OB_EMAIL__FROM", "noreply@test.com");
+            std::env::set_var("OB_EMAIL__SMTP_HOST", "smtp.test.com");
+            std::env::set_var("OB_EMAIL__SMTP_PORT", "465");
+            std::env::set_var("OB_EMAIL__SMTP_USER", "u");
+            std::env::set_var("OB_EMAIL__SMTP_PASSWORD", "p");
+            std::env::set_var("OB_EMAIL__REPLY_TO", "support@test.com");
+            std::env::set_var("OB_EMAIL__SITE_URL", "https://test.com");
+            std::env::set_var("OB_EMAIL__FROM_NAME", "TestSender");
+        }
+        let config = EmailConfig::from_env().unwrap();
+        assert_eq!(config.reply_to, Some("support@test.com".into()));
+        assert_eq!(config.site_url, Some("https://test.com".into()));
+        assert!(config.from.contains("TestSender"));
+
+        unsafe {
+            std::env::remove_var("OB_EMAIL__FROM");
+            std::env::remove_var("OB_EMAIL__SMTP_HOST");
+            std::env::remove_var("OB_EMAIL__SMTP_PORT");
+            std::env::remove_var("OB_EMAIL__SMTP_USER");
+            std::env::remove_var("OB_EMAIL__SMTP_PASSWORD");
+            std::env::remove_var("OB_EMAIL__REPLY_TO");
+            std::env::remove_var("OB_EMAIL__SITE_URL");
+            std::env::remove_var("OB_EMAIL__FROM_NAME");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_templates_without_db() {
+        let config = EmailConfig {
+            from: "Test <test@test.com>".into(),
+            smtp_host: "localhost".into(),
+            smtp_port: 25,
+            smtp_user: "u".into(),
+            smtp_password: "p".into(),
+            reply_to: None,
+            app_name: "Test".into(),
+            site_url: None,
+        };
+        let service = EmailService::new(config);
+        let templates = service.list_templates().await.unwrap();
+        assert_eq!(templates.len(), 12); // 6 English + 6 French
+    }
+
+    #[tokio::test]
+    async fn test_get_template_by_name_default() {
+        let config = EmailConfig {
+            from: "Test <test@test.com>".into(),
+            smtp_host: "localhost".into(),
+            smtp_port: 25,
+            smtp_user: "u".into(),
+            smtp_password: "p".into(),
+            reply_to: None,
+            app_name: "Test".into(),
+            site_url: None,
+        };
+        let service = EmailService::new(config);
+        let template = service
+            .get_template_by_name(TEMPLATE_VERIFY_EMAIL)
+            .await
+            .unwrap();
+        assert_eq!(template.name, TEMPLATE_VERIFY_EMAIL);
+    }
+
+    #[tokio::test]
+    async fn test_get_template_by_name_unknown_fallback() {
+        let config = EmailConfig {
+            from: "Test <test@test.com>".into(),
+            smtp_host: "localhost".into(),
+            smtp_port: 25,
+            smtp_user: "u".into(),
+            smtp_password: "p".into(),
+            reply_to: None,
+            app_name: "Test".into(),
+            site_url: None,
+        };
+        let service = EmailService::new(config);
+        let template = service.get_template_by_name("nonexistent").await.unwrap();
+        assert_eq!(template.name, "nonexistent");
+        assert!(template.text.is_empty());
+        assert!(template.html.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_save_and_get_template() {
+        let db = ob_database::DatabaseClient::new_mem().await;
+        let config = EmailConfig {
+            from: "Test <test@test.com>".into(),
+            smtp_host: "localhost".into(),
+            smtp_port: 25,
+            smtp_user: "u".into(),
+            smtp_password: "p".into(),
+            reply_to: None,
+            app_name: "Test".into(),
+            site_url: None,
+        };
+        let service = EmailService::with_db(config, db);
+        let template_name = format!("custom_verify_{}", uuid::Uuid::new_v4());
+        let subject = "Custom verify for {{ .AppName }}".to_string();
+
+        let template = EmailTemplate {
+            name: template_name.clone(),
+            subject: subject.clone(),
+            html: "<p>Custom HTML</p>".into(),
+            text: "Custom text".into(),
+        };
+
+        service.save_template(template).await.unwrap();
+        let fetched = service.get_template_by_name(&template_name).await.unwrap();
+        assert_eq!(fetched.name, template_name);
+        assert_eq!(fetched.subject, subject);
+    }
+
+    #[tokio::test]
+    async fn test_save_template_without_db_fails() {
+        let config = EmailConfig {
+            from: "Test <test@test.com>".into(),
+            smtp_host: "localhost".into(),
+            smtp_port: 25,
+            smtp_user: "u".into(),
+            smtp_password: "p".into(),
+            reply_to: None,
+            app_name: "Test".into(),
+            site_url: None,
+        };
+        let service = EmailService::new(config);
+        let template = EmailTemplate {
+            name: "test".into(),
+            subject: "Test".into(),
+            html: "".into(),
+            text: "".into(),
+        };
+        let result = service.save_template(template).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_reset_template_to_default() {
+        let db = ob_database::DatabaseClient::new_mem().await;
+        let config = EmailConfig {
+            from: "Test <test@test.com>".into(),
+            smtp_host: "localhost".into(),
+            smtp_port: 25,
+            smtp_user: "u".into(),
+            smtp_password: "p".into(),
+            reply_to: None,
+            app_name: "Test".into(),
+            site_url: None,
+        };
+        let service = EmailService::with_db(config, db);
+
+        let custom = EmailTemplate {
+            name: TEMPLATE_VERIFY_EMAIL.into(),
+            subject: "Custom subject".into(),
+            html: "Custom HTML".into(),
+            text: "Custom text".into(),
+        };
+        service.save_template(custom).await.unwrap();
+
+        let reset = service.reset_template(TEMPLATE_VERIFY_EMAIL).await.unwrap();
+        assert_eq!(reset.name, TEMPLATE_VERIFY_EMAIL);
+        assert!(reset.subject.contains("{{ .AppName }}"));
+    }
+
+    #[tokio::test]
+    async fn test_reset_template_without_db_fails() {
+        let config = EmailConfig {
+            from: "Test <test@test.com>".into(),
+            smtp_host: "localhost".into(),
+            smtp_port: 25,
+            smtp_user: "u".into(),
+            smtp_password: "p".into(),
+            reply_to: None,
+            app_name: "Test".into(),
+            site_url: None,
+        };
+        let service = EmailService::new(config);
+        let result = service.reset_template("any").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_list_templates_with_custom() {
+        let db = ob_database::DatabaseClient::new_mem().await;
+        let config = EmailConfig {
+            from: "Test <test@test.com>".into(),
+            smtp_host: "localhost".into(),
+            smtp_port: 25,
+            smtp_user: "u".into(),
+            smtp_password: "p".into(),
+            reply_to: None,
+            app_name: "Test".into(),
+            site_url: None,
+        };
+        let service = EmailService::with_db(config, db);
+
+        let custom_name = format!("custom_tpl_{}", uuid::Uuid::new_v4());
+        let custom = EmailTemplate {
+            name: custom_name.clone(),
+            subject: "Custom subject".into(),
+            html: "<p>Custom</p>".into(),
+            text: "Custom".into(),
+        };
+        service.save_template(custom).await.unwrap();
+
+        let templates = service.list_templates().await.unwrap();
+        // At minimum: 6 defaults + 1 custom (stale rows may add more)
+        assert!(
+            templates.len() >= 7,
+            "Expected at least 7 templates, got {}",
+            templates.len()
+        );
+        let custom_tpl = templates.iter().find(|t| t.name == custom_name).unwrap();
+        assert_eq!(custom_tpl.subject, "Custom subject");
+    }
+
+    #[test]
+    fn test_template_constants() {
+        assert_eq!(TEMPLATE_VERIFY_EMAIL, "verify_email");
+        assert_eq!(TEMPLATE_RESET_PASSWORD, "reset_password");
+        assert_eq!(TEMPLATE_MFA_ALERT, "mfa_alert");
+        assert_eq!(TEMPLATE_MAGIC_LINK, "magic_link");
+        assert_eq!(TEMPLATE_EMAIL_CHANGE, "email_change");
+        assert_eq!(TEMPLATE_WELCOME, "welcome");
+    }
+
+    #[test]
+    fn test_rendered_email_fields() {
+        let template = EmailTemplate {
+            name: "t".into(),
+            subject: "Subj".into(),
+            html: "<p>HTML</p>".into(),
+            text: "Plain".into(),
+        };
+        let rendered = template.render(&HashMap::new());
+        assert_eq!(rendered.subject, "Subj");
+        assert_eq!(rendered.html, "<p>HTML</p>");
+        assert_eq!(rendered.text, "Plain");
     }
 }

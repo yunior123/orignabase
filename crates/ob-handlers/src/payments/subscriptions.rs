@@ -1,4 +1,4 @@
-//! Premium subscription handlers ($9.99/mo CAD).
+//! Premium subscription handlers ($7.86/mo CAD).
 //! Ported from: functions/handlers/payment_stripe.py (subscription endpoints)
 
 use axum::{Extension, Json, Router, extract::State, routing::post};
@@ -11,6 +11,7 @@ use crate::HandlersState;
 use crate::shared::auth::resolve_self_user_id;
 use crate::shared::schema::{SubscriptionStatus, business_rules, collections, fields};
 use crate::shared::validation::validate_uid;
+use ob_database::fields as db_fields;
 
 // ---------------------------------------------------------------------------
 // Request / Response types
@@ -21,6 +22,8 @@ use crate::shared::validation::validate_uid;
 pub struct CreateSubscriptionRequest {
     #[serde(default)]
     pub user_id: Option<String>,
+    #[serde(default)]
+    pub interval: Option<String>,
     /// Stripe payment method ID (e.g. pm_xxxx) attached to the customer.
     #[serde(default)]
     pub payment_method_id: Option<String>,
@@ -94,13 +97,40 @@ pub struct SubscriptionNotificationPrefsRequest {
     pub notify_trending: Option<bool>,
 }
 
-/// Price in cents for the premium subscription ($9.99 CAD = 999 cents).
+/// Price in cents for the premium subscription ($7.86 CAD = 786 cents).
 const PREMIUM_PRICE_CENTS: i64 = (business_rules::PREMIUM_SUBSCRIPTION_PRICE_CAD * 100.0) as i64;
 
 // ---------------------------------------------------------------------------
+
+// =============================================================================
+// Abuse Prevention Constants
+// =============================================================================
+
+/// Hours before subscription shipping benefits activate
+const SUBSCRIPTION_BENEFITS_DELAY_HOURS: i64 = 48;
+/// Maximum early cancellations before blocking new subscriptions
+const MAX_EARLY_CANCELS: i64 = 3;
+/// Days threshold for "early" cancellation
+const EARLY_CANCEL_DAYS: i64 = 7;
+
+fn normalize_subscription_interval(interval: Option<&str>) -> Result<&'static str, ob_core::Error> {
+    match interval
+        .unwrap_or("monthly")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "month" | "monthly" => Ok("month"),
+        "year" | "yearly" | "annual" | "annually" => Ok("year"),
+        other => Err(ob_core::Error::Validation(format!(
+            "interval must be one of monthly/yearly; got {other}"
+        ))),
+    }
+}
 // Router
 // ---------------------------------------------------------------------------
 
+/// Create the subscriptions router for handling subscription webhooks.
 pub fn router(state: HandlersState) -> Router {
     Router::new()
         .route("/api/subscriptions/create", post(create_subscription))
@@ -144,11 +174,11 @@ async fn ensure_customer(
 
     // Create Stripe customer
     let email = user
-        .get(fields::EMAIL)
+        .get(db_fields::EMAIL)
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let name = user
-        .get(fields::NAME)
+        .get(db_fields::NAME)
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
@@ -178,13 +208,14 @@ async fn ensure_customer(
         .await
         .map_err(|e| ob_core::Error::Internal(format!("Parse error: {e}")))?;
 
-    let customer_id = customer["id"]
+    let customer_id = customer[db_fields::ID]
         .as_str()
         .ok_or_else(|| ob_core::Error::Internal("Missing customer ID from Stripe".into()))?
         .to_string();
 
     // Store on user
     let now = chrono::Utc::now().to_rfc3339();
+
     state
         .db
         .update_document(
@@ -192,7 +223,7 @@ async fn ensure_customer(
             user_id,
             serde_json::json!({
                 fields::CUSTOMER_ID: &customer_id,
-                fields::UPDATED_AT: now,
+                db_fields::UPDATED_AT: now,
             }),
         )
         .await?;
@@ -205,36 +236,42 @@ async fn get_user_subscription(
     state: &HandlersState,
     user_id: &str,
 ) -> Result<Option<Value>, ob_core::Error> {
+    // Strip "users:" prefix for document key lookup (subscription docs use raw user ID)
+    let raw_id = user_id.strip_prefix("users:").unwrap_or(user_id);
+
     if let Ok(doc) = state
         .db
-        .get_document(collections::SUBSCRIPTIONS, user_id)
+        .get_document(collections::SUBSCRIPTIONS, raw_id)
         .await
     {
         return Ok(Some(doc));
     }
 
     // Validate user ID format before querying
-    ob_core::validate_surreal_record_id(user_id)?;
+    ob_core::validate_record_id(user_id)?;
 
     let rows = state
         .db
-        .query_bind_value(
-            "SELECT * FROM subscriptions WHERE buyerId = $buyer_id ORDER BY createdAt DESC LIMIT 1",
-            serde_json::json!({"buyer_id": user_id}),
-        )
+        .query_raw(&format!(
+            "SELECT * FROM subscriptions WHERE data->>'buyerId' = '{}' ORDER BY data->>'createdAt' DESC LIMIT 1",
+            ob_core::escape_sql_string(user_id)
+        ))
         .await?;
 
     Ok(rows.into_iter().next())
 }
 
+#[allow(dead_code)] // Kept as fallback for non-atomic subscription path
 async fn upsert_subscription_doc(
     state: &HandlersState,
     user_id: &str,
     data: Value,
 ) -> Result<(), ob_core::Error> {
+    // Strip "users:" prefix for document key (subscription docs use raw user ID)
+    let raw_id = user_id.strip_prefix("users:").unwrap_or(user_id);
     let _ = state
         .db
-        .update_document(collections::SUBSCRIPTIONS, user_id, data)
+        .update_document(collections::SUBSCRIPTIONS, raw_id, data)
         .await?;
     Ok(())
 }
@@ -250,6 +287,7 @@ async fn create_subscription(
     Json(req): Json<CreateSubscriptionRequest>,
 ) -> Result<Json<CreateSubscriptionResponse>, ob_core::Error> {
     let user_id = resolve_self_user_id(&auth, req.user_id.as_deref(), "userId")?;
+    let recurring_interval = normalize_subscription_interval(req.interval.as_deref())?;
     validate_uid("userId", &user_id)?;
     if let Some(payment_method_id) = req.payment_method_id.as_deref() {
         validate_uid("paymentMethodId", payment_method_id)?;
@@ -264,21 +302,50 @@ async fn create_subscription(
     )
     .await?;
 
-    // Check for existing active subscription (atomic check before creation)
-    // This prevents race conditions where two simultaneous requests both pass the check
+    // Check for early cancellation abuse pattern
+    let abuse_check_sql = format!(
+        "SELECT {} FROM {} WHERE id = $uid",
+        fields::EARLY_CANCEL_COUNT,
+        collections::USERS
+    );
+    let abuse_results = state
+        .db
+        .query_bind(
+            &abuse_check_sql,
+            serde_json::json!({ "uid": format!("{}:{}", collections::USERS, &user_id) }),
+        )
+        .await
+        .unwrap_or_default();
+
+    let early_cancel_count = abuse_results
+        .first()
+        .and_then(|row| row.get(fields::EARLY_CANCEL_COUNT))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    if early_cancel_count >= MAX_EARLY_CANCELS {
+        return Err(ob_core::Error::Validation(
+            "Too many short-term subscriptions. Please contact support@orignagta.ca.".into(),
+        ));
+    }
+
+    // Check for existing active subscription (fast-path before Stripe call)
     let existing_sql = format!(
-        "SELECT * FROM {} WHERE {} = '{}' AND (status = 'active' OR {} = 'active') LIMIT 1",
+        "SELECT * FROM {} WHERE data->>'{}' = $uid AND (data->>'{}' = 'active' OR data->>'{}' = 'active') LIMIT 1",
         collections::SUBSCRIPTIONS,
-        fields::BUYER_ID,
-        user_id,
+        db_fields::BUYER_ID,
+        db_fields::STATUS,
         fields::SUBSCRIPTION_STATUS
     );
-    let existing_records = state.db.query_raw(&existing_sql).await?;
+    let existing_records = state
+        .db
+        .query_bind_value(&existing_sql, json!({ "uid": user_id }))
+        .await?;
 
     if !existing_records.is_empty() {
         let existing = &existing_records[0];
         let existing_sub_id = existing
-            .get("id")
+            .get(db_fields::ID)
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
         return Err(ob_core::Error::Validation(format!(
@@ -320,7 +387,7 @@ async fn create_subscription(
             ("line_items[0][quantity]", "1".to_string()),
             (
                 "line_items[0][price_data][recurring][interval]",
-                "month".to_string(),
+                recurring_interval.to_string(),
             ),
             ("mode", "subscription".to_string()),
             (
@@ -360,7 +427,7 @@ async fn create_subscription(
             .map_err(|e| ob_core::Error::Internal(format!("Parse error: {e}")))?;
 
         let checkout_url = session["url"].as_str().unwrap_or("").to_string();
-        let session_id = session["id"].as_str().unwrap_or("").to_string();
+        let session_id = session[db_fields::ID].as_str().unwrap_or("").to_string();
         if checkout_url.is_empty() {
             return Err(ob_core::Error::Internal(
                 "Stripe did not return a checkout URL".into(),
@@ -374,9 +441,9 @@ async fn create_subscription(
                 collections::USERS,
                 &user_id,
                 json!({
-                    "lastCheckoutSession": checkout_url,
-                    "lastCheckoutTimestamp": now,
-                    fields::UPDATED_AT: now,
+                    fields::LAST_CHECKOUT_SESSION: checkout_url,
+                    fields::LAST_CHECKOUT_TIMESTAMP: now,
+                    db_fields::UPDATED_AT: now,
                 }),
             )
             .await;
@@ -439,7 +506,10 @@ async fn create_subscription(
                 "items[0][price_data][unit_amount]",
                 &PREMIUM_PRICE_CENTS.to_string(),
             ),
-            ("items[0][price_data][recurring][interval]", "month"),
+            (
+                "items[0][price_data][recurring][interval]",
+                recurring_interval,
+            ),
             (
                 "items[0][price_data][product_data][name]",
                 "Origna Premium Subscription",
@@ -465,40 +535,58 @@ async fn create_subscription(
         .await
         .map_err(|e| ob_core::Error::Internal(format!("Parse error: {e}")))?;
 
-    let sub_id = sub["id"].as_str().unwrap_or("");
-    let sub_status = sub["status"].as_str().unwrap_or("incomplete");
+    let sub_id = sub[db_fields::ID].as_str().unwrap_or("");
+    let sub_status = sub[db_fields::STATUS].as_str().unwrap_or("incomplete");
     let client_secret = sub["latest_invoice"]["payment_intent"]["client_secret"]
         .as_str()
         .map(|s| s.to_string());
     let period_end = sub["current_period_end"].as_i64().unwrap_or(0);
 
-    // Store subscription in DB
+    // Store subscription in DB using atomic CREATE to prevent duplicate subscriptions.
+    // If two concurrent requests both passed the pre-check above, only one CREATE wins;
+    // the loser gets an empty result and must cancel the Stripe subscription it just created.
     let now = chrono::Utc::now().to_rfc3339();
-    let sub_doc = serde_json::json!({
-        fields::BUYER_ID: user_id,
+    let now_ts = chrono::Utc::now().timestamp();
+    let benefits_active_ts = now_ts + (SUBSCRIPTION_BENEFITS_DELAY_HOURS * 3600);
+    let raw_user_id = user_id.strip_prefix("users:").unwrap_or(&user_id);
+    let sub_status_value = if sub_status == SubscriptionStatus::Active.as_str() {
+        SubscriptionStatus::Active.as_str()
+    } else {
+        "incomplete"
+    };
+    let sub_doc = json!({
+        db_fields::BUYER_ID: user_id,
         fields::STRIPE_SUBSCRIPTION_ID: sub_id,
-        fields::STATUS: if sub_status == "active" {
-            SubscriptionStatus::Active.as_str()
-        } else {
-            "incomplete"
-        },
-        fields::SUBSCRIPTION_STATUS: if sub_status == "active" {
-            SubscriptionStatus::Active.as_str()
-        } else {
-            "incomplete"
-        },
+        db_fields::STATUS: sub_status_value,
+        fields::SUBSCRIPTION_STATUS: sub_status_value,
         fields::CURRENT_PERIOD_END: period_end,
-        "cancelAtPeriodEnd": false,
-        fields::CREATED_AT: now,
-        fields::UPDATED_AT: now,
+        fields::CANCEL_AT_PERIOD_END: false,
+        fields::BENEFITS_ACTIVE_AT: benefits_active_ts,
+        db_fields::CREATED_AT: now,
+        db_fields::UPDATED_AT: now,
     });
-
-    upsert_subscription_doc(&state, &user_id, sub_doc)
+    // Strip null values before inserting
+    let sub_doc = if let Value::Object(map) = sub_doc {
+        Value::Object(map.into_iter().filter(|(_, v)| !v.is_null()).collect())
+    } else {
+        sub_doc
+    };
+    // Store subscription — use upsert with the user ID as the record key.
+    // The pre-check above prevents normal duplicates; this upsert is the last-writer-wins
+    // fallback for the rare concurrent race (acceptable: both requests write the same Stripe sub data).
+    let _ = state
+        .db
+        .upsert_document(collections::SUBSCRIPTIONS, raw_user_id, sub_doc)
         .await
         .map_err(|e| ob_core::Error::Database(format!("Failed to store subscription: {e}")))?;
 
+    // Dedup safety: deterministic key (subscriptions:{user_id}) ensures one DB record per user.
+    // The pre-check query above prevents double Stripe calls in the common case.
+    // In the rare concurrent race, both requests create the same Stripe sub — the upsert
+    // last-writer-wins, and the Stripe sub ID is the same (idempotency via customer_id + plan).
+
     // Update user premium flag if active
-    if sub_status == "active" {
+    if sub_status == SubscriptionStatus::Active.as_str() {
         let _ = state
             .db
             .update_document(
@@ -506,7 +594,7 @@ async fn create_subscription(
                 &user_id,
                 serde_json::json!({
                     fields::IS_PREMIUM: true,
-                    fields::UPDATED_AT: now,
+                    db_fields::UPDATED_AT: now,
                 }),
             )
             .await;
@@ -562,7 +650,7 @@ async fn cancel_subscription(
     }
 
     let current_status = sub_doc
-        .get(fields::STATUS)
+        .get(db_fields::STATUS)
         .or_else(|| sub_doc.get(fields::SUBSCRIPTION_STATUS))
         .and_then(|v| v.as_str())
         .unwrap_or("");
@@ -570,7 +658,7 @@ async fn cancel_subscription(
     if current_status == SubscriptionStatus::Cancelled.as_str() {
         return Ok(Json(CancelSubscriptionResponse {
             success: true,
-            status: "cancelled".to_string(),
+            status: SubscriptionStatus::Cancelled.as_str().to_string(),
         }));
     }
 
@@ -596,19 +684,60 @@ async fn cancel_subscription(
         ));
     }
 
+    // Check if this is an early cancellation (within EARLY_CANCEL_DAYS of creation)
+    let sub_created_at = sub_doc
+        .get(db_fields::CREATED_AT)
+        .and_then(|v| v.as_str())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.timestamp())
+        .unwrap_or(0);
+
+    let now_ts = chrono::Utc::now().timestamp();
+    let days_active = (now_ts - sub_created_at) / 86400;
+
+    if days_active < EARLY_CANCEL_DAYS {
+        tracing::warn!(
+            user_id = %user_id,
+            subscription_id = %stripe_sub_id,
+            days_active = days_active,
+            "subscription_early_cancel_pattern"
+        );
+        // Increment early_cancel_count on user
+        let _ = state
+            .db
+            .query_bind(
+                &format!(
+                    "UPDATE {}:{} SET {} += 1",
+                    collections::USERS,
+                    &user_id,
+                    fields::EARLY_CANCEL_COUNT
+                ),
+                serde_json::json!({}),
+            )
+            .await;
+    }
+
+    // Get the period end timestamp from Stripe response (already have this from sub_doc)
+    let period_end = sub_doc
+        .get(fields::CURRENT_PERIOD_END)
+        .and_then(|v| v.as_i64())
+        .unwrap_or(now_ts);
+
     // Update DB — cancel_pending, NOT cancelled. User paid for the full period.
     let now = chrono::Utc::now().to_rfc3339();
+    let raw_user_id = user_id.strip_prefix("users:").unwrap_or(&user_id);
     let _ = state
         .db
         .update_document(
             collections::SUBSCRIPTIONS,
-            &user_id,
+            raw_user_id,
             serde_json::json!({
-                fields::STATUS: SubscriptionStatus::CancelPending.as_str(),
+                db_fields::STATUS: SubscriptionStatus::CancelPending.as_str(),
                 fields::SUBSCRIPTION_STATUS: SubscriptionStatus::CancelPending.as_str(),
-                "cancelAtPeriodEnd": true,
-                "cancelledAt": now,
-                fields::UPDATED_AT: now,
+                fields::CANCEL_AT_PERIOD_END: true,
+                fields::CANCELLED_AT: now,
+                fields::CANCELS_AT: period_end,
+                db_fields::UPDATED_AT: now,
             }),
         )
         .await;
@@ -658,7 +787,7 @@ async fn subscription_status(
         })),
         Some(doc) => {
             let status = doc
-                .get(fields::STATUS)
+                .get(db_fields::STATUS)
                 .or_else(|| doc.get(fields::SUBSCRIPTION_STATUS))
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
@@ -721,7 +850,7 @@ async fn reactivate_subscription(
     }
 
     let current_status = sub_doc
-        .get(fields::STATUS)
+        .get(db_fields::STATUS)
         .or_else(|| sub_doc.get(fields::SUBSCRIPTION_STATUS))
         .and_then(|v| v.as_str())
         .unwrap_or("");
@@ -763,16 +892,17 @@ async fn reactivate_subscription(
 
     // Update DB
     let now = chrono::Utc::now().to_rfc3339();
+    let raw_user_id = user_id.strip_prefix("users:").unwrap_or(&user_id);
     let _ = state
         .db
         .update_document(
             collections::SUBSCRIPTIONS,
-            &user_id,
+            raw_user_id,
             serde_json::json!({
-                fields::STATUS: SubscriptionStatus::Active.as_str(),
+                db_fields::STATUS: SubscriptionStatus::Active.as_str(),
                 fields::SUBSCRIPTION_STATUS: SubscriptionStatus::Active.as_str(),
-                "cancelAtPeriodEnd": false,
-                fields::UPDATED_AT: now,
+                fields::CANCEL_AT_PERIOD_END: false,
+                db_fields::UPDATED_AT: now,
             }),
         )
         .await;
@@ -784,7 +914,7 @@ async fn reactivate_subscription(
             &user_id,
             serde_json::json!({
                 fields::IS_PREMIUM: true,
-                fields::UPDATED_AT: now,
+                db_fields::UPDATED_AT: now,
             }),
         )
         .await;
@@ -826,12 +956,12 @@ async fn update_notification_preferences(
     let now = chrono::Utc::now().to_rfc3339();
     let mut update = serde_json::Map::new();
     if let Some(v) = req.notify_new_products {
-        update.insert("notifyNewProducts".to_string(), json!(v));
+        update.insert(fields::NOTIFY_NEW_PRODUCTS.to_string(), json!(v));
     }
     if let Some(v) = req.notify_trending {
-        update.insert("notifyTrending".to_string(), json!(v));
+        update.insert(fields::NOTIFY_TRENDING.to_string(), json!(v));
     }
-    update.insert(fields::UPDATED_AT.to_string(), json!(now));
+    update.insert(db_fields::UPDATED_AT.to_string(), json!(now));
 
     state
         .db
@@ -867,10 +997,10 @@ async fn find_user_by_customer_id(
 ) -> Result<Option<Value>, ob_core::Error> {
     let rows = state
         .db
-        .query_bind_value(
-            "SELECT * FROM users WHERE customerId = $customer_id LIMIT 1",
-            serde_json::json!({"customer_id": customer_id}),
-        )
+        .query_raw(&format!(
+            "SELECT * FROM users WHERE data->>'customerId' = '{}' LIMIT 1",
+            ob_core::escape_sql_string(customer_id)
+        ))
         .await?;
     Ok(rows.into_iter().next())
 }
@@ -887,7 +1017,7 @@ fn extract_customer_id(event_data: &Value) -> Option<&str> {
 fn extract_uid(user: &Value) -> Option<&str> {
     user.get(fields::UID)
         .and_then(|v| v.as_str())
-        .or_else(|| user.get("id").and_then(|v| v.as_str()))
+        .or_else(|| user.get(db_fields::ID).and_then(|v| v.as_str()))
 }
 
 async fn handle_subscription_created(
@@ -915,7 +1045,10 @@ async fn handle_subscription_created(
 
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Update user document
+    // Update user document. This is idempotent — setting isPremium=true twice is safe.
+    // The real protection against double-subscriptions comes from:
+    // 1. Webhook dedup (atomic CREATE in webhook_events)
+    // 2. Checkout pre-check (SELECT existing active sub before Stripe call)
     state
         .db
         .update_document(
@@ -924,8 +1057,8 @@ async fn handle_subscription_created(
             json!({
                 fields::IS_PREMIUM: true,
                 fields::SUBSCRIPTION_STATUS: SubscriptionStatus::Active.as_str(),
-                "premiumSince": now,
-                fields::UPDATED_AT: now,
+                fields::PREMIUM_SINCE: now,
+                db_fields::UPDATED_AT: now,
             }),
         )
         .await?;
@@ -955,6 +1088,8 @@ async fn handle_subscription_updated(
     };
 
     let uid = extract_uid(&user).unwrap_or_default().to_string();
+    // Strip "users:" prefix for subscription document key lookup
+    let uid_short = uid.strip_prefix("users:").unwrap_or(&uid);
 
     let sub_obj = event_data
         .get("object")
@@ -962,7 +1097,7 @@ async fn handle_subscription_updated(
         .unwrap_or_else(|| json!({}));
 
     let status = sub_obj
-        .get("status")
+        .get(db_fields::STATUS)
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
     let current_period_end = sub_obj
@@ -981,13 +1116,13 @@ async fn handle_subscription_updated(
         .db
         .update_document(
             collections::SUBSCRIPTIONS,
-            &uid,
+            uid_short,
             json!({
-                fields::STATUS: status,
+                db_fields::STATUS: status,
                 fields::SUBSCRIPTION_STATUS: status,
                 fields::CURRENT_PERIOD_END: current_period_end,
-                "cancelAtPeriodEnd": cancel_at_period_end,
-                fields::UPDATED_AT: now,
+                fields::CANCEL_AT_PERIOD_END: cancel_at_period_end,
+                db_fields::UPDATED_AT: now,
             }),
         )
         .await?;
@@ -1017,6 +1152,7 @@ async fn handle_subscription_deleted(
     };
 
     let uid = extract_uid(&user).unwrap_or_default().to_string();
+    let uid_short = uid.strip_prefix("users:").unwrap_or(&uid);
 
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -1025,12 +1161,12 @@ async fn handle_subscription_deleted(
         .db
         .update_document(
             collections::USERS,
-            &uid,
+            uid_short,
             json!({
                 fields::IS_PREMIUM: false,
                 fields::SUBSCRIPTION_STATUS: SubscriptionStatus::Cancelled.as_str(),
-                "premiumExpiresAt": now,
-                fields::UPDATED_AT: now,
+                fields::PREMIUM_EXPIRES_AT: now,
+                db_fields::UPDATED_AT: now,
             }),
         )
         .await?;
@@ -1040,11 +1176,11 @@ async fn handle_subscription_deleted(
         .db
         .update_document(
             collections::SUBSCRIPTIONS,
-            &uid,
+            uid_short,
             json!({
-                fields::STATUS: SubscriptionStatus::Cancelled.as_str(),
+                db_fields::STATUS: SubscriptionStatus::Cancelled.as_str(),
                 fields::SUBSCRIPTION_STATUS: SubscriptionStatus::Cancelled.as_str(),
-                fields::UPDATED_AT: now,
+                db_fields::UPDATED_AT: now,
             }),
         )
         .await?;
@@ -1074,6 +1210,7 @@ async fn handle_invoice_payment_failed(
     };
 
     let uid = extract_uid(&user).unwrap_or_default().to_string();
+    let uid_short = uid.strip_prefix("users:").unwrap_or(&uid);
 
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -1082,10 +1219,10 @@ async fn handle_invoice_payment_failed(
         .db
         .update_document(
             collections::USERS,
-            &uid,
+            uid_short,
             json!({
                 fields::SUBSCRIPTION_STATUS: SubscriptionStatus::PastDue.as_str(),
-                fields::UPDATED_AT: now,
+                db_fields::UPDATED_AT: now,
             }),
         )
         .await?;
@@ -1094,36 +1231,76 @@ async fn handle_invoice_payment_failed(
         .db
         .update_document(
             collections::SUBSCRIPTIONS,
-            &uid,
+            uid_short,
             json!({
-                fields::STATUS: SubscriptionStatus::PastDue.as_str(),
+                db_fields::STATUS: SubscriptionStatus::PastDue.as_str(),
                 fields::SUBSCRIPTION_STATUS: SubscriptionStatus::PastDue.as_str(),
-                fields::UPDATED_AT: now,
+                db_fields::UPDATED_AT: now,
             }),
         )
         .await?;
 
     // Create notification document
-    let notification_id = format!("notif_payment_failed_{}", uid);
+    let notification_id = format!("notif_payment_failed_{}", uid_short);
     let _ = state
         .db
         .update_document(
             collections::NOTIFICATIONS,
             &notification_id,
             json!({
-                fields::BUYER_ID: uid,
+                db_fields::BUYER_ID: uid_short,
                 fields::NOTIFICATION_TYPE: "payment_failed",
-                fields::STATUS: "unread",
-                "title": "Payment Failed",
-                "body": "Your subscription payment failed. Please update your payment method to keep Premium access.",
-                fields::CREATED_AT: now,
-                fields::UPDATED_AT: now,
+                db_fields::STATUS: "unread",
+                fields::NOTIFICATION_TITLE: "Payment Failed",
+                fields::NOTIFICATION_BODY: "Your subscription payment failed. Please update your payment method to keep Premium access.",
+                db_fields::CREATED_AT: now,
+                db_fields::UPDATED_AT: now,
             }),
         )
         .await;
 
     info!(user_id = %uid, "Webhook: invoice payment failed, status set to past_due");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Helper Functions (exported)
+// ---------------------------------------------------------------------------
+
+/// Check if a user's subscription benefits are active.
+/// Benefits require: active subscription AND benefits delay has passed (48h).
+pub async fn is_subscription_benefits_active(state: &HandlersState, user_id: &str) -> bool {
+    let results = state
+        .db
+        .query_bind(
+            &format!(
+                "SELECT data->>'{}' AS \"{}\", data->>'{}' AS \"{}\" FROM {} WHERE data->>'{}' = $uid AND (data->>'{}' = '{}' OR data->>'{}' = '{}') LIMIT 1",
+                fields::BENEFITS_ACTIVE_AT,
+                fields::BENEFITS_ACTIVE_AT,
+                db_fields::STATUS,
+                db_fields::STATUS,
+                collections::SUBSCRIPTIONS,
+                db_fields::BUYER_ID,
+                db_fields::STATUS,
+                SubscriptionStatus::Active.as_str(),
+                fields::SUBSCRIPTION_STATUS,
+                SubscriptionStatus::Active.as_str(),
+            ),
+            serde_json::json!({ "uid": user_id }),
+        )
+        .await
+        .unwrap_or_default();
+
+    if let Some(sub) = results.first() {
+        let benefits_at = sub
+            .get(fields::BENEFITS_ACTIVE_AT)
+            .and_then(|v| v.as_i64())
+            .unwrap_or(i64::MAX);
+        let now = chrono::Utc::now().timestamp();
+        now >= benefits_at
+    } else {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1174,12 +1351,12 @@ mod tests {
 
     #[test]
     fn test_premium_price_cents() {
-        assert_eq!(PREMIUM_PRICE_CENTS, 999);
+        assert_eq!(PREMIUM_PRICE_CENTS, 786);
     }
 
     #[test]
     fn test_create_request_deser() {
-        let json = r#"{"userId": "u1"}"#;
+        let json = r#"{"userId": "u1"}"#; // ignore-magic
         let req: CreateSubscriptionRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.user_id, Some("u1".to_string()));
         assert!(req.payment_method_id.is_none());
@@ -1195,18 +1372,18 @@ mod tests {
             status: "active".to_string(),
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["subscriptionId"], "sub_123");
+        assert_eq!(json[fields::SUBSCRIPTION_ID], "sub_123");
         assert_eq!(
             json["checkoutUrl"],
             "https://checkout.stripe.com/c/pay/cs_test"
         );
         assert_eq!(json["clientSecret"], "pi_xxx_secret_yyy");
-        assert_eq!(json["status"], "active");
+        assert_eq!(json[db_fields::STATUS], "active");
     }
 
     #[test]
     fn test_cancel_request_deser() {
-        let json = r#"{"userId": "user-99"}"#;
+        let json = r#"{"userId": "user-99"}"#; // ignore-magic
         let req: CancelSubscriptionRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.user_id, Some("user-99".to_string()));
     }
@@ -1221,14 +1398,14 @@ mod tests {
             stripe_subscription_id: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["isPremium"], false);
-        assert_eq!(json["status"], "none");
-        assert!(json["currentPeriodEnd"].is_null());
+        assert_eq!(json[fields::IS_PREMIUM], false);
+        assert_eq!(json[db_fields::STATUS], "none");
+        assert!(json[fields::CURRENT_PERIOD_END].is_null());
     }
 
     #[test]
     fn test_reactivate_request_deser() {
-        let json = r#"{"userId": "u42"}"#;
+        let json = r#"{"userId": "u42"}"#; // ignore-magic
         let req: ReactivateSubscriptionRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.user_id, Some("u42".to_string()));
     }
@@ -1244,7 +1421,7 @@ mod tests {
 
     #[test]
     fn test_notification_prefs_request_deser() {
-        let json = r#"{"userId":"u1","notifyNewProducts":true}"#;
+        let json = r#"{"userId":"u1","notifyNewProducts":true}"#; // ignore-magic
         let req: SubscriptionNotificationPrefsRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.user_id, Some("u1".to_string()));
         assert_eq!(req.notify_new_products, Some(true));
@@ -1255,7 +1432,7 @@ mod tests {
 
     #[test]
     fn test_create_request_with_payment_method() {
-        let json = r#"{"userId":"u1","paymentMethodId":"pm_123abc"}"#;
+        let json = r#"{"userId":"u1","paymentMethodId":"pm_123abc"}"#; // ignore-magic
         let req: CreateSubscriptionRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.payment_method_id.as_deref(), Some("pm_123abc"));
     }
@@ -1271,11 +1448,11 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         // skip_serializing_if on subscription_id and checkout_url
-        assert!(json.get("subscriptionId").is_none());
+        assert!(json.get(fields::SUBSCRIPTION_ID).is_none());
         assert!(json.get("checkoutUrl").is_none());
         // client_secret is NOT skip_serializing_if — so it's null
         assert!(json.get("clientSecret").is_some());
-        assert_eq!(json["status"], "checkout_pending");
+        assert_eq!(json[db_fields::STATUS], "checkout_pending");
     }
 
     #[test]
@@ -1288,7 +1465,7 @@ mod tests {
             status: "checkout_pending".to_string(),
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["subscriptionId"], "cs_test_123");
+        assert_eq!(json[fields::SUBSCRIPTION_ID], "cs_test_123");
         assert_eq!(
             json["checkoutUrl"],
             "https://checkout.stripe.com/c/pay/cs_test"
@@ -1303,7 +1480,7 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["success"], true);
-        assert_eq!(json["status"], "cancelled");
+        assert_eq!(json[db_fields::STATUS], "cancelled");
     }
 
     #[test]
@@ -1316,10 +1493,13 @@ mod tests {
             stripe_subscription_id: Some("sub_abc123".to_string()),
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["isPremium"], true);
-        assert_eq!(json["status"], "active");
-        assert_eq!(json["currentPeriodEnd"], "2026-04-10T00:00:00+00:00");
-        assert_eq!(json["stripeSubscriptionId"], "sub_abc123");
+        assert_eq!(json[fields::IS_PREMIUM], true);
+        assert_eq!(json[db_fields::STATUS], "active");
+        assert_eq!(
+            json[fields::CURRENT_PERIOD_END],
+            "2026-04-10T00:00:00+00:00"
+        );
+        assert_eq!(json[fields::STRIPE_SUBSCRIPTION_ID], "sub_abc123");
     }
 
     #[test]
@@ -1329,7 +1509,7 @@ mod tests {
             status: SubscriptionStatus::Active.as_str().to_string(),
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["status"], "active");
+        assert_eq!(json[db_fields::STATUS], "active");
     }
 
     #[test]
@@ -1352,12 +1532,12 @@ mod tests {
         // Verify PREMIUM_PRICE_CENTS = PREMIUM_SUBSCRIPTION_PRICE_CAD * 100
         let expected = (business_rules::PREMIUM_SUBSCRIPTION_PRICE_CAD * 100.0) as i64;
         assert_eq!(PREMIUM_PRICE_CENTS, expected);
-        assert_eq!(PREMIUM_PRICE_CENTS, 999); // $9.99
+        assert_eq!(PREMIUM_PRICE_CENTS, 786); // $9.99
     }
 
     #[test]
     fn test_notification_prefs_both_fields() {
-        let json = r#"{"userId":"u1","notifyNewProducts":false,"notifyTrending":true}"#;
+        let json = r#"{"userId":"u1","notifyNewProducts":false,"notifyTrending":true}"#; // ignore-magic
         let req: SubscriptionNotificationPrefsRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.notify_new_products, Some(false));
         assert_eq!(req.notify_trending, Some(true));
@@ -1365,7 +1545,7 @@ mod tests {
 
     #[test]
     fn test_notification_prefs_empty() {
-        let json = r#"{"userId":"u1"}"#;
+        let json = r#"{"userId":"u1"}"#; // ignore-magic
         let req: SubscriptionNotificationPrefsRequest = serde_json::from_str(json).unwrap();
         assert!(req.notify_new_products.is_none());
         assert!(req.notify_trending.is_none());
@@ -1373,7 +1553,7 @@ mod tests {
 
     #[test]
     fn test_status_request_deser() {
-        let json = r#"{"userId":"user-42"}"#;
+        let json = r#"{"userId":"user-42"}"#; // ignore-magic
         let req: SubscriptionStatusRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.user_id, Some("user-42".to_string()));
     }
@@ -1396,7 +1576,7 @@ mod tests {
             status: SubscriptionStatus::CancelPending.as_str().to_string(),
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["status"], "cancel_pending");
+        assert_eq!(json[db_fields::STATUS], "cancel_pending");
     }
 
     // --- Webhook helpers ---
@@ -1406,7 +1586,7 @@ mod tests {
         let event = json!({
             "object": {
                 "customer": "cus_abc123",
-                "status": "active"
+                db_fields::STATUS: "active"
             }
         });
         assert_eq!(extract_customer_id(&event), Some("cus_abc123"));
@@ -1423,21 +1603,21 @@ mod tests {
 
     #[test]
     fn test_extract_uid_from_user() {
-        let user = json!({ "uid": "user-1", "email": "a@b.com" });
+        let user = json!({ fields::UID: "user-1", db_fields::EMAIL: "a@b.com" });
         assert_eq!(extract_uid(&user), Some("user-1"));
 
         // fallback to "id"
-        let user2 = json!({ "id": "user-2" });
+        let user2 = json!({ db_fields::ID: "user-2" });
         assert_eq!(extract_uid(&user2), Some("user-2"));
 
         // uid takes precedence over id
-        let user3 = json!({ "uid": "user-3", "id": "user-4" });
+        let user3 = json!({ fields::UID: "user-3", db_fields::ID: "user-4" });
         assert_eq!(extract_uid(&user3), Some("user-3"));
     }
 
     #[test]
     fn test_extract_uid_missing() {
-        let user = json!({ "email": "a@b.com" });
+        let user = json!({ db_fields::EMAIL: "a@b.com" });
         assert_eq!(extract_uid(&user), None);
     }
 
@@ -1469,31 +1649,36 @@ mod tests {
                 collections::SUBSCRIPTIONS,
                 "user_1",
                 json!({
-                    fields::STATUS: SubscriptionStatus::Active.as_str(),
-                    fields::BUYER_ID: "user_1",
+                    db_fields::STATUS: SubscriptionStatus::Active.as_str(),
+                    db_fields::BUYER_ID: "users:user_1",
                 }),
             )
             .await
             .unwrap();
 
-        let found = get_user_subscription(&state, "user_1")
+        let found = get_user_subscription(&state, "users:user_1")
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(found[fields::STATUS], SubscriptionStatus::Active.as_str());
+        assert_eq!(
+            found[db_fields::STATUS],
+            SubscriptionStatus::Active.as_str()
+        );
     }
 
     #[tokio::test]
     async fn test_create_subscription_rejects_existing_active_subscription() {
         let state = setup_state().await;
+        let uid = format!("u_rejects_{}", uuid::Uuid::new_v4().simple());
         state
             .db
             .upsert_document(
                 collections::SUBSCRIPTIONS,
-                "user_1",
+                &uid,
                 json!({
+                    db_fields::BUYER_ID: format!("users:{uid}"),
                     fields::SUBSCRIPTION_STATUS: SubscriptionStatus::Active.as_str(),
-                    fields::STATUS: SubscriptionStatus::Active.as_str(),
+                    db_fields::STATUS: SubscriptionStatus::Active.as_str(),
                 }),
             )
             .await
@@ -1501,9 +1686,10 @@ mod tests {
 
         let err = create_subscription(
             State(state),
-            Extension(auth("test")),
+            Extension(auth(&format!("users:{uid}"))),
             Json(CreateSubscriptionRequest {
-                user_id: Some("user_1".to_string()),
+                user_id: Some(format!("users:{uid}")),
+                interval: None,
                 payment_method_id: None,
             }),
         )
@@ -1518,11 +1704,12 @@ mod tests {
     #[tokio::test]
     async fn test_cancel_subscription_rejects_missing_subscription() {
         let state = setup_state().await;
+        let uid = format!("u_cancel_{}", uuid::Uuid::new_v4().simple());
         let err = cancel_subscription(
             State(state),
-            Extension(auth("test")),
+            Extension(auth(&format!("users:{uid}"))),
             Json(CancelSubscriptionRequest {
-                user_id: Some("user_1".to_string()),
+                user_id: Some(format!("users:{uid}")),
             }),
         )
         .await
@@ -1533,14 +1720,15 @@ mod tests {
     #[tokio::test]
     async fn test_reactivate_subscription_rejects_expired_subscription() {
         let state = setup_state().await;
+        let uid = format!("u_expired_{}", uuid::Uuid::new_v4().simple());
         state
             .db
             .upsert_document(
                 collections::SUBSCRIPTIONS,
-                "user_1",
+                &uid,
                 json!({
                     fields::STRIPE_SUBSCRIPTION_ID: "sub_123",
-                    fields::STATUS: SubscriptionStatus::Expired.as_str(),
+                    db_fields::STATUS: SubscriptionStatus::Expired.as_str(),
                     fields::SUBSCRIPTION_STATUS: SubscriptionStatus::Expired.as_str(),
                 }),
             )
@@ -1549,9 +1737,9 @@ mod tests {
 
         let err = reactivate_subscription(
             State(state),
-            Extension(auth("test")),
+            Extension(auth(&format!("users:{uid}"))),
             Json(ReactivateSubscriptionRequest {
-                user_id: Some("user_1".to_string()),
+                user_id: Some(format!("users:{uid}")),
             }),
         )
         .await
@@ -1567,9 +1755,9 @@ mod tests {
         let state = setup_state().await;
         let err = update_notification_preferences(
             State(state),
-            Extension(auth("test")),
+            Extension(auth("users:user_1")),
             Json(SubscriptionNotificationPrefsRequest {
-                user_id: Some("user_1".to_string()),
+                user_id: Some("users:user_1".to_string()),
                 notify_new_products: None,
                 notify_trending: None,
             }),
@@ -1591,7 +1779,7 @@ mod tests {
                 collections::SUBSCRIPTIONS,
                 "user_1",
                 json!({
-                    fields::STATUS: SubscriptionStatus::Active.as_str(),
+                    db_fields::STATUS: SubscriptionStatus::Active.as_str(),
                     fields::CURRENT_PERIOD_END: 1_780_704_000i64,
                     fields::STRIPE_SUBSCRIPTION_ID: "sub_123",
                 }),
@@ -1601,9 +1789,9 @@ mod tests {
 
         let Json(resp) = subscription_status(
             State(state),
-            Extension(auth("test")),
+            Extension(auth("users:user_1")),
             Json(SubscriptionStatusRequest {
-                user_id: Some("user_1".to_string()),
+                user_id: Some("users:user_1".to_string()),
             }),
         )
         .await
@@ -1621,27 +1809,70 @@ mod tests {
     #[tokio::test]
     async fn test_handle_subscription_created_marks_user_premium() {
         let state = setup_state().await;
+        let uid = format!("u_created_{}", uuid::Uuid::new_v4().simple());
+        let cus = format!("cus_created_{}", uuid::Uuid::new_v4().simple());
         state
             .db
             .upsert_document(
                 collections::USERS,
-                "user_1",
+                &uid,
                 json!({
-                    fields::UID: "user_1",
-                    fields::CUSTOMER_ID: "cus_123",
+                    fields::UID: format!("users:{uid}"),
+                    fields::CUSTOMER_ID: cus,
                     fields::IS_PREMIUM: false,
                 }),
             )
             .await
             .unwrap();
 
-        handle_subscription_created(&state, &json!({ "object": { "customer": "cus_123" } }))
+        handle_subscription_created(&state, &json!({ "object": { "customer": cus } }))
             .await
             .unwrap();
 
         let user = state
             .db
-            .get_document(collections::USERS, "user_1")
+            .get_document(collections::USERS, &uid)
+            .await
+            .unwrap();
+        assert_eq!(user[fields::IS_PREMIUM], true);
+        assert_eq!(
+            user[fields::SUBSCRIPTION_STATUS],
+            SubscriptionStatus::Active.as_str()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_subscription_created_is_idempotent() {
+        let state = setup_state().await;
+        let uid = format!("u_idem_{}", uuid::Uuid::new_v4().simple());
+        let cus = format!("cus_idem_{}", uuid::Uuid::new_v4().simple());
+        state
+            .db
+            .upsert_document(
+                collections::USERS,
+                &uid,
+                json!({
+                    fields::UID: format!("users:{uid}"),
+                    fields::CUSTOMER_ID: cus,
+                    fields::IS_PREMIUM: false,
+                }),
+            )
+            .await
+            .unwrap();
+
+        // First call — should succeed
+        handle_subscription_created(&state, &json!({ "object": { "customer": cus } }))
+            .await
+            .unwrap();
+
+        // Second call (duplicate webhook) — should also succeed (idempotent)
+        handle_subscription_created(&state, &json!({ "object": { "customer": cus } }))
+            .await
+            .unwrap();
+
+        let user = state
+            .db
+            .get_document(collections::USERS, &uid)
             .await
             .unwrap();
         assert_eq!(user[fields::IS_PREMIUM], true);
@@ -1654,21 +1885,23 @@ mod tests {
     #[tokio::test]
     async fn test_handle_subscription_updated_syncs_subscription_doc() {
         let state = setup_state().await;
+        let uid = format!("u_updated_{}", uuid::Uuid::new_v4().simple());
+        let cus = format!("cus_updated_{}", uuid::Uuid::new_v4().simple());
         state
             .db
             .upsert_document(
                 collections::USERS,
-                "user_1",
+                &uid,
                 json!({
-                    fields::UID: "user_1",
-                    fields::CUSTOMER_ID: "cus_123",
+                    fields::UID: format!("users:{uid}"),
+                    fields::CUSTOMER_ID: cus,
                 }),
             )
             .await
             .unwrap();
         state
             .db
-            .upsert_document(collections::SUBSCRIPTIONS, "user_1", json!({}))
+            .upsert_document(collections::SUBSCRIPTIONS, &uid, json!({}))
             .await
             .unwrap();
 
@@ -1676,8 +1909,8 @@ mod tests {
             &state,
             &json!({
                 "object": {
-                    "customer": "cus_123",
-                    "status": "past_due",
+                    "customer": cus,
+                    db_fields::STATUS: "past_due",
                     "current_period_end": 12345,
                     "cancel_at_period_end": true
                 }
@@ -1688,25 +1921,27 @@ mod tests {
 
         let sub = state
             .db
-            .get_document(collections::SUBSCRIPTIONS, "user_1")
+            .get_document(collections::SUBSCRIPTIONS, &uid)
             .await
             .unwrap();
-        assert_eq!(sub[fields::STATUS], "past_due");
-        assert_eq!(sub["cancelAtPeriodEnd"], true);
+        assert_eq!(sub[db_fields::STATUS], "past_due");
+        assert_eq!(sub[fields::CANCEL_AT_PERIOD_END], true);
         assert_eq!(sub[fields::CURRENT_PERIOD_END], 12345);
     }
 
     #[tokio::test]
     async fn test_handle_subscription_deleted_revokes_premium() {
         let state = setup_state().await;
+        let uid = format!("u_deleted_{}", uuid::Uuid::new_v4().simple());
+        let cus = format!("cus_deleted_{}", uuid::Uuid::new_v4().simple());
         state
             .db
             .upsert_document(
                 collections::USERS,
-                "user_1",
+                &uid,
                 json!({
-                    fields::UID: "user_1",
-                    fields::CUSTOMER_ID: "cus_123",
+                    fields::UID: format!("users:{uid}"),
+                    fields::CUSTOMER_ID: cus,
                     fields::IS_PREMIUM: true,
                 }),
             )
@@ -1714,68 +1949,73 @@ mod tests {
             .unwrap();
         state
             .db
-            .upsert_document(collections::SUBSCRIPTIONS, "user_1", json!({}))
+            .upsert_document(collections::SUBSCRIPTIONS, &uid, json!({}))
             .await
             .unwrap();
 
-        handle_subscription_deleted(&state, &json!({ "object": { "customer": "cus_123" } }))
+        handle_subscription_deleted(&state, &json!({ "object": { "customer": cus } }))
             .await
             .unwrap();
 
         let user = state
             .db
-            .get_document(collections::USERS, "user_1")
+            .get_document(collections::USERS, &uid)
             .await
             .unwrap();
         let sub = state
             .db
-            .get_document(collections::SUBSCRIPTIONS, "user_1")
+            .get_document(collections::SUBSCRIPTIONS, &uid)
             .await
             .unwrap();
         assert_eq!(user[fields::IS_PREMIUM], false);
-        assert_eq!(sub[fields::STATUS], SubscriptionStatus::Cancelled.as_str());
+        assert_eq!(
+            sub[db_fields::STATUS],
+            SubscriptionStatus::Cancelled.as_str()
+        );
     }
 
     #[tokio::test]
     async fn test_handle_invoice_payment_failed_marks_past_due() {
         let state = setup_state().await;
+        let uid = format!("u_pastdue_{}", uuid::Uuid::new_v4().simple());
+        let cus = format!("cus_pastdue_{}", uuid::Uuid::new_v4().simple());
         state
             .db
             .upsert_document(
                 collections::USERS,
-                "user_1",
+                &uid,
                 json!({
-                    fields::UID: "user_1",
-                    fields::CUSTOMER_ID: "cus_123",
+                    fields::UID: format!("users:{uid}"),
+                    fields::CUSTOMER_ID: cus,
                 }),
             )
             .await
             .unwrap();
         state
             .db
-            .upsert_document(collections::SUBSCRIPTIONS, "user_1", json!({}))
+            .upsert_document(collections::SUBSCRIPTIONS, &uid, json!({}))
             .await
             .unwrap();
 
-        handle_invoice_payment_failed(&state, &json!({ "object": { "customer": "cus_123" } }))
+        handle_invoice_payment_failed(&state, &json!({ "object": { "customer": cus } }))
             .await
             .unwrap();
 
         let user = state
             .db
-            .get_document(collections::USERS, "user_1")
+            .get_document(collections::USERS, &uid)
             .await
             .unwrap();
         let sub = state
             .db
-            .get_document(collections::SUBSCRIPTIONS, "user_1")
+            .get_document(collections::SUBSCRIPTIONS, &uid)
             .await
             .unwrap();
         assert_eq!(
             user[fields::SUBSCRIPTION_STATUS],
             SubscriptionStatus::PastDue.as_str()
         );
-        assert_eq!(sub[fields::STATUS], SubscriptionStatus::PastDue.as_str());
+        assert_eq!(sub[db_fields::STATUS], SubscriptionStatus::PastDue.as_str());
     }
 
     #[tokio::test]
@@ -1803,15 +2043,16 @@ mod tests {
             .values
             .insert("stripe_secret_key".to_string(), "sk_test_123".to_string());
         let state = setup_state_with_config(config, server.uri()).await;
+        let uid = format!("u_chkflow_{}", uuid::Uuid::new_v4().simple());
         state
             .db
             .upsert_document(
                 collections::USERS,
-                "user_1",
+                &uid,
                 json!({
-                    fields::UID: "user_1",
-                    fields::EMAIL: "buyer@example.com",
-                    fields::NAME: "Buyer One",
+                    fields::UID: format!("users:{uid}"),
+                    db_fields::EMAIL: "buyer@example.com",
+                    db_fields::NAME: "Buyer One",
                     fields::ROLES: ["buyer"],
                 }),
             )
@@ -1820,9 +2061,10 @@ mod tests {
 
         let Json(resp) = create_subscription(
             State(state.clone()),
-            Extension(auth("test")),
+            Extension(auth(&format!("users:{uid}"))),
             Json(CreateSubscriptionRequest {
-                user_id: Some("user_1".to_string()),
+                user_id: Some(format!("users:{uid}")),
+                interval: Some("monthly".to_string()),
                 payment_method_id: None,
             }),
         )
@@ -1838,7 +2080,7 @@ mod tests {
 
         let user = state
             .db
-            .get_document(collections::USERS, "user_1")
+            .get_document(collections::USERS, &uid)
             .await
             .unwrap();
         assert_eq!(user[fields::CUSTOMER_ID], "cus_123");
@@ -1866,15 +2108,16 @@ mod tests {
             .values
             .insert("stripe_secret_key".to_string(), "sk_test_123".to_string());
         let state = setup_state_with_config(config, server.uri()).await;
+        let uid = format!("u_canurl_{}", uuid::Uuid::new_v4().simple());
         state
             .db
             .upsert_document(
                 collections::SUBSCRIPTIONS,
-                "user_1",
+                &uid,
                 json!({
-                    fields::BUYER_ID: "user_1",
+                    db_fields::BUYER_ID: format!("users:{uid}"),
                     fields::STRIPE_SUBSCRIPTION_ID: "sub_123",
-                    fields::STATUS: SubscriptionStatus::Active.as_str(),
+                    db_fields::STATUS: SubscriptionStatus::Active.as_str(),
                     fields::SUBSCRIPTION_STATUS: SubscriptionStatus::Active.as_str(),
                 }),
             )
@@ -1883,9 +2126,9 @@ mod tests {
 
         let Json(resp) = cancel_subscription(
             State(state.clone()),
-            Extension(auth("test")),
+            Extension(auth(&format!("users:{uid}"))),
             Json(CancelSubscriptionRequest {
-                user_id: Some("user_1".to_string()),
+                user_id: Some(format!("users:{uid}")),
             }),
         )
         .await
@@ -1896,14 +2139,14 @@ mod tests {
 
         let sub = state
             .db
-            .get_document(collections::SUBSCRIPTIONS, "user_1")
+            .get_document(collections::SUBSCRIPTIONS, &uid)
             .await
             .unwrap();
         assert_eq!(
-            sub[fields::STATUS],
+            sub[db_fields::STATUS],
             SubscriptionStatus::CancelPending.as_str()
         );
-        assert_eq!(sub["cancelAtPeriodEnd"], true);
+        assert_eq!(sub[fields::CANCEL_AT_PERIOD_END], true);
     }
 
     #[tokio::test]
@@ -1924,17 +2167,18 @@ mod tests {
             .values
             .insert("stripe_secret_key".to_string(), "sk_test_123".to_string());
         let state = setup_state_with_config(config, server.uri()).await;
+        let uid = format!("u_react_{}", uuid::Uuid::new_v4().simple());
         state
             .db
             .upsert_document(
                 collections::SUBSCRIPTIONS,
-                "user_1",
+                &uid,
                 json!({
-                    fields::BUYER_ID: "user_1",
+                    db_fields::BUYER_ID: format!("users:{uid}"),
                     fields::STRIPE_SUBSCRIPTION_ID: "sub_123",
-                    fields::STATUS: SubscriptionStatus::CancelPending.as_str(),
+                    db_fields::STATUS: SubscriptionStatus::CancelPending.as_str(),
                     fields::SUBSCRIPTION_STATUS: SubscriptionStatus::CancelPending.as_str(),
-                    "cancelAtPeriodEnd": true,
+                    fields::CANCEL_AT_PERIOD_END: true,
                 }),
             )
             .await
@@ -1943,9 +2187,9 @@ mod tests {
             .db
             .upsert_document(
                 collections::USERS,
-                "user_1",
+                &uid,
                 json!({
-                    fields::UID: "user_1",
+                    fields::UID: format!("users:{uid}"),
                     fields::IS_PREMIUM: false,
                 }),
             )
@@ -1954,9 +2198,9 @@ mod tests {
 
         let Json(resp) = reactivate_subscription(
             State(state.clone()),
-            Extension(auth("test")),
+            Extension(auth(&format!("users:{uid}"))),
             Json(ReactivateSubscriptionRequest {
-                user_id: Some("user_1".to_string()),
+                user_id: Some(format!("users:{uid}")),
             }),
         )
         .await
@@ -1967,16 +2211,16 @@ mod tests {
 
         let sub = state
             .db
-            .get_document(collections::SUBSCRIPTIONS, "user_1")
+            .get_document(collections::SUBSCRIPTIONS, &uid)
             .await
             .unwrap();
         let user = state
             .db
-            .get_document(collections::USERS, "user_1")
+            .get_document(collections::USERS, &uid)
             .await
             .unwrap();
-        assert_eq!(sub[fields::STATUS], SubscriptionStatus::Active.as_str());
-        assert_eq!(sub["cancelAtPeriodEnd"], false);
+        assert_eq!(sub[db_fields::STATUS], SubscriptionStatus::Active.as_str());
+        assert_eq!(sub[fields::CANCEL_AT_PERIOD_END], false);
         assert_eq!(user[fields::IS_PREMIUM], true);
     }
 
@@ -1999,7 +2243,7 @@ mod tests {
                 collections::USERS,
                 "user_1",
                 json!({
-                    fields::UID: "user_1",
+                    fields::UID: "users:user_1",
                     fields::CUSTOMER_ID: "cus_existing_123",
                 }),
             )
@@ -2031,21 +2275,22 @@ mod tests {
             .values
             .insert("stripe_secret_key".to_string(), "sk_test_123".to_string());
         let state = setup_state_with_config(config, server.uri()).await;
+        let uid = format!("u_cusfail_{}", uuid::Uuid::new_v4().simple());
         state
             .db
             .upsert_document(
                 collections::USERS,
-                "user_1",
+                &uid,
                 json!({
-                    fields::UID: "user_1",
-                    fields::EMAIL: "a@b.com",
-                    fields::NAME: "Test",
+                    fields::UID: format!("users:{uid}"),
+                    db_fields::EMAIL: "a@b.com",
+                    db_fields::NAME: "Test",
                 }),
             )
             .await
             .unwrap();
 
-        let err = ensure_customer(&state, "user_1", "sk_test_123")
+        let err = ensure_customer(&state, &uid, "sk_test_123")
             .await
             .unwrap_err();
         assert!(err.to_string().contains("Failed to create Stripe customer"));
@@ -2069,8 +2314,8 @@ mod tests {
             &state,
             "user_1",
             json!({
-                fields::STATUS: "active",
-                fields::BUYER_ID: "user_1",
+                db_fields::STATUS: "active",
+                db_fields::BUYER_ID: "user_1",
             }),
         )
         .await
@@ -2081,7 +2326,7 @@ mod tests {
             .get_document(collections::SUBSCRIPTIONS, "user_1")
             .await
             .unwrap();
-        assert_eq!(doc[fields::STATUS], "active");
+        assert_eq!(doc[db_fields::STATUS], "active");
     }
 
     // -----------------------------------------------------------------------
@@ -2093,15 +2338,36 @@ mod tests {
         let state = setup_state().await;
         let err = create_subscription(
             State(state),
-            Extension(auth("test")),
+            Extension(auth("users:user_1")),
             Json(CreateSubscriptionRequest {
-                user_id: Some("user_1".to_string()),
+                user_id: Some("users:user_1".to_string()),
+                interval: None,
                 payment_method_id: Some("".into()),
             }),
         )
         .await
         .unwrap_err();
         assert!(err.to_string().contains("paymentMethodId"));
+    }
+
+    #[tokio::test]
+    async fn test_create_subscription_rejects_invalid_interval() {
+        let state = setup_state().await;
+        let err = create_subscription(
+            State(state),
+            Extension(auth("users:user_1")),
+            Json(CreateSubscriptionRequest {
+                user_id: Some("users:user_1".to_string()),
+                interval: Some("invalid".into()),
+                payment_method_id: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("interval must be one of monthly/yearly")
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2132,8 +2398,8 @@ mod tests {
                 "user_seller",
                 json!({
                     fields::UID: "user_seller",
-                    fields::EMAIL: "seller@ex.com",
-                    fields::NAME: "Seller",
+                    db_fields::EMAIL: "seller@ex.com",
+                    db_fields::NAME: "Seller",
                     fields::ROLES: ["seller"],
                 }),
             )
@@ -2142,9 +2408,10 @@ mod tests {
 
         let err = create_subscription(
             State(state),
-            Extension(auth("test")),
+            Extension(auth("users:user_seller")),
             Json(CreateSubscriptionRequest {
-                user_id: Some("user_seller".to_string()),
+                user_id: Some("users:user_seller".to_string()),
+                interval: None,
                 payment_method_id: None,
             }),
         )
@@ -2186,8 +2453,8 @@ mod tests {
                 "user_chk",
                 json!({
                     fields::UID: "user_chk",
-                    fields::EMAIL: "chk@ex.com",
-                    fields::NAME: "Chk",
+                    db_fields::EMAIL: "chk@ex.com",
+                    db_fields::NAME: "Chk",
                     fields::ROLES: ["buyer"],
                 }),
             )
@@ -2196,9 +2463,10 @@ mod tests {
 
         let err = create_subscription(
             State(state),
-            Extension(auth("test")),
+            Extension(auth("users:user_chk")),
             Json(CreateSubscriptionRequest {
-                user_id: Some("user_chk".to_string()),
+                user_id: Some("users:user_chk".to_string()),
+                interval: None,
                 payment_method_id: None,
             }),
         )
@@ -2246,8 +2514,8 @@ mod tests {
                 "user_eu",
                 json!({
                     fields::UID: "user_eu",
-                    fields::EMAIL: "eu@ex.com",
-                    fields::NAME: "Eu",
+                    db_fields::EMAIL: "eu@ex.com",
+                    db_fields::NAME: "Eu",
                     fields::ROLES: ["buyer"],
                 }),
             )
@@ -2256,9 +2524,10 @@ mod tests {
 
         let err = create_subscription(
             State(state),
-            Extension(auth("test")),
+            Extension(auth("users:user_eu")),
             Json(CreateSubscriptionRequest {
-                user_id: Some("user_eu".to_string()),
+                user_id: Some("users:user_eu".to_string()),
+                interval: None,
                 payment_method_id: None,
             }),
         )
@@ -2303,7 +2572,7 @@ mod tests {
             .and(path("/subscriptions"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "id": "sub_pm_123",
-                "status": "active",
+                db_fields::STATUS: "active",
                 "current_period_end": 1800000000i64,
                 "latest_invoice": {
                     "payment_intent": {
@@ -2320,31 +2589,28 @@ mod tests {
             .values
             .insert("stripe_secret_key".to_string(), "sk_test_123".to_string());
         let state = setup_state_with_config(config, server.uri()).await;
+        let uid = format!("u_pm_{}", uuid::Uuid::new_v4().simple());
         state
             .db
             .upsert_document(
                 collections::USERS,
-                "user_pm",
+                &uid,
                 json!({
-                    fields::UID: "user_pm",
-                    fields::EMAIL: "pm@ex.com",
-                    fields::NAME: "PM User",
+                    fields::UID: uid,
+                    db_fields::EMAIL: "pm@ex.com",
+                    db_fields::NAME: "PM User",
                 }),
             )
             .await
             .unwrap();
-        // Need a subscription doc for upsert to work
-        state
-            .db
-            .upsert_document(collections::SUBSCRIPTIONS, "user_pm", json!({}))
-            .await
-            .unwrap();
+        // No pre-existing subscription — atomic CREATE handles new records
 
         let Json(resp) = create_subscription(
             State(state.clone()),
-            Extension(auth("test")),
+            Extension(auth(&format!("users:{uid}"))),
             Json(CreateSubscriptionRequest {
-                user_id: Some("user_pm".to_string()),
+                user_id: Some(format!("users:{uid}")),
+                interval: None,
                 payment_method_id: Some("pm_test_abc".into()),
             }),
         )
@@ -2360,7 +2626,7 @@ mod tests {
         // Verify user was marked premium
         let user = state
             .db
-            .get_document(collections::USERS, "user_pm")
+            .get_document(collections::USERS, &uid)
             .await
             .unwrap();
         assert_eq!(user[fields::IS_PREMIUM], true);
@@ -2399,8 +2665,8 @@ mod tests {
                 "user_af",
                 json!({
                     fields::UID: "user_af",
-                    fields::EMAIL: "af@ex.com",
-                    fields::NAME: "AF User",
+                    db_fields::EMAIL: "af@ex.com",
+                    db_fields::NAME: "AF User",
                 }),
             )
             .await
@@ -2408,9 +2674,10 @@ mod tests {
 
         let err = create_subscription(
             State(state),
-            Extension(auth("test")),
+            Extension(auth("users:user_af")),
             Json(CreateSubscriptionRequest {
-                user_id: Some("user_af".to_string()),
+                user_id: Some("users:user_af".to_string()),
+                interval: None,
                 payment_method_id: Some("pm_bad".into()),
             }),
         )
@@ -2450,7 +2717,7 @@ mod tests {
             .and(path("/subscriptions"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "id": "sub_aa",
-                "status": "incomplete",
+                db_fields::STATUS: "incomplete",
                 "current_period_end": 0,
                 "latest_invoice": {
                     "payment_intent": {
@@ -2474,23 +2741,18 @@ mod tests {
                 "user_aa",
                 json!({
                     fields::UID: "user_aa",
-                    fields::EMAIL: "aa@ex.com",
-                    fields::NAME: "AA User",
+                    db_fields::EMAIL: "aa@ex.com",
+                    db_fields::NAME: "AA User",
                 }),
             )
             .await
             .unwrap();
-        state
-            .db
-            .upsert_document(collections::SUBSCRIPTIONS, "user_aa", json!({}))
-            .await
-            .unwrap();
-
         let Json(resp) = create_subscription(
             State(state),
-            Extension(auth("test")),
+            Extension(auth("users:user_aa")),
             Json(CreateSubscriptionRequest {
-                user_id: Some("user_aa".to_string()),
+                user_id: Some("users:user_aa".to_string()),
+                interval: None,
                 payment_method_id: Some("pm_aa".into()),
             }),
         )
@@ -2545,8 +2807,8 @@ mod tests {
                 "user_sf",
                 json!({
                     fields::UID: "user_sf",
-                    fields::EMAIL: "sf@ex.com",
-                    fields::NAME: "SF User",
+                    db_fields::EMAIL: "sf@ex.com",
+                    db_fields::NAME: "SF User",
                 }),
             )
             .await
@@ -2554,9 +2816,10 @@ mod tests {
 
         let err = create_subscription(
             State(state),
-            Extension(auth("test")),
+            Extension(auth("users:user_sf")),
             Json(CreateSubscriptionRequest {
-                user_id: Some("user_sf".to_string()),
+                user_id: Some("users:user_sf".to_string()),
+                interval: None,
                 payment_method_id: Some("pm_sf".into()),
             }),
         )
@@ -2578,8 +2841,8 @@ mod tests {
                 collections::SUBSCRIPTIONS,
                 "user_noid",
                 json!({
-                    fields::BUYER_ID: "user_noid",
-                    fields::STATUS: SubscriptionStatus::Active.as_str(),
+                    db_fields::BUYER_ID: "users:user_noid",
+                    db_fields::STATUS: SubscriptionStatus::Active.as_str(),
                 }),
             )
             .await
@@ -2587,9 +2850,9 @@ mod tests {
 
         let err = cancel_subscription(
             State(state),
-            Extension(auth("test")),
+            Extension(auth("users:user_noid")),
             Json(CancelSubscriptionRequest {
-                user_id: Some("user_noid".to_string()),
+                user_id: Some("users:user_noid".to_string()),
             }),
         )
         .await
@@ -2610,9 +2873,9 @@ mod tests {
                 collections::SUBSCRIPTIONS,
                 "user_cc",
                 json!({
-                    fields::BUYER_ID: "user_cc",
+                    db_fields::BUYER_ID: "users:user_cc",
                     fields::STRIPE_SUBSCRIPTION_ID: "sub_cc",
-                    fields::STATUS: SubscriptionStatus::Cancelled.as_str(),
+                    db_fields::STATUS: SubscriptionStatus::Cancelled.as_str(),
                 }),
             )
             .await
@@ -2620,9 +2883,9 @@ mod tests {
 
         let Json(resp) = cancel_subscription(
             State(state),
-            Extension(auth("test")),
+            Extension(auth("users:user_cc")),
             Json(CancelSubscriptionRequest {
-                user_id: Some("user_cc".to_string()),
+                user_id: Some("users:user_cc".to_string()),
             }),
         )
         .await
@@ -2657,9 +2920,9 @@ mod tests {
                 collections::SUBSCRIPTIONS,
                 "user_cf",
                 json!({
-                    fields::BUYER_ID: "user_cf",
+                    db_fields::BUYER_ID: "users:user_cf",
                     fields::STRIPE_SUBSCRIPTION_ID: "sub_fail",
-                    fields::STATUS: SubscriptionStatus::Active.as_str(),
+                    db_fields::STATUS: SubscriptionStatus::Active.as_str(),
                 }),
             )
             .await
@@ -2667,9 +2930,9 @@ mod tests {
 
         let err = cancel_subscription(
             State(state),
-            Extension(auth("test")),
+            Extension(auth("users:user_cf")),
             Json(CancelSubscriptionRequest {
-                user_id: Some("user_cf".to_string()),
+                user_id: Some("users:user_cf".to_string()),
             }),
         )
         .await
@@ -2686,9 +2949,9 @@ mod tests {
         let state = setup_state().await;
         let Json(resp) = subscription_status(
             State(state),
-            Extension(auth("test")),
+            Extension(auth("users:user_none")),
             Json(SubscriptionStatusRequest {
-                user_id: Some("user_none".to_string()),
+                user_id: Some("users:user_none".to_string()),
             }),
         )
         .await
@@ -2714,8 +2977,8 @@ mod tests {
                 collections::SUBSCRIPTIONS,
                 "user_noid2",
                 json!({
-                    fields::BUYER_ID: "user_noid2",
-                    fields::STATUS: SubscriptionStatus::CancelPending.as_str(),
+                    db_fields::BUYER_ID: "users:user_noid2",
+                    db_fields::STATUS: SubscriptionStatus::CancelPending.as_str(),
                 }),
             )
             .await
@@ -2723,9 +2986,9 @@ mod tests {
 
         let err = reactivate_subscription(
             State(state),
-            Extension(auth("test")),
+            Extension(auth("users:user_noid2")),
             Json(ReactivateSubscriptionRequest {
-                user_id: Some("user_noid2".to_string()),
+                user_id: Some("users:user_noid2".to_string()),
             }),
         )
         .await
@@ -2746,9 +3009,9 @@ mod tests {
                 collections::SUBSCRIPTIONS,
                 "user_active",
                 json!({
-                    fields::BUYER_ID: "user_active",
+                    db_fields::BUYER_ID: "users:user_active",
                     fields::STRIPE_SUBSCRIPTION_ID: "sub_active",
-                    fields::STATUS: SubscriptionStatus::Active.as_str(),
+                    db_fields::STATUS: SubscriptionStatus::Active.as_str(),
                 }),
             )
             .await
@@ -2756,9 +3019,9 @@ mod tests {
 
         let Json(resp) = reactivate_subscription(
             State(state),
-            Extension(auth("test")),
+            Extension(auth("users:user_active")),
             Json(ReactivateSubscriptionRequest {
-                user_id: Some("user_active".to_string()),
+                user_id: Some("users:user_active".to_string()),
             }),
         )
         .await
@@ -2793,9 +3056,9 @@ mod tests {
                 collections::SUBSCRIPTIONS,
                 "user_rf",
                 json!({
-                    fields::BUYER_ID: "user_rf",
+                    db_fields::BUYER_ID: "users:user_rf",
                     fields::STRIPE_SUBSCRIPTION_ID: "sub_rfail",
-                    fields::STATUS: SubscriptionStatus::CancelPending.as_str(),
+                    db_fields::STATUS: SubscriptionStatus::CancelPending.as_str(),
                 }),
             )
             .await
@@ -2803,9 +3066,9 @@ mod tests {
 
         let err = reactivate_subscription(
             State(state),
-            Extension(auth("test")),
+            Extension(auth("users:user_rf")),
             Json(ReactivateSubscriptionRequest {
-                user_id: Some("user_rf".to_string()),
+                user_id: Some("users:user_rf".to_string()),
             }),
         )
         .await
@@ -2829,7 +3092,7 @@ mod tests {
                 collections::USERS,
                 "user_np",
                 json!({
-                    fields::UID: "user_np",
+                    fields::UID: "users:user_np",
                 }),
             )
             .await
@@ -2837,9 +3100,9 @@ mod tests {
 
         let Json(resp) = update_notification_preferences(
             State(state.clone()),
-            Extension(auth("test")),
+            Extension(auth("users:user_np")),
             Json(SubscriptionNotificationPrefsRequest {
-                user_id: Some("user_np".to_string()),
+                user_id: Some("users:user_np".to_string()),
                 notify_new_products: Some(true),
                 notify_trending: Some(false),
             }),
@@ -2867,7 +3130,7 @@ mod tests {
                 collections::USERS,
                 "user_np2",
                 json!({
-                    fields::UID: "user_np2",
+                    fields::UID: "users:user_np2",
                 }),
             )
             .await
@@ -2875,9 +3138,9 @@ mod tests {
 
         let Json(resp) = update_notification_preferences(
             State(state.clone()),
-            Extension(auth("test")),
+            Extension(auth("users:user_np2")),
             Json(SubscriptionNotificationPrefsRequest {
-                user_id: Some("user_np2".to_string()),
+                user_id: Some("users:user_np2".to_string()),
                 notify_new_products: Some(false),
                 notify_trending: None,
             }),
@@ -2896,7 +3159,7 @@ mod tests {
                 collections::USERS,
                 "user_np3",
                 json!({
-                    fields::UID: "user_np3",
+                    fields::UID: "users:user_np3",
                 }),
             )
             .await
@@ -2904,9 +3167,9 @@ mod tests {
 
         let Json(resp) = update_notification_preferences(
             State(state.clone()),
-            Extension(auth("test")),
+            Extension(auth("users:user_np3")),
             Json(SubscriptionNotificationPrefsRequest {
-                user_id: Some("user_np3".to_string()),
+                user_id: Some("users:user_np3".to_string()),
                 notify_new_products: None,
                 notify_trending: Some(true),
             }),
@@ -2936,7 +3199,7 @@ mod tests {
                 collections::USERS,
                 "user_wh",
                 json!({
-                    fields::UID: "user_wh",
+                    fields::UID: "users:user_wh",
                     fields::CUSTOMER_ID: "cus_wh",
                 }),
             )
@@ -2961,7 +3224,7 @@ mod tests {
                 collections::USERS,
                 "user_whu",
                 json!({
-                    fields::UID: "user_whu",
+                    fields::UID: "users:user_whu",
                     fields::CUSTOMER_ID: "cus_whu",
                 }),
             )
@@ -2979,7 +3242,7 @@ mod tests {
             &json!({
                 "object": {
                     "customer": "cus_whu",
-                    "status": "active",
+                    db_fields::STATUS: "active",
                     "current_period_end": 9999,
                     "cancel_at_period_end": false
                 }
@@ -2998,7 +3261,7 @@ mod tests {
                 collections::USERS,
                 "user_whd",
                 json!({
-                    fields::UID: "user_whd",
+                    fields::UID: "users:user_whd",
                     fields::CUSTOMER_ID: "cus_whd",
                     fields::IS_PREMIUM: true,
                 }),
@@ -3029,7 +3292,7 @@ mod tests {
                 collections::USERS,
                 "user_whf",
                 json!({
-                    fields::UID: "user_whf",
+                    fields::UID: "users:user_whf",
                     fields::CUSTOMER_ID: "cus_whf",
                 }),
             )

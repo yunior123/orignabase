@@ -1,3 +1,4 @@
+use ob_core::constants::fields as f;
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -33,7 +34,7 @@ pub struct IndexConfig {
 }
 
 fn default_pk() -> String {
-    "id".to_string()
+    f::ID.to_string()
 }
 
 impl Default for SearchConfig {
@@ -69,7 +70,7 @@ mod tests {
             [indexes.products]
             searchable = ["title", "description"]
             filterable = ["category", "price"]
-            sortable = ["price", "created_at"]
+            sortable = ["price", "createdAt"]
         "#;
         let config: SearchConfig = toml::from_str(toml_str).unwrap();
         assert!(config.enabled);

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# data-retention.sh — TTL cleanup for SurrealDB
+# data-retention.sh — TTL cleanup for PostgreSQL
 #
 # Policy:
 #   - webhook_events: DELETE after 90 days
@@ -13,29 +13,26 @@
 #   0 3 * * * /opt/orignabase/scripts/data-retention.sh production >> /var/log/data-retention.log 2>&1
 #
 # Requirements:
-#   - curl
-#   - Access to SurrealDB HTTP endpoint (localhost:8000)
-#   - SurrealDB credentials (root / orignabase_root_2026)
+#   - psql
+#   - Access to PostgreSQL (localhost:5432 by default)
 
 set -euo pipefail
 
 ENV="${1:-dev}"
 
 case "$ENV" in
-  dev)        DB="dev" ;;
-  staging)    DB="staging" ;;
-  production) DB="main" ;;
+  dev|staging|production) DB="${POSTGRES_DB:-orignabase}" ;;
   *)
     echo "Unknown env: $ENV (use dev|staging|production)"
     exit 1
     ;;
 esac
 
-SURREAL_URL="http://localhost:8000/sql"
-SURREAL_NS="orignabase"
-SURREAL_DB="$DB"
-SURREAL_USER="root"
-SURREAL_PASS="orignabase_root_2026"
+PGHOST="${POSTGRES_HOST:-localhost}"
+PGPORT="${POSTGRES_PORT:-5432}"
+PGUSER="${POSTGRES_USER:-orignabase}"
+PGPASSWORD="${POSTGRES_PASSWORD:-orignabase_dev}"
+export PGPASSWORD
 
 NOW_EPOCH=$(date +%s)
 DAYS_90_AGO=$(( NOW_EPOCH - 90 * 86400 ))
@@ -45,22 +42,26 @@ echo "[$(date -Iseconds)] Starting data retention cleanup (env=$ENV, db=$DB)"
 
 # Delete webhook_events older than 90 days
 echo "  Deleting webhook_events older than 90 days (before epoch $DAYS_90_AGO)..."
-RESULT_WEBHOOKS=$(curl -sf -X POST "$SURREAL_URL" \
-  -H "Accept: application/json" \
-  -H "NS: $SURREAL_NS" \
-  -H "DB: $SURREAL_DB" \
-  -u "$SURREAL_USER:$SURREAL_PASS" \
-  -d "DELETE FROM webhook_events WHERE timestamp < $DAYS_90_AGO;")
+RESULT_WEBHOOKS=$(psql \
+  --host "$PGHOST" \
+  --port "$PGPORT" \
+  --username "$PGUSER" \
+  --dbname "$DB" \
+  --tuples-only \
+  --no-align \
+  -c "DELETE FROM webhook_events WHERE timestamp < $DAYS_90_AGO;")
 echo "  Result: $RESULT_WEBHOOKS"
 
 # Delete _pending_notifications older than 30 days
 echo "  Deleting _pending_notifications older than 30 days (before epoch $DAYS_30_AGO)..."
-RESULT_NOTIFS=$(curl -sf -X POST "$SURREAL_URL" \
-  -H "Accept: application/json" \
-  -H "NS: $SURREAL_NS" \
-  -H "DB: $SURREAL_DB" \
-  -u "$SURREAL_USER:$SURREAL_PASS" \
-  -d "DELETE FROM _pending_notifications WHERE createdAt < $DAYS_30_AGO;")
+RESULT_NOTIFS=$(psql \
+  --host "$PGHOST" \
+  --port "$PGPORT" \
+  --username "$PGUSER" \
+  --dbname "$DB" \
+  --tuples-only \
+  --no-align \
+  -c "DELETE FROM _pending_notifications WHERE created_at < to_timestamp($DAYS_30_AGO);")
 echo "  Result: $RESULT_NOTIFS"
 
 echo "[$(date -Iseconds)] Data retention cleanup complete."

@@ -17,6 +17,9 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 rand = { workspace = true }
+sqlx = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
+tower = { workspace = true }
+http-body-util = "0.1"

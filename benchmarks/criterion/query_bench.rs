@@ -2,7 +2,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use serde_json::json;
 
 /// Benchmark GraphQL filter translation (the logic that converts
-/// `{field: {_eq: value}}` style filters into SurrealQL WHERE clauses).
+/// `{field: {_eq: value}}` style filters into SQL WHERE clauses).
 ///
 /// This benchmarks the core hot path of every database query.
 fn bench_filter_translation(c: &mut Criterion) {
@@ -50,7 +50,7 @@ fn translate_filter(filter: &serde_json::Value) -> String {
         for (field, ops) in obj {
             if let Some(ops_obj) = ops.as_object() {
                 for (op, value) in ops_obj {
-                    let surreal_op = match op.as_str() {
+                    let query_op = match op.as_str() {
                         "_eq" => "=",
                         "_ne" => "!=",
                         "_gt" => ">",
@@ -75,7 +75,7 @@ fn translate_filter(filter: &serde_json::Value) -> String {
                         }
                         other => other.to_string(),
                     };
-                    clauses.push(format!("{field} {surreal_op} {val_str}"));
+                    clauses.push(format!("{field} {query_op} {val_str}"));
                 }
             }
         }

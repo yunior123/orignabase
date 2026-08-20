@@ -21,7 +21,6 @@ import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:orignabase/orignabase.dart';
-import 'package:orignabase/src/persistent_storage.dart';
 import 'package:test/test.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -206,8 +205,7 @@ void main() {
       await ob.auth.resetPassword('reset_tok_123', 'NewP@ssw0rd!');
 
       expect(rec.requests.length, 1);
-      final body =
-          jsonDecode(rec.requests.first.body) as Map<String, dynamic>;
+      final body = jsonDecode(rec.requests.first.body) as Map<String, dynamic>;
       expect(body['token'], 'reset_tok_123');
       expect(body['new_password'], 'NewP@ssw0rd!');
       expect(rec.requests.first.url.path, '/auth/reset-password');
@@ -318,8 +316,7 @@ void main() {
       final state = await ob.auth.signInWithOidc('oidc_token_xyz');
 
       expect(state.isAuthenticated, isTrue);
-      final body =
-          jsonDecode(rec.requests.first.body) as Map<String, dynamic>;
+      final body = jsonDecode(rec.requests.first.body) as Map<String, dynamic>;
       expect(body['access_token'], 'oidc_token_xyz');
       expect(rec.requests.first.url.path, '/auth/oidc');
     });
@@ -340,8 +337,7 @@ void main() {
           .upgradeAnonymous('real@email.com', 'Pass123!', displayName: 'Yuni');
 
       expect(state.isAuthenticated, isTrue);
-      final body =
-          jsonDecode(rec.requests.first.body) as Map<String, dynamic>;
+      final body = jsonDecode(rec.requests.first.body) as Map<String, dynamic>;
       expect(body['email'], 'real@email.com');
       expect(body['password'], 'Pass123!');
       expect(body['display_name'], 'Yuni');
@@ -358,8 +354,7 @@ void main() {
 
       await ob.auth.upgradeAnonymous('email@test.com', 'password');
 
-      final body =
-          jsonDecode(rec.requests.first.body) as Map<String, dynamic>;
+      final body = jsonDecode(rec.requests.first.body) as Map<String, dynamic>;
       expect(body.containsKey('display_name'), isFalse);
     });
   });
@@ -379,8 +374,7 @@ void main() {
           await ob.auth.useMfaRecoveryCode('challenge_tok', 'ABCD-EFGH-1234');
 
       expect(state.isAuthenticated, isTrue);
-      final body =
-          jsonDecode(rec.requests.first.body) as Map<String, dynamic>;
+      final body = jsonDecode(rec.requests.first.body) as Map<String, dynamic>;
       expect(body['challenge_token'], 'challenge_tok');
       expect(body['recovery_code'], 'ABCD-EFGH-1234');
       expect(rec.requests.first.url.path, '/auth/mfa/recovery');
@@ -435,8 +429,7 @@ void main() {
         httpClient: MockClient((request) async {
           final body = responses[callCount++];
           // setupMfa and verifyMfaSetup return nested data
-          final responseBody =
-              body.containsKey('data') ? body['data']! : body;
+          final responseBody = body.containsKey('data') ? body['data']! : body;
           return http.Response(jsonEncode(responseBody), 200,
               headers: {'content-type': 'application/json'});
         }),
@@ -487,15 +480,13 @@ void main() {
       );
 
       // Step 1: Login
-      final loginState =
-          await ob.auth.signInWithEmail('mfa@test.com', 'pass');
+      final loginState = await ob.auth.signInWithEmail('mfa@test.com', 'pass');
       expect(loginState.mfaRequired, isTrue);
       expect(loginState.challengeToken, 'ch_tok_xyz');
       expect(loginState.isAuthenticated, isFalse);
 
       // Step 2: Complete MFA
-      final mfaState =
-          await ob.auth.verifyMfaChallenge('ch_tok_xyz', '789012');
+      final mfaState = await ob.auth.verifyMfaChallenge('ch_tok_xyz', '789012');
       expect(mfaState.isAuthenticated, isTrue);
       expect(ob.auth.accessToken, 'at_mfa');
     });
@@ -513,7 +504,7 @@ void main() {
       final sub = ob.auth.authStateChanges.listen(states.add);
 
       await ob.auth.signInWithEmail('u@t.com', 'p');
-      ob.auth.signOut();
+      await ob.auth.signOut();
 
       await Future<void>.delayed(Duration.zero);
 
@@ -536,11 +527,9 @@ void main() {
       final ob = OrignaBase.initialize(
           url: 'http://test.local', httpClient: rec.client);
 
-      await ob.auth
-          .signInWithApple('auth_code_abc', displayName: 'Yunior R');
+      await ob.auth.signInWithApple('auth_code_abc', displayName: 'Yunior R');
 
-      final body =
-          jsonDecode(rec.requests.first.body) as Map<String, dynamic>;
+      final body = jsonDecode(rec.requests.first.body) as Map<String, dynamic>;
       expect(body['authorization_code'], 'auth_code_abc');
       expect(body['display_name'], 'Yunior R');
     });
@@ -556,8 +545,7 @@ void main() {
 
       await ob.auth.signInWithApple('auth_code_abc');
 
-      final body =
-          jsonDecode(rec.requests.first.body) as Map<String, dynamic>;
+      final body = jsonDecode(rec.requests.first.body) as Map<String, dynamic>;
       expect(body.containsKey('display_name'), isFalse);
     });
   });
@@ -606,7 +594,8 @@ void main() {
       expect(batch.isEmpty, isFalse);
 
       final results = await batch.commit();
-      expect(results.length, greaterThanOrEqualTo(3)); // 2 creates + 1 update + 1 delete result
+      expect(results.length,
+          greaterThanOrEqualTo(3)); // 2 creates + 1 update + 1 delete result
     });
 
     test('cross-collection batch groups by collection', () async {
@@ -675,9 +664,8 @@ void main() {
 
       // Verify the request contained processed FieldValue
       final createReq = rec.requests.first;
-      final query =
-          (jsonDecode(createReq.body) as Map<String, dynamic>)['query']
-              as String;
+      final query = (jsonDecode(createReq.body)
+          as Map<String, dynamic>)['query'] as String;
       expect(query, contains('_serverTimestamp'));
     });
   });
@@ -728,9 +716,8 @@ void main() {
           ob.collection('products').subcollection('prod_1', 'reviews');
       await reviews.add({'rating': 5, 'text': 'Great!'});
 
-      final query =
-          (jsonDecode(rec.requests.first.body) as Map<String, dynamic>)['query']
-              as String;
+      final query = (jsonDecode(rec.requests.first.body)
+          as Map<String, dynamic>)['query'] as String;
       expect(query, contains('products__reviews'));
       expect(query, contains('parent_id'));
       expect(query, contains('products:prod_1'));
@@ -771,8 +758,7 @@ void main() {
     test('individual docs cached alongside query result', () async {
       final cache = OfflineCache();
       final docs = [
-        Document(
-            id: 'p1', collection: 'products', data: {'title': 'Widget'}),
+        Document(id: 'p1', collection: 'products', data: {'title': 'Widget'}),
       ];
 
       await cache.cacheQueryResult('products', 'search_widget', docs);
@@ -801,7 +787,9 @@ void main() {
       await cache.cacheQueryResult(
         'products',
         'all',
-        [Document(id: 'p1', collection: 'products', data: {'x': 1})],
+        [
+          Document(id: 'p1', collection: 'products', data: {'x': 1})
+        ],
       );
 
       // Invalidate products
@@ -1016,9 +1004,8 @@ void main() {
           .limit(20)
           .get();
 
-      final query =
-          (jsonDecode(rec.requests.first.body) as Map<String, dynamic>)['query']
-              as String;
+      final query = (jsonDecode(rec.requests.first.body)
+          as Map<String, dynamic>)['query'] as String;
       expect(query, contains('collection: "products"'));
       expect(query, contains('orderBy: "price"'));
       expect(query, contains('limit: 20'));
@@ -1036,9 +1023,8 @@ void main() {
           Document(id: 'last_doc_id', collection: 'products', data: {});
       await ob.collection('products').startAfter(cursor).limit(20).get();
 
-      final query =
-          (jsonDecode(rec.requests.first.body) as Map<String, dynamic>)['query']
-              as String;
+      final query = (jsonDecode(rec.requests.first.body)
+          as Map<String, dynamic>)['query'] as String;
       expect(query, contains('startAfter: "last_doc_id"'));
     });
 
@@ -1051,11 +1037,25 @@ void main() {
 
       await ob.collection('products').offset(40).limit(20).get();
 
-      final query =
-          (jsonDecode(rec.requests.first.body) as Map<String, dynamic>)['query']
-              as String;
+      final query = (jsonDecode(rec.requests.first.body)
+          as Map<String, dynamic>)['query'] as String;
       expect(query, contains('offset: 40'));
       expect(query, contains('limit: 20'));
+    });
+
+    test('zero offset is omitted from list query', () async {
+      final rec = recordingClient((_) => {
+            'data': {'list': []}
+          });
+      final ob = OrignaBase.initialize(
+          url: 'http://test.local', httpClient: rec.client);
+
+      await ob.collection('products').offset(0).limit(20).get();
+
+      final query = (jsonDecode(rec.requests.first.body)
+          as Map<String, dynamic>)['query'] as String;
+      expect(query, contains('limit: 20'));
+      expect(query, isNot(contains('offset: 0')));
     });
 
     test('N+1 pattern: hasMore true when results exceed limit', () async {
@@ -1070,8 +1070,7 @@ void main() {
             }
           });
 
-      final snapshot =
-          await ob.collection('products').limit(3).get();
+      final snapshot = await ob.collection('products').limit(3).get();
       expect(snapshot.docs.length, 3); // Only 3 returned
       expect(snapshot.hasMore, isTrue);
       expect(snapshot.lastDocument!.id, 'p3');
@@ -1118,8 +1117,7 @@ void main() {
     test('update with 403 throws ForbiddenException', () {
       final ob = obWithStatus(403, {'message': 'Insufficient permissions'});
       expect(
-        () =>
-            ob.collection('products').doc('p1').update({'price': 0}),
+        () => ob.collection('products').doc('p1').update({'price': 0}),
         throwsA(isA<ForbiddenException>()),
       );
     });
@@ -1144,8 +1142,7 @@ void main() {
       );
 
       expect(
-        () => ob.storage
-            .upload('test.png', Uint8List.fromList([1, 2, 3])),
+        () => ob.storage.upload('test.png', Uint8List.fromList([1, 2, 3])),
         throwsA(isA<OrignaBaseException>()),
       );
     });
@@ -1301,8 +1298,7 @@ void main() {
       final ob = OrignaBase.initialize(
           url: 'http://test.local', httpClient: rec.client);
 
-      final updated =
-          await ob.collection('products').doc('prod_1').update({
+      final updated = await ob.collection('products').doc('prod_1').update({
         'stock': FieldValue.increment(-1),
         'sold_count': FieldValue.increment(1),
         'updated_at': FieldValue.serverTimestamp(),
@@ -1310,9 +1306,8 @@ void main() {
 
       expect(updated, isNotNull);
       // Verify the request was correctly formatted
-      final query =
-          (jsonDecode(rec.requests.first.body) as Map<String, dynamic>)['query']
-              as String;
+      final query = (jsonDecode(rec.requests.first.body)
+          as Map<String, dynamic>)['query'] as String;
       expect(query, contains('_increment'));
       expect(query, contains('_serverTimestamp'));
     });
@@ -1322,21 +1317,20 @@ void main() {
     test('add to favorites', () async {
       final rec = recordingClient((_) => {
             'data': {
-              'updateWithFieldValues': {'id': 'user_1', 'favorites': ['p1', 'p2', 'p3']}
+              'updateWithFieldValues': {
+                'id': 'user_1',
+                'favorites': ['p1', 'p2', 'p3']
+              }
             }
           });
       final ob = OrignaBase.initialize(
           url: 'http://test.local', httpClient: rec.client);
 
-      await ob
-          .collection('users')
-          .doc('user_1')
-          .update({
+      await ob.collection('users').doc('user_1').update({
         'favorites': FieldValue.arrayUnion(['p3']),
       });
 
-      final body = jsonDecode(rec.requests.first.body)
-          as Map<String, dynamic>;
+      final body = jsonDecode(rec.requests.first.body) as Map<String, dynamic>;
       final query = body['query'] as String;
       expect(query, contains('_arrayUnion'));
     });
@@ -1344,21 +1338,20 @@ void main() {
     test('remove from favorites', () async {
       final rec = recordingClient((_) => {
             'data': {
-              'updateWithFieldValues': {'id': 'user_1', 'favorites': ['p1', 'p2']}
+              'updateWithFieldValues': {
+                'id': 'user_1',
+                'favorites': ['p1', 'p2']
+              }
             }
           });
       final ob = OrignaBase.initialize(
           url: 'http://test.local', httpClient: rec.client);
 
-      await ob
-          .collection('users')
-          .doc('user_1')
-          .update({
+      await ob.collection('users').doc('user_1').update({
         'favorites': FieldValue.arrayRemove(['p3']),
       });
 
-      final body = jsonDecode(rec.requests.first.body)
-          as Map<String, dynamic>;
+      final body = jsonDecode(rec.requests.first.body) as Map<String, dynamic>;
       final query = body['query'] as String;
       expect(query, contains('_arrayRemove'));
     });
@@ -1489,9 +1482,8 @@ void main() {
       await ob.search('products_index', 'wireless',
           limit: 10, offset: 0, filter: 'status=active');
 
-      final query =
-          (jsonDecode(rec.requests.first.body) as Map<String, dynamic>)['query']
-              as String;
+      final query = (jsonDecode(rec.requests.first.body)
+          as Map<String, dynamic>)['query'] as String;
       expect(query, contains('index: "products_index"'));
       expect(query, contains('query: "wireless"'));
       expect(query, contains('limit: 10'));
@@ -1574,8 +1566,8 @@ void main() {
       final stream = rt.subscribeDocument('products', 'prod1');
       await Future.delayed(Duration(milliseconds: 10));
 
-      final subId =
-          (jsonDecode(fakeChannel.sent.first) as Map<String, dynamic>)['id'] as String;
+      final subId = (jsonDecode(fakeChannel.sent.first)
+          as Map<String, dynamic>)['id'] as String;
 
       final changes = <DocumentChange>[];
       final sub = stream.listen(changes.add);
@@ -1602,8 +1594,8 @@ void main() {
       final stream = rt.subscribeDocument('orders', 'order1');
       await Future.delayed(Duration(milliseconds: 10));
 
-      final subId =
-          (jsonDecode(fakeChannel.sent.first) as Map<String, dynamic>)['id'] as String;
+      final subId = (jsonDecode(fakeChannel.sent.first)
+          as Map<String, dynamic>)['id'] as String;
 
       final changes = <DocumentChange>[];
       final sub = stream.listen(changes.add);
@@ -1628,8 +1620,8 @@ void main() {
       final stream = rt.subscribeDocument('cart', 'item1');
       await Future.delayed(Duration(milliseconds: 10));
 
-      final subId =
-          (jsonDecode(fakeChannel.sent.first) as Map<String, dynamic>)['id'] as String;
+      final subId = (jsonDecode(fakeChannel.sent.first)
+          as Map<String, dynamic>)['id'] as String;
 
       final changes = <DocumentChange>[];
       final sub = stream.listen(changes.add);
@@ -1676,7 +1668,9 @@ void main() {
       final changes = <DocumentChange>[];
       final sub = stream.listen(changes.add);
 
-      fakeChannel.simulateMessage({'event': {'action': 'update'}});
+      fakeChannel.simulateMessage({
+        'event': {'action': 'update'}
+      });
 
       await Future.delayed(Duration(milliseconds: 10));
       expect(changes, isEmpty);
@@ -1687,8 +1681,8 @@ void main() {
       final stream = rt.subscribeDocument('users', 'u1');
       await Future.delayed(Duration(milliseconds: 10));
 
-      final subId =
-          (jsonDecode(fakeChannel.sent.first) as Map<String, dynamic>)['id'] as String;
+      final subId = (jsonDecode(fakeChannel.sent.first)
+          as Map<String, dynamic>)['id'] as String;
 
       final changes = <DocumentChange>[];
       final sub = stream.listen(changes.add);
@@ -1704,8 +1698,8 @@ void main() {
       final stream = rt.subscribeDocument('users', 'u1');
       await Future.delayed(Duration(milliseconds: 10));
 
-      final subId =
-          (jsonDecode(fakeChannel.sent.first) as Map<String, dynamic>)['id'] as String;
+      final subId = (jsonDecode(fakeChannel.sent.first)
+          as Map<String, dynamic>)['id'] as String;
 
       final changes = <DocumentChange>[];
       final sub = stream.listen(changes.add);
@@ -1775,8 +1769,8 @@ void main() {
       final stream = rt.subscribe('notifications');
       await Future.delayed(Duration(milliseconds: 10));
 
-      final subId =
-          (jsonDecode(fakeChannel.sent.first) as Map<String, dynamic>)['id'] as String;
+      final subId = (jsonDecode(fakeChannel.sent.first)
+          as Map<String, dynamic>)['id'] as String;
 
       final changes = <DocumentChange>[];
       final sub = stream.listen(changes.add);
@@ -1816,8 +1810,8 @@ void main() {
       final stream = rt.subscribeDocument('users', 'u1');
       await Future.delayed(Duration(milliseconds: 10));
 
-      final subId =
-          (jsonDecode(fakeChannel.sent.first) as Map<String, dynamic>)['id'] as String;
+      final subId = (jsonDecode(fakeChannel.sent.first)
+          as Map<String, dynamic>)['id'] as String;
 
       final sub = stream.listen((_) {});
       await sub.cancel();
@@ -1864,30 +1858,35 @@ void main() {
       rt = RealtimeClient.withChannel(ob, fakeChannel);
     });
 
-    test('closes all streams when server disconnects', () async {
+    test('schedules reconnect when server disconnects', () async {
       final stream = rt.subscribeDocument('users', 'u1');
 
-      var done = false;
-      stream.listen((_) {}, onDone: () => done = true);
+      var receivedData = false;
+      stream.listen((_) {
+        receivedData = true;
+      });
       await Future.delayed(Duration(milliseconds: 10));
 
       fakeChannel.simulateClose();
+
       await Future.delayed(Duration(milliseconds: 10));
 
-      expect(done, isTrue);
+      expect(receivedData, isFalse);
     });
 
-    test('handles server error gracefully', () async {
+    test('schedules reconnect when server errors', () async {
       final stream = rt.subscribe('orders');
 
-      var done = false;
-      stream.listen((_) {}, onDone: () => done = true);
+      var dataReceived = false;
+      stream.listen((_) {
+        dataReceived = true;
+      });
       await Future.delayed(Duration(milliseconds: 10));
 
       fakeChannel.simulateError(Exception('Connection reset'));
       await Future.delayed(Duration(milliseconds: 50));
 
-      expect(done, isTrue);
+      expect(dataReceived, isFalse);
     });
   });
 
@@ -1911,10 +1910,10 @@ void main() {
       final stream2 = rt.subscribeDocument('users', 'u2');
       await Future.delayed(Duration(milliseconds: 10));
 
-      final sub1Id =
-          (jsonDecode(fakeChannel.sent[0]) as Map<String, dynamic>)['id'] as String;
-      final sub2Id =
-          (jsonDecode(fakeChannel.sent[1]) as Map<String, dynamic>)['id'] as String;
+      final sub1Id = (jsonDecode(fakeChannel.sent[0])
+          as Map<String, dynamic>)['id'] as String;
+      final sub2Id = (jsonDecode(fakeChannel.sent[1])
+          as Map<String, dynamic>)['id'] as String;
 
       final changes1 = <DocumentChange>[];
       final changes2 = <DocumentChange>[];
@@ -1958,8 +1957,8 @@ void main() {
       final stream = rt.subscribeDocument('users', 'u1');
       await Future.delayed(Duration(milliseconds: 10));
 
-      final subId =
-          (jsonDecode(fakeChannel.sent.first) as Map<String, dynamic>)['id'] as String;
+      final subId = (jsonDecode(fakeChannel.sent.first)
+          as Map<String, dynamic>)['id'] as String;
 
       final changes = <DocumentChange>[];
       final sub = stream.listen(changes.add);
@@ -1985,8 +1984,8 @@ void main() {
       final stream = rt.subscribeDocument('users', 'u1');
       await Future.delayed(Duration(milliseconds: 10));
 
-      final subId =
-          (jsonDecode(fakeChannel.sent.first) as Map<String, dynamic>)['id'] as String;
+      final subId = (jsonDecode(fakeChannel.sent.first)
+          as Map<String, dynamic>)['id'] as String;
 
       final changes = <DocumentChange>[];
       final sub = stream.listen(changes.add);
@@ -2067,7 +2066,9 @@ void main() {
   group('FieldValue — toApiMap correctness', () {
     test('serverTimestamp maps field name', () {
       final fv = FieldValue.serverTimestamp();
-      expect(fv.toApiMap('created_at'), {'created_at': {'_serverTimestamp': true}});
+      expect(fv.toApiMap('created_at'), {
+        'created_at': {'_serverTimestamp': true}
+      });
     });
 
     test('increment maps field and value', () {
@@ -2104,7 +2105,9 @@ void main() {
 
     test('delete maps field name', () {
       final fv = FieldValue.delete();
-      expect(fv.toApiMap('temp_field'), {'temp_field': {'_deleteField': true}});
+      expect(fv.toApiMap('temp_field'), {
+        'temp_field': {'_deleteField': true}
+      });
     });
 
     test('toString includes type', () {
@@ -2167,14 +2170,14 @@ void main() {
         token: 'fcm_tok',
         platform: 'ios',
       );
-      await ob.push.sendToUser('u1',
-          title: 'Test', body: 'Hello');
+      await ob.push.sendToUser('u1', title: 'Test', body: 'Hello');
       await ob.push.unsubscribeFromTopic('fcm_tok', 'news');
       await ob.push.unregisterToken('fcm_tok');
 
       expect(paths, contains('/push/register'));
       expect(paths, contains('/push/send'));
-      expect(paths, contains('/push/subscribe')); // unsubscribe uses DELETE to same path
+      expect(paths,
+          contains('/push/subscribe')); // unsubscribe uses DELETE to same path
     });
   });
 
@@ -2184,8 +2187,8 @@ void main() {
       final ob = OrignaBase.initialize(
           url: 'http://test.local', httpClient: rec.client);
 
-      await ob.metrics.record('page_load', 250,
-          tags: {'page': '/home', 'platform': 'web'});
+      await ob.metrics
+          .record('page_load', 250, tags: {'page': '/home', 'platform': 'web'});
 
       final req = rec.requests.first;
       expect(req.url.path, '/metrics');
@@ -2278,7 +2281,9 @@ void main() {
           }
           if (query.contains('delete(')) {
             return http.Response(
-              jsonEncode({'data': {'delete': true}}),
+              jsonEncode({
+                'data': {'delete': true}
+              }),
               200,
               headers: {'content-type': 'application/json'},
             );
@@ -2317,8 +2322,8 @@ void main() {
       final ob = OrignaBase.initialize(url: 'http://test.local');
 
       // Cache a product locally
-      final product = Document(
-          id: 'p1', collection: 'products', data: {'title': 'Cached'});
+      final product =
+          Document(id: 'p1', collection: 'products', data: {'title': 'Cached'});
       await ob.offline.cacheDocument('products', product);
 
       // Go offline
@@ -2474,9 +2479,8 @@ void main() {
           ob.collection('products').subcollection('prod_1', 'reviews');
       await reviews.orderBy('rating', descending: true).limit(10).get();
 
-      final query =
-          (jsonDecode(rec.requests.first.body) as Map<String, dynamic>)['query']
-              as String;
+      final query = (jsonDecode(rec.requests.first.body)
+          as Map<String, dynamic>)['query'] as String;
       expect(query, contains('products__reviews'));
       expect(query, contains('orderBy: "rating"'));
       expect(query, contains('descending: true'));
@@ -2493,9 +2497,8 @@ void main() {
           ob.collection('products').subcollection('prod_1', 'reviews');
       await reviews.limit(5).get();
 
-      final query =
-          (jsonDecode(rec.requests.first.body) as Map<String, dynamic>)['query']
-              as String;
+      final query = (jsonDecode(rec.requests.first.body)
+          as Map<String, dynamic>)['query'] as String;
       expect(query, contains('limit: 5'));
     });
 
@@ -2510,9 +2513,8 @@ void main() {
           ob.collection('products').subcollection('prod_1', 'reviews');
       await reviews.offset(10).get();
 
-      final query =
-          (jsonDecode(rec.requests.first.body) as Map<String, dynamic>)['query']
-              as String;
+      final query = (jsonDecode(rec.requests.first.body)
+          as Map<String, dynamic>)['query'] as String;
       expect(query, contains('offset: 10'));
     });
 
@@ -2527,9 +2529,8 @@ void main() {
           ob.collection('products').subcollection('prod_1', 'reviews');
       await reviews.get();
 
-      final query =
-          (jsonDecode(rec.requests.first.body) as Map<String, dynamic>)['query']
-              as String;
+      final query = (jsonDecode(rec.requests.first.body)
+          as Map<String, dynamic>)['query'] as String;
       expect(query, contains('products:prod_1'));
     });
   });
@@ -2539,7 +2540,7 @@ void main() {
   // ═══════════════════════════════════════════════════════════════════════
 
   group('Storage — delete', () {
-    test('delete sends DELETE request to correct path', () async {
+    test('delete sends POST request to batch-delete endpoint', () async {
       final rec = recordingClient((_) => {});
       final ob = OrignaBase.initialize(
           url: 'http://test.local', httpClient: rec.client);
@@ -2547,8 +2548,616 @@ void main() {
       await ob.storage.delete('products/images/old.png');
 
       final req = rec.requests.first;
-      expect(req.method, 'DELETE');
-      expect(req.url.path, '/storage/delete/products/images/old.png');
+      expect(req.method, 'POST');
+      expect(req.url.path, '/storage/batch-delete');
+      final body = jsonDecode(req.body) as Map<String, dynamic>;
+      expect(body['paths'], ['products/images/old.png']);
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // COLLECTIONREF METHODS
+  // ═══════════════════════════════════════════════════════════════════════
+
+  group('CollectionRef methods', () {
+    test('doc() returns DocumentRef', () {
+      final ob = OrignaBase.initialize(url: 'http://test.local');
+      final docRef = ob.collection('products').doc('prod_1');
+      expect(docRef, isA<DocumentRef>());
+      expect(docRef.id, 'prod_1');
+      ob.dispose();
+    });
+
+    test('subcollection() returns SubcollectionRef', () {
+      final ob = OrignaBase.initialize(url: 'http://test.local');
+      final subcol =
+          ob.collection('products').subcollection('prod_1', 'reviews');
+      expect(subcol, isA<SubcollectionRef>());
+      ob.dispose();
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // DOCUMENTREF METHODS
+  // ═══════════════════════════════════════════════════════════════════════
+
+  group('DocumentRef methods', () {
+    test('subcollection() returns SubcollectionRef', () {
+      final ob = OrignaBase.initialize(url: 'http://test.local');
+      final subcol =
+          ob.collection('products').doc('prod_1').subcollection('reviews');
+      expect(subcol, isA<SubcollectionRef>());
+      ob.dispose();
+    });
+
+    test('set() sends GraphQL mutation', () async {
+      final rec = recordingClient((_) => {
+            'data': {
+              'set': {
+                'id': 'prod_1',
+                'data': {'name': 'Test'}
+              }
+            }
+          });
+      final ob = OrignaBase.initialize(
+          url: 'http://test.local', httpClient: rec.client);
+
+      final result =
+          await ob.collection('products').doc('prod_1').set({'name': 'Test'});
+      expect(result, isNotNull);
+      expect(result!.id, 'prod_1');
+
+      final query = (jsonDecode(rec.requests.first.body)
+          as Map<String, dynamic>)['query'] as String;
+      expect(query, contains('mutation'));
+      expect(query, contains('set'));
+
+      ob.dispose();
+    });
+
+    test('get() returns null for non-existent document', () async {
+      final rec = recordingClient((_) => {
+            'errors': [
+              {'message': 'Not found'}
+            ]
+          });
+      final ob = OrignaBase.initialize(
+          url: 'http://test.local', httpClient: rec.client);
+
+      final result = await ob.collection('products').doc('non_existent').get();
+      expect(result, isNull);
+
+      ob.dispose();
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // STORAGE — ADDITIONAL METHODS
+  // ═══════════════════════════════════════════════════════════════════════
+
+  group('Storage — upload', () {
+    test('uploadResumable creates UploadTask', () {
+      final ob = OrignaBase.initialize(url: 'http://test.local');
+      final data = Uint8List.fromList([1, 2, 3]);
+      final task = ob.storage.uploadResumable('test/file.bin', data);
+      expect(task, isA<UploadTask>());
+      expect(task.sessionId, isNull);
+      ob.dispose();
+    });
+
+    test('resumeUpload creates UploadTask', () {
+      final ob = OrignaBase.initialize(url: 'http://test.local');
+      final data = Uint8List.fromList([1, 2, 3]);
+      final task = ob.storage.resumeUpload('session_123', data);
+      expect(task, isA<UploadTask>());
+      expect(task.sessionId, 'session_123');
+      ob.dispose();
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // ERRORS
+  // ═══════════════════════════════════════════════════════════════════════
+
+  group('Error handling', () {
+    test('OrignaBaseException contains status code', () {
+      final e = OrignaBaseException('Test error', statusCode: 404);
+      expect(e.statusCode, 404);
+      expect(e.message, 'Test error');
+    });
+
+    test('AuthException extends OrignaBaseException', () {
+      final e = AuthException('Auth failed', statusCode: 401);
+      expect(e, isA<OrignaBaseException>());
+      expect(e.statusCode, 401);
+    });
+
+    test('ForbiddenException extends OrignaBaseException', () {
+      final e = ForbiddenException('Forbidden', statusCode: 403);
+      expect(e, isA<OrignaBaseException>());
+      expect(e.statusCode, 403);
+    });
+
+    test('NotFoundException extends OrignaBaseException', () {
+      final e = NotFoundException('Not found', statusCode: 404);
+      expect(e, isA<OrignaBaseException>());
+      expect(e.statusCode, 404);
+    });
+
+    test('ValidationException extends OrignaBaseException', () {
+      final e = ValidationException('Invalid', statusCode: 422);
+      expect(e, isA<OrignaBaseException>());
+      expect(e.statusCode, 422);
+    });
+
+    test('ConflictException extends OrignaBaseException', () {
+      final e = ConflictException('Conflict', statusCode: 409);
+      expect(e, isA<OrignaBaseException>());
+      expect(e.statusCode, 409);
+    });
+
+    test('RateLimitException extends OrignaBaseException', () {
+      final e = RateLimitException('Rate limited', statusCode: 429);
+      expect(e, isA<OrignaBaseException>());
+      expect(e.statusCode, 429);
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // CLIENT — GRAPHQL ERROR PATHS
+  // ═══════════════════════════════════════════════════════════════════════
+
+  group('Client — graphql error handling', () {
+    test('graphql throws ForbiddenException for permission denied', () async {
+      final rec = recordingClient((_) => {
+            'errors': [
+              {'message': 'Permission denied'}
+            ]
+          });
+      final ob = OrignaBase.initialize(
+          url: 'http://test.local', httpClient: rec.client);
+
+      expect(
+        () => ob.graphql('query { test }'),
+        throwsA(isA<ForbiddenException>()),
+      );
+
+      ob.dispose();
+    });
+
+    test('graphql throws NotFoundException for not found', () async {
+      final rec = recordingClient((_) => {
+            'errors': [
+              {'message': 'Not found'}
+            ]
+          });
+      final ob = OrignaBase.initialize(
+          url: 'http://test.local', httpClient: rec.client);
+
+      expect(
+        () => ob.graphql('query { test }'),
+        throwsA(isA<NotFoundException>()),
+      );
+
+      ob.dispose();
+    });
+
+    test('graphql throws OrignaBaseException for generic errors', () async {
+      final rec = recordingClient((_) => {
+            'errors': [
+              {'message': 'Some error'}
+            ]
+          });
+      final ob = OrignaBase.initialize(
+          url: 'http://test.local', httpClient: rec.client);
+
+      expect(
+        () => ob.graphql('query { test }'),
+        throwsA(isA<OrignaBaseException>()),
+      );
+
+      ob.dispose();
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // STORAGE — ERROR PATHS
+  // ═══════════════════════════════════════════════════════════════════════
+
+  group('Storage — error paths', () {
+    test('download throws NotFoundException for 404', () async {
+      final client = MockClient((req) async {
+        if (req.url.path.contains('presign')) {
+          return http.Response(
+            jsonEncode({
+              'urls': [
+                {'download_url': 'http://test.local/file'}
+              ]
+            }),
+            200,
+          );
+        }
+        return http.Response('Not found', 404);
+      });
+      final ob = OrignaBase.initialize(
+        url: 'http://test.local',
+        httpClient: client,
+      );
+
+      expect(
+        () => ob.storage.download('missing.txt'),
+        throwsA(isA<NotFoundException>()),
+      );
+
+      ob.dispose();
+    });
+
+    test('download throws when presign returns no URLs', () async {
+      final client = MockClient((req) async {
+        return http.Response(jsonEncode({'urls': []}), 200);
+      });
+      final ob = OrignaBase.initialize(
+        url: 'http://test.local',
+        httpClient: client,
+      );
+
+      expect(
+        () => ob.storage.download('file.txt'),
+        throwsA(isA<NotFoundException>()),
+      );
+
+      ob.dispose();
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // BATCH OPERATIONS
+  // ═══════════════════════════════════════════════════════════════════════
+
+  group('Batch operations', () {
+    test('batch create adds operations', () async {
+      final rec = recordingClient((_) => {
+            'data': {
+              'batchCreate': [
+                {
+                  'id': 'new_doc',
+                  'data': {'name': 'Test'}
+                }
+              ]
+            }
+          });
+      final ob = OrignaBase.initialize(
+          url: 'http://test.local', httpClient: rec.client);
+
+      final batch = ob.batch();
+      batch.create('collection', {'name': 'Test'});
+      await batch.commit();
+
+      expect(rec.requests.length, 1);
+      final body = jsonDecode(rec.requests.first.body) as Map<String, dynamic>;
+      expect(body['query'], contains('batchCreate'));
+
+      ob.dispose();
+    });
+
+    test('batch update adds operations', () async {
+      final rec = recordingClient((_) => {
+            'data': {'batchUpdate': null}
+          });
+      final ob = OrignaBase.initialize(
+          url: 'http://test.local', httpClient: rec.client);
+
+      final batch = ob.batch();
+      batch.update('collection', 'doc_1', {'name': 'Updated'});
+      await batch.commit();
+
+      expect(rec.requests.length, 1);
+      final body = jsonDecode(rec.requests.first.body) as Map<String, dynamic>;
+      expect(body['query'], contains('batchUpdate'));
+
+      ob.dispose();
+    });
+
+    test('batch delete adds operations', () async {
+      final rec = recordingClient((_) => {
+            'data': {'batchDelete': null}
+          });
+      final ob = OrignaBase.initialize(
+          url: 'http://test.local', httpClient: rec.client);
+
+      final batch = ob.batch();
+      batch.delete('collection', 'doc_1');
+      await batch.commit();
+
+      expect(rec.requests.length, 1);
+      final body = jsonDecode(rec.requests.first.body) as Map<String, dynamic>;
+      expect(body['query'], contains('batchDelete'));
+
+      ob.dispose();
+    });
+
+    test('batch delete parses backend response array', () async {
+      final ob = mockOb((_) => {
+            'data': {
+              'batchDelete': [
+                {'id': 'doc_1', 'deleted': true},
+              ],
+            },
+          });
+
+      final batch = ob.batch();
+      batch.delete('collection', 'doc_1');
+      final results = await batch.commit();
+
+      expect(results, [
+        {'id': 'doc_1', 'deleted': true},
+      ]);
+      ob.dispose();
+    });
+
+    test('batch delete preserves backend message response', () async {
+      final ob = mockOb((_) => {
+            'data': {'batchDelete': 'deleted'},
+          });
+
+      final batch = ob.batch();
+      batch.delete('collection', 'doc_1');
+      batch.delete('collection', 'doc_2');
+      final results = await batch.commit();
+
+      expect(results, [
+        {'message': 'deleted', 'deletedCount': 2},
+      ]);
+      ob.dispose();
+    });
+
+    test('batch isEmpty returns correct value', () {
+      final ob = OrignaBase.initialize(url: 'http://test.local');
+      final batch = ob.batch();
+      expect(batch.isEmpty, isTrue);
+      batch.create('collection', {'name': 'Test'});
+      expect(batch.isEmpty, isFalse);
+      ob.dispose();
+    });
+
+    test('batch length returns correct count', () {
+      final ob = OrignaBase.initialize(url: 'http://test.local');
+      final batch = ob.batch();
+      expect(batch.length, 0);
+      batch.create('collection', {'name': 'Test'});
+      batch.update('collection', 'doc_1', {'name': 'Updated'});
+      expect(batch.length, 2);
+      ob.dispose();
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // SUBCOLLECTION METHODS
+  // ═══════════════════════════════════════════════════════════════════════
+
+  group('Subcollection methods', () {
+    test('SubcollectionRef doc() returns DocumentRef', () {
+      final ob = OrignaBase.initialize(url: 'http://test.local');
+      final subcol = ob.collection('users').subcollection('user1', 'orders');
+      final docRef = subcol.doc('order_1');
+      expect(docRef, isA<DocumentRef>());
+      expect(docRef.id, 'order_1');
+      ob.dispose();
+    });
+
+    test('SubcollectionRef subcollection() returns nested SubcollectionRef',
+        () {
+      final ob = OrignaBase.initialize(url: 'http://test.local');
+      final subcol = ob.collection('users').subcollection('user1', 'orders');
+      final nested = subcol.subcollection('order_1', 'items');
+      expect(nested, isA<SubcollectionRef>());
+      ob.dispose();
+    });
+
+    test('SubcollectionRef add() includes parent_id', () async {
+      final rec = recordingClient((_) => {
+            'data': {
+              'create': {
+                'id': 'new_doc',
+                'data': {
+                  'name': 'Test',
+                  'parent_id': 'users:user1',
+                  'parent_collection': 'users'
+                }
+              }
+            }
+          });
+      final ob = OrignaBase.initialize(
+          url: 'http://test.local', httpClient: rec.client);
+
+      final subcol = ob.collection('users').subcollection('user1', 'orders');
+      await subcol.add({'name': 'Test'});
+
+      expect(rec.requests.length, 1);
+      final body = jsonDecode(rec.requests.first.body) as Map<String, dynamic>;
+      expect(body['query'], contains('parent_id'));
+
+      ob.dispose();
+    });
+
+    test('SubcollectionRef where() returns _SubcollectionQuery', () {
+      final ob = OrignaBase.initialize(url: 'http://test.local');
+      final subcol = ob.collection('users').subcollection('user1', 'orders');
+      final filtered = subcol.where('status', isEqualTo: 'pending');
+      expect(filtered, isA<Query>());
+      ob.dispose();
+    });
+
+    test('SubcollectionRef orderBy() returns _SubcollectionQuery', () {
+      final ob = OrignaBase.initialize(url: 'http://test.local');
+      final subcol = ob.collection('users').subcollection('user1', 'orders');
+      final ordered = subcol.orderBy('createdAt');
+      expect(ordered, isA<Query>());
+      ob.dispose();
+    });
+
+    test('SubcollectionRef limit() returns _SubcollectionQuery', () {
+      final ob = OrignaBase.initialize(url: 'http://test.local');
+      final subcol = ob.collection('users').subcollection('user1', 'orders');
+      final limited = subcol.limit(10);
+      expect(limited, isA<Query>());
+      ob.dispose();
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // UPLOADTASK
+  // ═══════════════════════════════════════════════════════════════════════
+
+  group('UploadTask', () {
+    test('UploadTask sessionId can be read', () {
+      final ob = OrignaBase.initialize(url: 'http://test.local');
+      final data = Uint8List.fromList([1, 2, 3]);
+      final task = ob.storage.uploadResumable('test/file.bin', data);
+      expect(task.sessionId, isNull);
+      ob.dispose();
+    });
+
+    test('UploadProgress fraction calculation', () {
+      final progress = UploadProgress(
+        bytesTransferred: 50,
+        totalBytes: 100,
+        sessionId: 'test_session',
+      );
+      expect(progress.fraction, 0.5);
+      expect(progress.isComplete, isFalse);
+    });
+
+    test('UploadProgress isComplete when fully transferred', () {
+      final progress = UploadProgress(
+        bytesTransferred: 100,
+        totalBytes: 100,
+        sessionId: 'test_session',
+      );
+      expect(progress.isComplete, isTrue);
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // AUTH METHODS
+  // ═══════════════════════════════════════════════════════════════════════
+
+  group('Auth methods', () {
+    test('AuthState unauthenticated', () {
+      const state = AuthState.unauthenticated;
+      expect(state.isAuthenticated, isFalse);
+      expect(state.status, AuthStatus.unauthenticated);
+    });
+
+    test('AuthState with all fields', () {
+      const state = AuthState(
+        status: AuthStatus.authenticated,
+        userId: 'user_123',
+        email: 'test@example.com',
+        roles: ['admin', 'user'],
+        emailVerified: true,
+        mfaRequired: false,
+      );
+      expect(state.isAuthenticated, isTrue);
+      expect(state.userId, 'user_123');
+      expect(state.email, 'test@example.com');
+      expect(state.roles, ['admin', 'user']);
+      expect(state.emailVerified, isTrue);
+      expect(state.mfaRequired, isFalse);
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // STORAGE UPLOAD METHODS
+  // ═══════════════════════════════════════════════════════════════════════
+
+  group('Storage upload methods', () {
+    test('upload sends presign request', () async {
+      final client = MockClient((req) async {
+        if (req.url.path.contains('presign')) {
+          return http.Response(
+            jsonEncode({
+              'urls': [
+                {'upload_url': 'http://test.local/upload'}
+              ]
+            }),
+            200,
+          );
+        }
+        return http.Response('OK', 200);
+      });
+      final ob = OrignaBase.initialize(
+        url: 'http://test.local',
+        httpClient: client,
+      );
+
+      final result = await ob.storage
+          .upload('test/file.txt', Uint8List.fromList([1, 2, 3]));
+      expect(result['path'], 'test/file.txt');
+
+      ob.dispose();
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // QUERY BUILDER METHODS
+  // ═══════════════════════════════════════════════════════════════════════
+
+  group('Query builder', () {
+    test('Query select() returns modified query', () {
+      final ob = OrignaBase.initialize(url: 'http://test.local');
+      final query = ob.collection('products').select(['name', 'price']);
+      expect(query, isA<Query>());
+      ob.dispose();
+    });
+
+    test('Query get() with limit and offset', () async {
+      final rec = recordingClient((_) => {
+            'data': {'list': []}
+          });
+      final ob = OrignaBase.initialize(
+          url: 'http://test.local', httpClient: rec.client);
+
+      await ob.collection('products').limit(10).offset(20).get();
+
+      final body = jsonDecode(rec.requests.first.body) as Map<String, dynamic>;
+      expect(body['query'], contains('limit: 10'));
+      expect(body['query'], contains('offset: 20'));
+
+      ob.dispose();
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // DOCUMENT METHODS
+  // ═══════════════════════════════════════════════════════════════════════
+
+  group('Document methods', () {
+    test('Document.fromMap creates document', () {
+      final doc = Document.fromMap(
+          'products', {'id': 'prod_1', 'name': 'Test', 'price': 29.99});
+      expect(doc.id, 'prod_1');
+      expect(doc.collection, 'products');
+      expect(doc['name'], 'Test');
+      expect(doc['price'], 29.99);
+      expect(doc.exists, isTrue);
+    });
+
+    test('Document with nested data', () {
+      final doc = Document(
+        id: 'doc_1',
+        collection: 'test',
+        data: {
+          'user': {'name': 'John', 'age': 30}
+        },
+      );
+      expect(doc['user']['name'], 'John');
+      expect(doc.containsKey('user'), isTrue);
+    });
+
+    test('Document exists returns false for empty id', () {
+      final doc = Document(id: '', collection: 'test', data: {});
+      expect(doc.exists, isFalse);
     });
   });
 }

@@ -1,22 +1,5 @@
 //! Admin handlers for system operations and configuration
 
-pub mod jwt_rotation {
-    use axum::{Json, http::StatusCode, response::IntoResponse};
-    use serde_json::json;
-
-    /// Rotate JWT signing keys (admin-only)
-    pub async fn rotate_keys() -> impl IntoResponse {
-        // TODO: Implement key rotation with secret manager integration
-        (
-            StatusCode::OK,
-            Json(json!({
-                "status": "key rotation initiated",
-                "rotatedAt": chrono::Utc::now().to_rfc3339()
-            })),
-        )
-    }
-}
-
 pub mod config {
     use axum::{Json, http::StatusCode, response::IntoResponse};
     use serde_json::json;

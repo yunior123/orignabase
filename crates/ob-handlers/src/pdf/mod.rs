@@ -565,7 +565,7 @@ mod tests {
     #[test]
     fn test_generate_invoice_single_item() {
         // Covers lines 191-203 item loop with a single item
-        let items = vec![InvoiceItem {
+        let items = [InvoiceItem {
             name: "Solo Product".into(),
             quantity: 1,
             unit_price_cents: 4999,
@@ -624,7 +624,7 @@ mod tests {
                 },
                 ..sample_buyer()
             };
-            let items = vec![
+            let items = [
                 InvoiceItem {
                     name: "Item A".into(),
                     quantity: 1,
@@ -665,7 +665,7 @@ mod tests {
             tax_cents: 129999,
             total_cents: 1134998,
         };
-        let items = vec![InvoiceItem {
+        let items = [InvoiceItem {
             name: "Luxury Widget".into(),
             quantity: 10,
             unit_price_cents: 99999,

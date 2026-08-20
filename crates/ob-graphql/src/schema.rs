@@ -8,6 +8,29 @@ use ob_security::RuleEngine;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+#[derive(Clone, Debug)]
+pub struct GraphQlLimits {
+    pub enable_introspection: bool,
+    pub max_depth: usize,
+    pub max_complexity: usize,
+}
+
+impl Default for GraphQlLimits {
+    fn default() -> Self {
+        Self {
+            enable_introspection: std::env::var("OB_ENABLE_INTROSPECTION").as_deref() == Ok("true"),
+            max_depth: std::env::var("OB_GRAPHQL_MAX_DEPTH")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(12),
+            max_complexity: std::env::var("OB_GRAPHQL_MAX_COMPLEXITY")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(100),
+        }
+    }
+}
+
 /// GraphQL context available in all resolvers.
 pub struct GqlContext {
     pub db: DatabaseClient,
@@ -19,60 +42,91 @@ pub struct GqlContext {
 
 pub type AppSchema = Schema<QueryRoot, MutationRoot, EmptySubscription>;
 
-/// Build the GraphQL schema with shared context.
+/// Build the GraphQL schema with shared context and security limits.
 pub fn build_schema(
     db: DatabaseClient,
     rules: Arc<RuleEngine>,
     change_tx: mpsc::Sender<ChangeEvent>,
     search: SearchClient,
 ) -> AppSchema {
-    Schema::build(QueryRoot, MutationRoot, EmptySubscription)
+    let limits = GraphQlLimits::default();
+    build_schema_with_limits(db, rules, change_tx, search, limits)
+}
+
+/// Build the GraphQL schema with explicit security limits.
+/// Call this variant when you need to override the defaults derived from env vars.
+pub fn build_schema_with_limits(
+    db: DatabaseClient,
+    rules: Arc<RuleEngine>,
+    change_tx: mpsc::Sender<ChangeEvent>,
+    search: SearchClient,
+    limits: GraphQlLimits,
+) -> AppSchema {
+    let mut builder = Schema::build(QueryRoot, MutationRoot, EmptySubscription)
         .data(db)
         .data(rules)
         .data(change_tx)
         .data(search)
-        .finish()
+        .limit_depth(limits.max_depth)
+        .limit_complexity(limits.max_complexity);
+
+    if !limits.enable_introspection {
+        builder = builder.disable_introspection();
+    }
+
+    builder.finish()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ob_core::config::DatabaseConfig;
+    use std::sync::Mutex;
+    // Serialize env-var tests to avoid races when cargo runs tests in parallel.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    /// Verify that Schema type alias resolves correctly at compile time.
-    /// This is a compile-time check — if AppSchema type is malformed, this won't build.
     #[test]
     fn test_app_schema_type_is_valid() {
         fn _assert_schema_type(_s: &AppSchema) {}
-        // If this compiles, the type alias is correctly defined.
     }
 
-    /// Verify build_schema constructs a working schema with introspection.
-    /// Requires a running SurrealDB: `surreal start --user root --pass root memory`
-    #[tokio::test]
-    #[ignore = "requires running SurrealDB instance"]
-    async fn test_build_schema_and_introspect() {
-        let config = DatabaseConfig {
-            endpoint: "localhost:8000".to_string(),
-            username: Some("root".to_string()),
-            password: Some("root".to_string()),
-            namespace: "test".to_string(),
-            name: "test_graphql".to_string(),
-        };
-        let db = DatabaseClient::connect(&config).await.unwrap();
-        let rules = Arc::new(RuleEngine::new(std::collections::HashMap::new()));
-        let (change_tx, _change_rx) = tokio::sync::mpsc::channel(16);
-        let search = SearchClient::new(ob_search::SearchConfig::default(), reqwest::Client::new());
+    #[test]
+    fn test_build_schema_disables_introspection_by_default() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("OB_ENABLE_INTROSPECTION") };
+        let limits = GraphQlLimits::default();
+        assert!(!limits.enable_introspection);
+    }
 
-        let schema = build_schema(db, rules, change_tx, search);
+    #[test]
+    fn test_build_schema_enables_introspection_when_env_set() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::set_var("OB_ENABLE_INTROSPECTION", "true") };
+        let limits = GraphQlLimits::default();
+        assert!(limits.enable_introspection);
+        unsafe { std::env::remove_var("OB_ENABLE_INTROSPECTION") };
+    }
 
-        // Introspect — should return type names without error
-        let result = schema.execute("{ __schema { types { name } } }").await;
-        assert!(
-            result.errors.is_empty(),
-            "Introspection errors: {:?}",
-            result.errors
-        );
-        assert!(!result.data.to_string().is_empty());
+    #[test]
+    fn test_build_schema_default_limits() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("OB_ENABLE_INTROSPECTION") };
+        unsafe { std::env::remove_var("OB_GRAPHQL_MAX_DEPTH") };
+        unsafe { std::env::remove_var("OB_GRAPHQL_MAX_COMPLEXITY") };
+        let limits = GraphQlLimits::default();
+        assert!(!limits.enable_introspection);
+        assert_eq!(limits.max_depth, 12);
+        assert_eq!(limits.max_complexity, 100);
+    }
+
+    #[test]
+    fn test_build_schema_custom_limits_from_env() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::set_var("OB_GRAPHQL_MAX_DEPTH", "8") };
+        unsafe { std::env::set_var("OB_GRAPHQL_MAX_COMPLEXITY", "50") };
+        let limits = GraphQlLimits::default();
+        assert_eq!(limits.max_depth, 8);
+        assert_eq!(limits.max_complexity, 50);
+        unsafe { std::env::remove_var("OB_GRAPHQL_MAX_DEPTH") };
+        unsafe { std::env::remove_var("OB_GRAPHQL_MAX_COMPLEXITY") };
     }
 }

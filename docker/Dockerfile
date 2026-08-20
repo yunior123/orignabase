@@ -10,7 +10,7 @@ RUN cargo build --release --bin orignabase
 
 # Move binary and config to runtime locations
 RUN cp target/release/orignabase /usr/local/bin/orignabase && \
-    mkdir -p /etc/orignabase && \
+    mkdir -p /etc/orignabase /app/data/storage /app/public && \
     cp orignabase.toml /etc/orignabase/orignabase.toml && \
     cp rules.ob /etc/orignabase/rules.ob && \
     cp rules.test.ob /etc/orignabase/rules.test.ob && \
@@ -18,7 +18,7 @@ RUN cp target/release/orignabase /usr/local/bin/orignabase && \
 
 # Create non-root user for security
 RUN useradd -m -u 1000 orignabase && \
-    chown -R orignabase:orignabase /etc/orignabase
+    chown -R orignabase:orignabase /etc/orignabase /app/data /app/public
 
 USER orignabase
 EXPOSE 8080

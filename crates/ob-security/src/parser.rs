@@ -157,12 +157,16 @@ fn parse_expr(pair: Pair<Rule>) -> ob_core::Result<Expression> {
         }
         Rule::not_expr => {
             let parts: Vec<Pair<Rule>> = pair.into_inner().collect();
-            if parts.len() == 1 {
-                parse_expr(parts.into_iter().next().unwrap())
-            } else {
-                // "!" + atom
-                let expr = parse_expr(parts.into_iter().last().unwrap())?;
+            let has_not = parts.iter().any(|p| p.as_rule() == Rule::not_op);
+            let expr_part = parts
+                .into_iter()
+                .find(|p| p.as_rule() != Rule::not_op)
+                .unwrap();
+            let expr = parse_expr(expr_part)?;
+            if has_not {
                 Ok(Expression::Not(Box::new(expr)))
+            } else {
+                Ok(expr)
             }
         }
         Rule::comparison => {
@@ -260,19 +264,15 @@ mod tests {
 
     #[test]
     fn test_parse_not_expression() {
-        // NOTE: The `!` token is anonymous in pest, so the parser currently
-        // does not propagate it — `!isAuthenticated()` parses the same as
-        // `isAuthenticated()`. This test documents the current behavior.
         let input = r#"
-            rules products {
-                read: !isAuthenticated();
-            }
-        "#;
+rules products {
+    read: !isAuthenticated();
+}
+"#;
         let result = parse_rules(input).unwrap();
         let rule = &result["products"].rules[0];
         assert_eq!(rule.operations, vec!["read"]);
-        // Due to parser bug, the Not is lost; it parses as FunctionCall
-        assert!(matches!(rule.condition, Expression::FunctionCall { .. }));
+        assert!(matches!(rule.condition, Expression::Not(_)));
     }
 
     #[test]

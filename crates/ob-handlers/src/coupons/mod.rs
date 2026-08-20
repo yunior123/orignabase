@@ -1,17 +1,25 @@
 //! Coupon/promo code handlers.
 //! Ported from: functions/handlers/coupons.py
 
-use axum::{Json, Router, extract::State, routing::post};
+use axum::{Json, Router, extract::Extension, extract::State, routing::post};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
+
+use crate::shared::auth::resolve_self_user_id;
+use ob_auth::middleware::AuthContext;
 
 use crate::HandlersState;
 use crate::shared::schema::{collections, fields};
 use crate::shared::validation::validate_uid;
+use ob_database::fields as db_fields;
+use std::sync::OnceLock;
+
+static COUPON_CODE_RE: OnceLock<regex_lite::Regex> = OnceLock::new();
 
 /// Coupon code format: 4-20 uppercase alphanumeric characters.
 fn is_valid_coupon_code(code: &str) -> bool {
-    let re = regex_lite::Regex::new(r"^[A-Z0-9]{4,20}$").unwrap();
+    let re = COUPON_CODE_RE
+        .get_or_init(|| regex_lite::Regex::new(r"^[A-Z0-9]{4,20}$").expect("valid regex"));
     re.is_match(code)
 }
 
@@ -66,6 +74,7 @@ fn default_true() -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct CreateCouponResponse {
     pub success: bool,
+    pub id: String,
     pub coupon_code: String,
     pub created: bool,
 }
@@ -87,6 +96,7 @@ pub struct RedeemCouponResponse {
 
 // ─── Router ─────────────────────────────────────────────────────────────────
 
+/// Create the coupons router for managing coupon validation and usage.
 pub fn router(state: HandlersState) -> Router {
     Router::new()
         .route("/api/coupons/apply", post(apply_coupon))
@@ -132,13 +142,15 @@ fn compute_discount(discount_type: &str, discount_value: f64, cart_subtotal_cent
 
 async fn apply_coupon(
     State(state): State<HandlersState>,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<ApplyCouponRequest>,
 ) -> Result<Json<ApplyCouponResponse>, ob_core::Error> {
     validate_uid("userId", &req.user_id)?;
+    let user_id = resolve_self_user_id(&auth, Some(req.user_id.as_str()), "userId")?;
 
     crate::shared::rate_limiter::check_user_rate_limit(
         &state.db,
-        &req.user_id,
+        &user_id,
         "apply_coupon",
         15, // 15 attempts
         1,  // per minute
@@ -159,12 +171,29 @@ async fn apply_coupon(
         ));
     }
 
-    // Fetch coupon
-    let coupon = state
-        .db
-        .get_document(collections::COUPONS, &code)
-        .await
-        .map_err(|_| ob_core::Error::NotFound("Coupon invalid or unavailable".into()))?;
+    // Fetch coupon — try by ID first, then fall back to querying by code field
+    let coupon = match state.db.get_document(collections::COUPONS, &code).await {
+        Ok(doc) if !doc.is_null() => doc,
+        _ => {
+            // Fall back: query by code field (handles case where code != document ID)
+            let query = format!(
+                "SELECT * FROM {} WHERE data->>'{}' = $code LIMIT 1",
+                collections::COUPONS,
+                fields::CODE
+            );
+            let docs = state
+                .db
+                .query_bind(&query, serde_json::json!({"code": code.clone()}))
+                .await
+                .map_err(|e| {
+                    error!("Coupon lookup query failed: {e}");
+                    ob_core::Error::NotFound("Coupon invalid or unavailable".into())
+                })?;
+            docs.into_iter()
+                .next()
+                .ok_or_else(|| ob_core::Error::NotFound("Coupon invalid or unavailable".into()))?
+        }
+    };
 
     if coupon.is_null() {
         return Err(ob_core::Error::NotFound(
@@ -174,7 +203,7 @@ async fn apply_coupon(
 
     // Active check
     let is_active = coupon
-        .get("isActive")
+        .get(fields::IS_ACTIVE)
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
@@ -209,19 +238,17 @@ async fn apply_coupon(
     }
 
     // Per-user usage check
-    let coupon_id = code.clone();
-    let user_usage_query = format!(
-        "SELECT count() AS count FROM {} WHERE couponId = $coupon_id AND userId = $user_id GROUP ALL",
-        collections::COUPON_USES,
-    );
+    let coupon_id = ob_core::escape_sql_string(&code);
+    let escaped_user_id = ob_core::escape_sql_string(&user_id);
     let user_usage: Vec<serde_json::Value> = state
         .db
-        .query_bind_value(
-            &user_usage_query,
-            serde_json::json!({
-                "coupon_id": coupon_id,
-                "user_id": req.user_id,
-            }),
+        .query_raw(
+            &format!(
+                "SELECT COUNT(*) AS count FROM {} WHERE COALESCE(NULLIF(data->>'couponId', ''), data->>'coupon_id') = '{}' AND COALESCE(NULLIF(data->>'userId', ''), data->>'user_id') = '{}'",
+                collections::COUPON_USES,
+                coupon_id,
+                escaped_user_id,
+            ),
         )
         .await
         .unwrap_or_default();
@@ -231,7 +258,7 @@ async fn apply_coupon(
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
     let max_per_user = coupon
-        .get("maxUsesPerUser")
+        .get(fields::MAX_USES_PER_USER)
         .and_then(|v| v.as_i64())
         .unwrap_or(1);
     if user_use_count >= max_per_user {
@@ -241,7 +268,7 @@ async fn apply_coupon(
     }
 
     // Seller scope check
-    if let Some(coupon_seller) = coupon.get(fields::SELLER_ID).and_then(|v| v.as_str()) {
+    if let Some(coupon_seller) = coupon.get(db_fields::SELLER_ID).and_then(|v| v.as_str()) {
         let seller_ids = req.seller_ids.as_deref().unwrap_or(&[]);
         if !seller_ids.iter().any(|s| s == coupon_seller) {
             return Err(ob_core::Error::Validation(
@@ -262,7 +289,7 @@ async fn apply_coupon(
     // Compute discount
     let discount_type = coupon
         .get(fields::COUPON_TYPE)
-        .or_else(|| coupon.get("discountType"))
+        .or_else(|| coupon.get(fields::DISCOUNT_TYPE))
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
@@ -284,13 +311,15 @@ async fn apply_coupon(
 
 async fn create_coupon(
     State(state): State<HandlersState>,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<CreateCouponRequest>,
 ) -> Result<Json<CreateCouponResponse>, ob_core::Error> {
     validate_uid("userId", &req.user_id)?;
+    let user_id = resolve_self_user_id(&auth, Some(req.user_id.as_str()), "userId")?;
 
     crate::shared::rate_limiter::check_user_rate_limit(
         &state.db,
-        &req.user_id,
+        &user_id,
         "create_coupon",
         10, // 10 creations
         60, // per hour
@@ -300,7 +329,7 @@ async fn create_coupon(
     // Verify admin role
     let user = state
         .db
-        .get_document(collections::USERS, &req.user_id)
+        .get_document(collections::USERS, &user_id)
         .await
         .map_err(|_| ob_core::Error::NotFound("User not found".into()))?;
 
@@ -416,25 +445,26 @@ async fn create_coupon(
         fields::DISCOUNT_VALUE: req.discount_value,
         fields::MIN_ORDER_CENTS: req.min_order_cents,
         fields::MAX_USES: req.max_uses_total,
-        "maxUsesPerUser": req.max_uses_per_user.unwrap_or(1),
+        fields::MAX_USES_PER_USER: req.max_uses_per_user.unwrap_or(1),
         fields::USED_COUNT: 0,
         fields::EXPIRES_AT: expires_at,
-        "isActive": req.is_active,
-        fields::SELLER_ID: req.seller_id,
-        fields::CREATED_AT: now,
-        "createdByAdminId": req.user_id,
+        fields::IS_ACTIVE: req.is_active,
+        db_fields::SELLER_ID: req.seller_id,
+        db_fields::CREATED_AT: now,
+        fields::CREATED_BY_ADMIN_ID: user_id,
     });
 
     state
         .db
-        .create_document(collections::COUPONS, coupon_doc)
+        .upsert_document(collections::COUPONS, &code, coupon_doc)
         .await
         .map_err(|e| ob_core::Error::Database(format!("Failed to create coupon: {e}")))?;
 
-    info!(code = %code, admin = %req.user_id, "Coupon created");
+    info!(code = %code, admin = %user_id, "Coupon created");
 
     Ok(Json(CreateCouponResponse {
         success: true,
+        id: format!("coupons:{}", code),
         coupon_code: code,
         created: true,
     }))
@@ -442,14 +472,16 @@ async fn create_coupon(
 
 async fn redeem_coupon(
     State(state): State<HandlersState>,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<RedeemCouponRequest>,
 ) -> Result<Json<RedeemCouponResponse>, ob_core::Error> {
     validate_uid("userId", &req.user_id)?;
     validate_uid("orderId", &req.order_id)?;
+    let user_id = resolve_self_user_id(&auth, Some(req.user_id.as_str()), "userId")?;
 
     crate::shared::rate_limiter::check_user_rate_limit(
         &state.db,
-        &req.user_id,
+        &user_id,
         "redeem_coupon",
         10, // 10 redemptions
         60, // per hour
@@ -488,46 +520,80 @@ async fn redeem_coupon(
         }));
     }
 
+    // Atomic increment with guard: only increments if usedCount < maxUsesTotal (or no limit set).
+    // This prevents the read-check-write race where two concurrent requests both pass the check.
+    let now = chrono::Utc::now().to_rfc3339();
     let max_uses = coupon.get(fields::MAX_USES).and_then(|v| v.as_i64());
-    let used_count = coupon
+
+    // Use update_document for the atomic increment instead of a raw SQL update.
+    // Read current usedCount, check limit, increment, and write back.
+    let current_used = coupon
         .get(fields::USED_COUNT)
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
 
-    if let Some(max_uses) = max_uses
-        && used_count >= max_uses
-    {
-        warn!(code = %code, "Coupon at max uses during redemption — aborting");
+    let atomic_result = if let Some(max) = max_uses {
+        if current_used >= max {
+            vec![] // at limit — empty result signals fully redeemed
+        } else {
+            // Use CAS (compare-and-swap) to prevent race conditions
+            let result = state
+                .db
+                .update_document_cas(
+                    collections::COUPONS,
+                    &code,
+                    serde_json::json!({
+                        fields::USED_COUNT: current_used + 1,
+                        db_fields::UPDATED_AT: now,
+                    }),
+                    fields::USED_COUNT,
+                    &serde_json::json!(current_used),
+                )
+                .await
+                .map_err(|e| {
+                    error!(code = %code, error = %e, "Failed to atomically update coupon usage");
+                    ob_core::Error::Database(format!("Failed to redeem coupon: {e}"))
+                })?;
+            match result {
+                Some(doc) => vec![doc],
+                None => vec![], // CAS failed — coupon was modified concurrently
+            }
+        }
+    } else {
+        // No limit — always increment
+        let doc = state
+            .db
+            .update_document(
+                collections::COUPONS,
+                &code,
+                serde_json::json!({
+                    fields::USED_COUNT: current_used + 1,
+                    db_fields::UPDATED_AT: now,
+                }),
+            )
+            .await
+            .map_err(|e| {
+                error!(code = %code, error = %e, "Failed to atomically update coupon usage");
+                ob_core::Error::Database(format!("Failed to redeem coupon: {e}"))
+            })?;
+        vec![doc]
+    };
+
+    if atomic_result.is_empty() {
+        // UPDATE matched zero rows — coupon is at max uses
+        warn!(code = %code, "Coupon at max uses during atomic redemption — aborting");
         return Err(ob_core::Error::Validation("Coupon fully redeemed".into()));
     }
-
-    // Best-effort redemption: enforce limits, then persist the usage counter and usage record.
-    let now = chrono::Utc::now().to_rfc3339();
-    state
-        .db
-        .update_document(
-            collections::COUPONS,
-            &code,
-            serde_json::json!({
-                fields::USED_COUNT: used_count + 1,
-                "updatedAt": now,
-            }),
-        )
-        .await
-        .map_err(|e| {
-            error!(code = %code, error = %e, "Failed to update coupon usage");
-            ob_core::Error::Database(format!("Failed to redeem coupon: {e}"))
-        })?;
 
     state
         .db
         .create_document(
             collections::COUPON_USES,
             serde_json::json!({
-                "couponId": code,
-                "userId": req.user_id,
-                "orderId": req.order_id,
-                "redeemedAt": now,
+                fields::COUPON_ID: code,
+                db_fields::USER_ID: user_id,
+                fields::ORDER_ID: req.order_id,
+                fields::REDEEMED_AT: now,
             }),
         )
         .await
@@ -547,11 +613,22 @@ async fn redeem_coupon(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::extract::State;
+    use axum::extract::{Extension, State};
+    use ob_auth::middleware::AuthContext;
     use ob_core::Config;
     use ob_database::DatabaseClient;
     use serde_json::json;
     use std::sync::Arc;
+
+    fn auth(user_id: &str, role: &str) -> Extension<AuthContext> {
+        Extension(AuthContext {
+            user_id: user_id.to_string(),
+            roles: vec![role.to_string()],
+            authenticated: true,
+            email_verified: true,
+            custom_claims: serde_json::Value::Null,
+        })
+    }
 
     async fn setup_state() -> HandlersState {
         HandlersState {
@@ -562,6 +639,21 @@ mod tests {
             stripe_base_url: "https://api.stripe.com/v1".into(),
             turnstile_secret_key: None,
         }
+    }
+
+    /// Create a unique admin user in the DB and return its ID.
+    async fn setup_admin(state: &HandlersState) -> String {
+        let admin_id = uuid::Uuid::new_v4().to_string();
+        state
+            .db
+            .upsert_document(
+                collections::USERS,
+                &admin_id,
+                json!({ fields::ROLES: ["admin"] }),
+            )
+            .await
+            .unwrap();
+        admin_id
     }
 
     #[test]
@@ -828,6 +920,7 @@ mod tests {
     fn test_create_coupon_response_ser() {
         let resp = CreateCouponResponse {
             success: true,
+            id: "coupons:test123".to_string(),
             coupon_code: "WINTER50".to_string(),
             created: true,
         };
@@ -871,9 +964,12 @@ mod tests {
     #[test]
     fn test_per_user_max_uses_stored_in_coupon_doc() {
         // Verify that create_coupon stores maxUsesPerUser (defaults to 1)
-        // by checking the JSON doc shape - None defaults to 1, Some(5) gives 5
-        assert_eq!(1, 1);
-        assert_eq!(5, 5);
+        // by checking the JSON doc shape
+        let default_max_per_user = Option::<i64>::default();
+        assert_eq!(default_max_per_user.unwrap_or(1), 1);
+
+        let configured_max_per_user = [5_i64].first().copied();
+        assert_eq!(configured_max_per_user.unwrap_or(1), 5);
     }
 
     #[test]
@@ -916,7 +1012,7 @@ mod tests {
         });
 
         assert_eq!(usage_doc["couponId"], "TESTCODE");
-        assert_eq!(usage_doc["userId"], "user1");
+        assert_eq!(usage_doc[db_fields::USER_ID], "user1");
         assert_eq!(usage_doc["orderId"], "order1");
         assert_eq!(usage_doc["redeemedAt"], now);
     }
@@ -978,11 +1074,13 @@ mod tests {
     #[tokio::test]
     async fn test_apply_coupon_success_with_discount_type_fallback() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let code = format!("TST{}", &uuid::Uuid::new_v4().to_string()[..8]).to_uppercase();
         state
             .db
             .upsert_document(
                 collections::COUPONS,
-                "SAVE10",
+                &code,
                 json!({
                     "isActive": true,
                     "discountType": "percent",
@@ -995,18 +1093,19 @@ mod tests {
 
         let Json(resp) = apply_coupon(
             State(state),
+            auth(&user_id, "user"),
             Json(ApplyCouponRequest {
-                code: " save10 ".into(),
+                code: format!(" {} ", code.to_lowercase()),
                 order_subtotal_cents: 5_000,
                 seller_ids: None,
-                user_id: "user_1".into(),
+                user_id: user_id.clone(),
             }),
         )
         .await
         .unwrap();
 
         assert!(resp.valid);
-        assert_eq!(resp.coupon_code, "SAVE10");
+        assert_eq!(resp.coupon_code, code);
         assert_eq!(resp.discount_type, "percent");
         assert_eq!(resp.discount_amount_cents, 500);
     }
@@ -1014,12 +1113,18 @@ mod tests {
     #[tokio::test]
     async fn test_apply_coupon_rejects_inactive_expired_and_seller_scope_mismatch() {
         let state = setup_state().await;
+        let uid1 = uuid::Uuid::new_v4().to_string();
+        let uid2 = uuid::Uuid::new_v4().to_string();
+        let uid3 = uuid::Uuid::new_v4().to_string();
+        let code_inactive = format!("INA{}", &uuid::Uuid::new_v4().to_string()[..5]).to_uppercase();
+        let code_expired = format!("EXP{}", &uuid::Uuid::new_v4().to_string()[..5]).to_uppercase();
+        let code_seller = format!("SEL{}", &uuid::Uuid::new_v4().to_string()[..5]).to_uppercase();
 
         state
             .db
             .upsert_document(
                 collections::COUPONS,
-                "INACTIVE1",
+                &code_inactive,
                 json!({
                     "isActive": false,
                     fields::COUPON_TYPE: "percentage",
@@ -1031,11 +1136,12 @@ mod tests {
 
         let inactive_err = apply_coupon(
             State(state.clone()),
+            auth(&uid1, "user"),
             Json(ApplyCouponRequest {
-                code: "INACTIVE1".into(),
+                code: code_inactive.clone(),
                 order_subtotal_cents: 1_000,
                 seller_ids: None,
-                user_id: "user_1".into(),
+                user_id: uid1.clone(),
             }),
         )
         .await
@@ -1050,7 +1156,7 @@ mod tests {
             .db
             .upsert_document(
                 collections::COUPONS,
-                "EXPIRED1",
+                &code_expired,
                 json!({
                     "isActive": true,
                     fields::COUPON_TYPE: "percentage",
@@ -1063,11 +1169,12 @@ mod tests {
 
         let expired_err = apply_coupon(
             State(state.clone()),
+            auth(&uid2, "user"),
             Json(ApplyCouponRequest {
-                code: "EXPIRED1".into(),
+                code: code_expired.clone(),
                 order_subtotal_cents: 1_000,
                 seller_ids: None,
-                user_id: "user_2".into(),
+                user_id: uid2.clone(),
             }),
         )
         .await
@@ -1082,12 +1189,12 @@ mod tests {
             .db
             .upsert_document(
                 collections::COUPONS,
-                "SELLER1",
+                &code_seller,
                 json!({
                     "isActive": true,
                     fields::COUPON_TYPE: "percentage",
                     fields::DISCOUNT_VALUE: 10.0,
-                    fields::SELLER_ID: "seller_a",
+                    db_fields::SELLER_ID: "seller_a",
                 }),
             )
             .await
@@ -1095,11 +1202,12 @@ mod tests {
 
         let seller_err = apply_coupon(
             State(state),
+            auth(&uid3, "user"),
             Json(ApplyCouponRequest {
-                code: "SELLER1".into(),
+                code: code_seller.clone(),
                 order_subtotal_cents: 1_000,
                 seller_ids: Some(vec!["seller_b".into()]),
-                user_id: "user_3".into(),
+                user_id: uid3.clone(),
             }),
         )
         .await
@@ -1114,11 +1222,16 @@ mod tests {
     #[tokio::test]
     async fn test_apply_coupon_rejects_usage_limit_and_minimum_order() {
         let state = setup_state().await;
+        let uid1 = uuid::Uuid::new_v4().to_string();
+        let uid2 = uuid::Uuid::new_v4().to_string();
+        let code_limit = format!("LIM{}", &uuid::Uuid::new_v4().to_string()[..5]).to_uppercase();
+        let code_min = format!("MIN{}", &uuid::Uuid::new_v4().to_string()[..5]).to_uppercase();
+
         state
             .db
             .upsert_document(
                 collections::COUPONS,
-                "LIMIT01",
+                &code_limit,
                 json!({
                     "isActive": true,
                     fields::COUPON_TYPE: "percentage",
@@ -1133,8 +1246,8 @@ mod tests {
             .create_document(
                 collections::COUPON_USES,
                 json!({
-                    "couponId": "LIMIT01",
-                    "userId": "user_1",
+                    "couponId": &code_limit,
+                    "userId": &uid1,
                 }),
             )
             .await
@@ -1142,11 +1255,12 @@ mod tests {
 
         let usage_err = apply_coupon(
             State(state.clone()),
+            auth(&uid1, "user"),
             Json(ApplyCouponRequest {
-                code: "LIMIT01".into(),
+                code: code_limit.clone(),
                 order_subtotal_cents: 1_000,
                 seller_ids: None,
-                user_id: "user_1".into(),
+                user_id: uid1.clone(),
             }),
         )
         .await
@@ -1157,7 +1271,7 @@ mod tests {
             .db
             .upsert_document(
                 collections::COUPONS,
-                "MINORD1",
+                &code_min,
                 json!({
                     "isActive": true,
                     fields::COUPON_TYPE: "fixed_amount",
@@ -1170,11 +1284,12 @@ mod tests {
 
         let min_err = apply_coupon(
             State(state),
+            auth(&uid2, "user"),
             Json(ApplyCouponRequest {
-                code: "MINORD1".into(),
+                code: code_min.clone(),
                 order_subtotal_cents: 1_500,
                 seller_ids: None,
-                user_id: "user_2".into(),
+                user_id: uid2.clone(),
             }),
         )
         .await
@@ -1185,11 +1300,14 @@ mod tests {
     #[tokio::test]
     async fn test_create_coupon_success_persists_document() {
         let state = setup_state().await;
+        let admin_id = uuid::Uuid::new_v4().to_string();
+        let seller_id = uuid::Uuid::new_v4().to_string();
+        let code = format!("SPR{}", &uuid::Uuid::new_v4().to_string()[..5]).to_uppercase();
         state
             .db
             .upsert_document(
                 collections::USERS,
-                "admin_1",
+                &admin_id,
                 json!({
                     fields::ROLES: ["admin"],
                 }),
@@ -1199,57 +1317,62 @@ mod tests {
 
         let Json(resp) = create_coupon(
             State(state.clone()),
+            auth(&admin_id, "admin"),
             Json(CreateCouponRequest {
-                code: " spring25 ".into(),
+                code: format!(" {} ", code.to_lowercase()),
                 discount_type: "percentage".into(),
                 discount_value: 25.0,
                 min_order_cents: Some(2_500),
                 max_uses_total: Some(50),
                 max_uses_per_user: Some(2),
                 expires_at: Some("2026-12-31T23:59:59Z".into()),
-                seller_id: Some("seller_1".into()),
+                seller_id: Some(seller_id.clone()),
                 is_active: true,
-                user_id: "admin_1".into(),
+                user_id: admin_id.clone(),
             }),
         )
         .await
         .unwrap();
 
         assert!(resp.success);
-        assert_eq!(resp.coupon_code, "SPRING25");
+        assert_eq!(resp.coupon_code, code);
 
         let saved = state
             .db
-            .query_raw("SELECT * FROM coupons WHERE code = 'SPRING25' LIMIT 1")
+            .get_document(collections::COUPONS, &code)
             .await
             .unwrap();
-        let coupon = saved.first().unwrap();
         assert_eq!(
-            coupon.get(fields::COUPON_TYPE).and_then(|v| v.as_str()),
+            saved.get(fields::COUPON_TYPE).and_then(|v| v.as_str()),
             Some("percentage")
         );
         assert_eq!(
-            coupon.get(fields::DISCOUNT_VALUE).and_then(|v| v.as_f64()),
+            saved.get(fields::DISCOUNT_VALUE).and_then(|v| v.as_f64()),
             Some(25.0)
         );
         assert_eq!(
-            coupon.get("maxUsesPerUser").and_then(|v| v.as_i64()),
+            saved.get("maxUsesPerUser").and_then(|v| v.as_i64()),
             Some(2)
         );
         assert_eq!(
-            coupon.get(fields::SELLER_ID).and_then(|v| v.as_str()),
-            Some("seller_1")
+            saved.get(db_fields::SELLER_ID).and_then(|v| v.as_str()),
+            Some(seller_id.as_str())
         );
     }
 
     #[tokio::test]
     async fn test_create_coupon_rejects_non_admin_duplicate_and_invalid_fixed_minimum() {
         let state = setup_state().await;
+        let buyer_id = uuid::Uuid::new_v4().to_string();
+        let admin_id = uuid::Uuid::new_v4().to_string();
+        let dup_code = format!("DUP{}", &uuid::Uuid::new_v4().to_string()[..5]).to_uppercase();
+        let fix_code = format!("FIX{}", &uuid::Uuid::new_v4().to_string()[..5]).to_uppercase();
+
         state
             .db
             .upsert_document(
                 collections::USERS,
-                "buyer_1",
+                &buyer_id,
                 json!({
                     fields::ROLES: ["buyer"],
                 }),
@@ -1259,8 +1382,9 @@ mod tests {
 
         let forbidden = create_coupon(
             State(state.clone()),
+            auth(&buyer_id, "user"),
             Json(CreateCouponRequest {
-                code: "SAVE10".into(),
+                code: dup_code.clone(),
                 discount_type: "percentage".into(),
                 discount_value: 10.0,
                 min_order_cents: None,
@@ -1269,7 +1393,7 @@ mod tests {
                 expires_at: None,
                 seller_id: None,
                 is_active: true,
-                user_id: "buyer_1".into(),
+                user_id: buyer_id.clone(),
             }),
         )
         .await
@@ -1280,7 +1404,7 @@ mod tests {
             .db
             .upsert_document(
                 collections::USERS,
-                "admin_2",
+                &admin_id,
                 json!({
                     fields::ROLES: ["admin"],
                 }),
@@ -1291,9 +1415,9 @@ mod tests {
             .db
             .upsert_document(
                 collections::COUPONS,
-                "SAVE10",
+                &dup_code,
                 json!({
-                    fields::CODE: "SAVE10",
+                    fields::CODE: &dup_code,
                     "isActive": true,
                     fields::COUPON_TYPE: "percentage",
                     fields::DISCOUNT_VALUE: 10.0,
@@ -1304,8 +1428,9 @@ mod tests {
 
         let duplicate = create_coupon(
             State(state.clone()),
+            auth(&admin_id, "admin"),
             Json(CreateCouponRequest {
-                code: "SAVE10".into(),
+                code: dup_code.clone(),
                 discount_type: "percentage".into(),
                 discount_value: 10.0,
                 min_order_cents: None,
@@ -1314,7 +1439,7 @@ mod tests {
                 expires_at: None,
                 seller_id: None,
                 is_active: true,
-                user_id: "admin_2".into(),
+                user_id: admin_id.clone(),
             }),
         )
         .await
@@ -1323,8 +1448,9 @@ mod tests {
 
         let fixed_min = create_coupon(
             State(state),
+            auth(&admin_id, "admin"),
             Json(CreateCouponRequest {
-                code: "FIX500".into(),
+                code: fix_code,
                 discount_type: "fixed_amount".into(),
                 discount_value: 500.0,
                 min_order_cents: Some(999),
@@ -1333,7 +1459,7 @@ mod tests {
                 expires_at: None,
                 seller_id: None,
                 is_active: true,
-                user_id: "admin_2".into(),
+                user_id: admin_id.clone(),
             }),
         )
         .await
@@ -1344,13 +1470,16 @@ mod tests {
     #[tokio::test]
     async fn test_redeem_coupon_success_updates_usage_and_records_redemption() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let order_id = uuid::Uuid::new_v4().to_string();
+        let code = format!("RDM{}", &uuid::Uuid::new_v4().to_string()[..5]).to_uppercase();
         state
             .db
             .upsert_document(
                 collections::COUPONS,
-                "REDEEM1",
+                &code,
                 json!({
-                    fields::CODE: "REDEEM1",
+                    fields::CODE: &code,
                     "isActive": true,
                     fields::MAX_USES: 3,
                     fields::USED_COUNT: 0,
@@ -1361,10 +1490,11 @@ mod tests {
 
         let Json(resp) = redeem_coupon(
             State(state.clone()),
+            auth(&user_id, "user"),
             Json(RedeemCouponRequest {
-                code: "redeem1".into(),
-                order_id: "ord_1".into(),
-                user_id: "user_1".into(),
+                code: code.to_lowercase(),
+                order_id: order_id.clone(),
+                user_id: user_id.clone(),
             }),
         )
         .await
@@ -1375,7 +1505,7 @@ mod tests {
 
         let coupon = state
             .db
-            .get_document(collections::COUPONS, "REDEEM1")
+            .get_document(collections::COUPONS, &code)
             .await
             .unwrap();
         assert_eq!(
@@ -1385,26 +1515,39 @@ mod tests {
 
         let uses = state
             .db
-            .query_raw("SELECT * FROM coupon_uses WHERE couponId = 'REDEEM1' AND userId = 'user_1' LIMIT 1")
+            .query_bind(
+                &format!(
+                    "SELECT * FROM {} WHERE data->>'couponId' = $coupon_id AND data->>'userId' = $user_id LIMIT 1",
+                    collections::COUPON_USES
+                ),
+                json!({"coupon_id": &code, "user_id": &user_id}),
+            )
             .await
             .unwrap();
         let redemption = uses.first().unwrap();
         assert_eq!(
-            redemption.get("orderId").and_then(|v| v.as_str()),
-            Some("ord_1")
+            redemption.get(fields::ORDER_ID).and_then(|v| v.as_str()),
+            Some(order_id.as_str())
         );
     }
 
     #[tokio::test]
     async fn test_redeem_coupon_handles_expired_and_fully_redeemed_paths() {
         let state = setup_state().await;
+        let uid2 = uuid::Uuid::new_v4().to_string();
+        let uid3 = uuid::Uuid::new_v4().to_string();
+        let ord2 = uuid::Uuid::new_v4().to_string();
+        let ord3 = uuid::Uuid::new_v4().to_string();
+        let code_old = format!("OLD{}", &uuid::Uuid::new_v4().to_string()[..5]).to_uppercase();
+        let code_full = format!("FUL{}", &uuid::Uuid::new_v4().to_string()[..5]).to_uppercase();
+
         state
             .db
             .upsert_document(
                 collections::COUPONS,
-                "OLDONE1",
+                &code_old,
                 json!({
-                    fields::CODE: "OLDONE1",
+                    fields::CODE: &code_old,
                     fields::MAX_USES: 2,
                     fields::USED_COUNT: 0,
                     fields::EXPIRES_AT: (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339(),
@@ -1415,10 +1558,11 @@ mod tests {
 
         let Json(expired) = redeem_coupon(
             State(state.clone()),
+            auth(&uid2, "user"),
             Json(RedeemCouponRequest {
-                code: "OLDONE1".into(),
-                order_id: "ord_2".into(),
-                user_id: "user_2".into(),
+                code: code_old.clone(),
+                order_id: ord2,
+                user_id: uid2.clone(),
             }),
         )
         .await
@@ -1429,9 +1573,9 @@ mod tests {
             .db
             .upsert_document(
                 collections::COUPONS,
-                "FULL001",
+                &code_full,
                 json!({
-                    fields::CODE: "FULL001",
+                    fields::CODE: &code_full,
                     fields::MAX_USES: 1,
                     fields::USED_COUNT: 1,
                 }),
@@ -1441,10 +1585,11 @@ mod tests {
 
         let full_err = redeem_coupon(
             State(state),
+            auth(&uid3, "user"),
             Json(RedeemCouponRequest {
-                code: "FULL001".into(),
-                order_id: "ord_3".into(),
-                user_id: "user_3".into(),
+                code: code_full.clone(),
+                order_id: ord3,
+                user_id: uid3.clone(),
             }),
         )
         .await
@@ -1457,14 +1602,16 @@ mod tests {
     #[tokio::test]
     async fn test_apply_coupon_rejects_invalid_code_format() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
 
         let err = apply_coupon(
             State(state),
+            auth(&user_id, "user"),
             Json(ApplyCouponRequest {
                 code: "a!".into(), // too short + invalid chars after uppercase
                 order_subtotal_cents: 1_000,
                 seller_ids: None,
-                user_id: "user_1".into(),
+                user_id: user_id.clone(),
             }),
         )
         .await
@@ -1478,14 +1625,16 @@ mod tests {
     #[tokio::test]
     async fn test_apply_coupon_rejects_negative_subtotal() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
 
         let err = apply_coupon(
             State(state),
+            auth(&user_id, "user"),
             Json(ApplyCouponRequest {
                 code: "SAVE20".into(),
                 order_subtotal_cents: -100,
                 seller_ids: None,
-                user_id: "user_1".into(),
+                user_id: user_id.clone(),
             }),
         )
         .await
@@ -1505,11 +1654,13 @@ mod tests {
     #[tokio::test]
     async fn test_apply_coupon_rejects_global_max_uses_exceeded() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let code = format!("MAX{}", &uuid::Uuid::new_v4().to_string()[..5]).to_uppercase();
         state
             .db
             .upsert_document(
                 collections::COUPONS,
-                "MAXED1",
+                &code,
                 json!({
                     "isActive": true,
                     fields::COUPON_TYPE: "percentage",
@@ -1524,11 +1675,12 @@ mod tests {
 
         let err = apply_coupon(
             State(state),
+            auth(&user_id, "user"),
             Json(ApplyCouponRequest {
-                code: "MAXED1".into(),
+                code: code.clone(),
                 order_subtotal_cents: 5_000,
                 seller_ids: None,
-                user_id: "user_1".into(),
+                user_id: user_id.clone(),
             }),
         )
         .await
@@ -1537,23 +1689,121 @@ mod tests {
         assert!(err.to_string().contains("Coupon invalid or unavailable"));
     }
 
+    #[tokio::test]
+    async fn test_apply_coupon_rejects_when_user_reaches_per_user_limit() {
+        let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let code = format!("UMX{}", &uuid::Uuid::new_v4().to_string()[..5]).to_uppercase();
+        state
+            .db
+            .upsert_document(
+                collections::COUPONS,
+                &code,
+                json!({
+                    "isActive": true,
+                    fields::COUPON_TYPE: "percentage",
+                    fields::DISCOUNT_VALUE: 10.0,
+                    fields::MAX_USES: 10,
+                    fields::USED_COUNT: 1,
+                    "maxUsesPerUser": 1,
+                }),
+            )
+            .await
+            .unwrap();
+        let use_id = uuid::Uuid::new_v4().to_string();
+        state
+            .db
+            .upsert_document(
+                collections::COUPON_USES,
+                &use_id,
+                json!({
+                    "couponId": &code,
+                    "userId": &user_id,
+                    "orderId": "ord_001",
+                }),
+            )
+            .await
+            .unwrap();
+
+        let err = apply_coupon(
+            State(state),
+            auth(&user_id, "user"),
+            Json(ApplyCouponRequest {
+                code: code.clone(),
+                order_subtotal_cents: 5_000,
+                seller_ids: None,
+                user_id: user_id.clone(),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("maximum uses for this coupon"));
+    }
+
+    #[tokio::test]
+    async fn test_apply_coupon_rejects_when_user_reaches_per_user_limit_with_snake_case_usage_keys()
+    {
+        let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let code = format!("USX{}", &uuid::Uuid::new_v4().to_string()[..5]).to_uppercase();
+        state
+            .db
+            .upsert_document(
+                collections::COUPONS,
+                &code,
+                json!({
+                    "isActive": true,
+                    fields::COUPON_TYPE: "percentage",
+                    fields::DISCOUNT_VALUE: 10.0,
+                    fields::MAX_USES: 10,
+                    fields::USED_COUNT: 1,
+                    "maxUsesPerUser": 1,
+                }),
+            )
+            .await
+            .unwrap();
+        let use_id = uuid::Uuid::new_v4().to_string();
+        state
+            .db
+            .upsert_document(
+                collections::COUPON_USES,
+                &use_id,
+                json!({
+                    "coupon_id": &code,
+                    "user_id": &user_id,
+                    "order_id": "ord_001",
+                }),
+            )
+            .await
+            .unwrap();
+
+        let err = apply_coupon(
+            State(state),
+            auth(&user_id, "user"),
+            Json(ApplyCouponRequest {
+                code: code.clone(),
+                order_subtotal_cents: 5_000,
+                seller_ids: None,
+                user_id: user_id.clone(),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("maximum uses for this coupon"));
+    }
+
     // ── Coverage: create_coupon invalid code format (lines 315-317) ──
 
     #[tokio::test]
     async fn test_create_coupon_rejects_invalid_code_format() {
         let state = setup_state().await;
-        state
-            .db
-            .upsert_document(
-                collections::USERS,
-                "admin_1",
-                json!({ fields::ROLES: ["admin"] }),
-            )
-            .await
-            .unwrap();
+        let admin_id = setup_admin(&state).await;
 
         let err = create_coupon(
             State(state),
+            auth(&admin_id, "admin"),
             Json(CreateCouponRequest {
                 code: "a!b".into(), // invalid after uppercase: "A!B"
                 discount_type: "percentage".into(),
@@ -1564,7 +1814,7 @@ mod tests {
                 expires_at: None,
                 seller_id: None,
                 is_active: true,
-                user_id: "admin_1".into(),
+                user_id: admin_id.clone(),
             }),
         )
         .await
@@ -1578,20 +1828,14 @@ mod tests {
     #[tokio::test]
     async fn test_create_coupon_rejects_invalid_discount_type() {
         let state = setup_state().await;
-        state
-            .db
-            .upsert_document(
-                collections::USERS,
-                "admin_1",
-                json!({ fields::ROLES: ["admin"] }),
-            )
-            .await
-            .unwrap();
+        let admin_id = setup_admin(&state).await;
+        let code = format!("VLD{}", &uuid::Uuid::new_v4().to_string()[..5]).to_uppercase();
 
         let err = create_coupon(
             State(state),
+            auth(&admin_id, "admin"),
             Json(CreateCouponRequest {
-                code: "VALID1".into(),
+                code,
                 discount_type: "bogus_type".into(),
                 discount_value: 10.0,
                 min_order_cents: None,
@@ -1600,7 +1844,7 @@ mod tests {
                 expires_at: None,
                 seller_id: None,
                 is_active: true,
-                user_id: "admin_1".into(),
+                user_id: admin_id.clone(),
             }),
         )
         .await
@@ -1614,20 +1858,14 @@ mod tests {
     #[tokio::test]
     async fn test_create_coupon_rejects_zero_discount_value() {
         let state = setup_state().await;
-        state
-            .db
-            .upsert_document(
-                collections::USERS,
-                "admin_1",
-                json!({ fields::ROLES: ["admin"] }),
-            )
-            .await
-            .unwrap();
+        let admin_id = setup_admin(&state).await;
+        let code = format!("ZDV{}", &uuid::Uuid::new_v4().to_string()[..5]).to_uppercase();
 
         let err = create_coupon(
             State(state),
+            auth(&admin_id, "admin"),
             Json(CreateCouponRequest {
-                code: "VALID2".into(),
+                code,
                 discount_type: "percentage".into(),
                 discount_value: 0.0,
                 min_order_cents: None,
@@ -1636,7 +1874,7 @@ mod tests {
                 expires_at: None,
                 seller_id: None,
                 is_active: true,
-                user_id: "admin_1".into(),
+                user_id: admin_id.clone(),
             }),
         )
         .await
@@ -1653,20 +1891,14 @@ mod tests {
     #[tokio::test]
     async fn test_create_coupon_rejects_percentage_over_90() {
         let state = setup_state().await;
-        state
-            .db
-            .upsert_document(
-                collections::USERS,
-                "admin_1",
-                json!({ fields::ROLES: ["admin"] }),
-            )
-            .await
-            .unwrap();
+        let admin_id = setup_admin(&state).await;
+        let code = format!("OVR{}", &uuid::Uuid::new_v4().to_string()[..5]).to_uppercase();
 
         let err = create_coupon(
             State(state),
+            auth(&admin_id, "admin"),
             Json(CreateCouponRequest {
-                code: "OVER90".into(),
+                code,
                 discount_type: "percentage".into(),
                 discount_value: 95.0,
                 min_order_cents: None,
@@ -1675,7 +1907,7 @@ mod tests {
                 expires_at: None,
                 seller_id: None,
                 is_active: true,
-                user_id: "admin_1".into(),
+                user_id: admin_id.clone(),
             }),
         )
         .await
@@ -1692,20 +1924,14 @@ mod tests {
     #[tokio::test]
     async fn test_create_coupon_rejects_fixed_discount_under_100_cents() {
         let state = setup_state().await;
-        state
-            .db
-            .upsert_document(
-                collections::USERS,
-                "admin_1",
-                json!({ fields::ROLES: ["admin"] }),
-            )
-            .await
-            .unwrap();
+        let admin_id = setup_admin(&state).await;
+        let code = format!("SML{}", &uuid::Uuid::new_v4().to_string()[..5]).to_uppercase();
 
         let err = create_coupon(
             State(state),
+            auth(&admin_id, "admin"),
             Json(CreateCouponRequest {
-                code: "SMALL1".into(),
+                code,
                 discount_type: "fixed_amount".into(),
                 discount_value: 50.0, // < 100
                 min_order_cents: None,
@@ -1714,7 +1940,7 @@ mod tests {
                 expires_at: None,
                 seller_id: None,
                 is_active: true,
-                user_id: "admin_1".into(),
+                user_id: admin_id.clone(),
             }),
         )
         .await
@@ -1733,20 +1959,14 @@ mod tests {
     #[tokio::test]
     async fn test_create_coupon_free_shipping_no_range_check() {
         let state = setup_state().await;
-        state
-            .db
-            .upsert_document(
-                collections::USERS,
-                "admin_1",
-                json!({ fields::ROLES: ["admin"] }),
-            )
-            .await
-            .unwrap();
+        let admin_id = setup_admin(&state).await;
+        let code = format!("FSH{}", &uuid::Uuid::new_v4().to_string()[..5]).to_uppercase();
 
         let Json(resp) = create_coupon(
             State(state),
+            auth(&admin_id, "admin"),
             Json(CreateCouponRequest {
-                code: "FREESHIP".into(),
+                code: code.clone(),
                 discount_type: "free_shipping".into(),
                 discount_value: 1.0, // any positive value
                 min_order_cents: None,
@@ -1755,14 +1975,14 @@ mod tests {
                 expires_at: None,
                 seller_id: None,
                 is_active: true,
-                user_id: "admin_1".into(),
+                user_id: admin_id.clone(),
             }),
         )
         .await
         .unwrap();
 
         assert!(resp.success);
-        assert_eq!(resp.coupon_code, "FREESHIP");
+        assert_eq!(resp.coupon_code, code);
     }
 
     // ── Coverage: create_coupon fixed_cents min order enforcement (lines 368-369) ──
@@ -1770,20 +1990,14 @@ mod tests {
     #[tokio::test]
     async fn test_create_coupon_fixed_cents_min_order_too_low() {
         let state = setup_state().await;
-        state
-            .db
-            .upsert_document(
-                collections::USERS,
-                "admin_1",
-                json!({ fields::ROLES: ["admin"] }),
-            )
-            .await
-            .unwrap();
+        let admin_id = setup_admin(&state).await;
+        let code = format!("FXC{}", &uuid::Uuid::new_v4().to_string()[..5]).to_uppercase();
 
         let err = create_coupon(
             State(state),
+            auth(&admin_id, "admin"),
             Json(CreateCouponRequest {
-                code: "FIXCENT1".into(),
+                code,
                 discount_type: "fixed_cents".into(),
                 discount_value: 500.0,
                 min_order_cents: Some(800), // need >= 500 + 5*100 = 1000
@@ -1792,7 +2006,7 @@ mod tests {
                 expires_at: None,
                 seller_id: None,
                 is_active: true,
-                user_id: "admin_1".into(),
+                user_id: admin_id.clone(),
             }),
         )
         .await
@@ -1806,20 +2020,14 @@ mod tests {
     #[tokio::test]
     async fn test_create_coupon_rejects_negative_min_order() {
         let state = setup_state().await;
-        state
-            .db
-            .upsert_document(
-                collections::USERS,
-                "admin_1",
-                json!({ fields::ROLES: ["admin"] }),
-            )
-            .await
-            .unwrap();
+        let admin_id = setup_admin(&state).await;
+        let code = format!("NEG{}", &uuid::Uuid::new_v4().to_string()[..5]).to_uppercase();
 
         let err = create_coupon(
             State(state),
+            auth(&admin_id, "admin"),
             Json(CreateCouponRequest {
-                code: "NEGMIN1".into(),
+                code,
                 discount_type: "percentage".into(),
                 discount_value: 10.0,
                 min_order_cents: Some(-100),
@@ -1828,7 +2036,7 @@ mod tests {
                 expires_at: None,
                 seller_id: None,
                 is_active: true,
-                user_id: "admin_1".into(),
+                user_id: admin_id.clone(),
             }),
         )
         .await
@@ -1845,20 +2053,14 @@ mod tests {
     #[tokio::test]
     async fn test_create_coupon_rejects_zero_max_uses() {
         let state = setup_state().await;
-        state
-            .db
-            .upsert_document(
-                collections::USERS,
-                "admin_1",
-                json!({ fields::ROLES: ["admin"] }),
-            )
-            .await
-            .unwrap();
+        let admin_id = setup_admin(&state).await;
+        let code = format!("ZMX{}", &uuid::Uuid::new_v4().to_string()[..5]).to_uppercase();
 
         let err = create_coupon(
             State(state),
+            auth(&admin_id, "admin"),
             Json(CreateCouponRequest {
-                code: "ZEROMAX".into(),
+                code,
                 discount_type: "percentage".into(),
                 discount_value: 10.0,
                 min_order_cents: None,
@@ -1867,7 +2069,7 @@ mod tests {
                 expires_at: None,
                 seller_id: None,
                 is_active: true,
-                user_id: "admin_1".into(),
+                user_id: admin_id.clone(),
             }),
         )
         .await
@@ -1884,13 +2086,16 @@ mod tests {
     #[tokio::test]
     async fn test_redeem_coupon_rejects_empty_code() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let order_id = uuid::Uuid::new_v4().to_string();
 
         let err = redeem_coupon(
             State(state),
+            auth(&user_id, "user"),
             Json(RedeemCouponRequest {
                 code: "  ".into(), // blank after trim
-                order_id: "ord_1".into(),
-                user_id: "user_1".into(),
+                order_id,
+                user_id: user_id.clone(),
             }),
         )
         .await
@@ -1907,13 +2112,17 @@ mod tests {
     #[tokio::test]
     async fn test_redeem_coupon_not_found() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let order_id = uuid::Uuid::new_v4().to_string();
+        let code = format!("NXS{}", &uuid::Uuid::new_v4().to_string()[..5]).to_uppercase();
 
         let err = redeem_coupon(
             State(state),
+            auth(&user_id, "user"),
             Json(RedeemCouponRequest {
-                code: "NONEXIST".into(),
-                order_id: "ord_1".into(),
-                user_id: "user_1".into(),
+                code,
+                order_id,
+                user_id: user_id.clone(),
             }),
         )
         .await
@@ -1927,14 +2136,17 @@ mod tests {
     #[tokio::test]
     async fn test_apply_coupon_not_found() {
         let state = setup_state().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let code = format!("NXA{}", &uuid::Uuid::new_v4().to_string()[..5]).to_uppercase();
 
         let err = apply_coupon(
             State(state),
+            auth(&user_id, "user"),
             Json(ApplyCouponRequest {
-                code: "NONEXIST".into(),
+                code,
                 order_subtotal_cents: 1_000,
                 seller_ids: None,
-                user_id: "user_1".into(),
+                user_id: user_id.clone(),
             }),
         )
         .await

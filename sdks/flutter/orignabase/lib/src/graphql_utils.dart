@@ -29,3 +29,7 @@ String _escapeString(String s) {
       .replaceAll('\r', '\\r')
       .replaceAll('\t', '\\t');
 }
+
+/// Escapes a string for safe use in GraphQL identifiers (collection names, IDs).
+/// Prevents injection by escaping quotes and backslashes.
+String escapeGraphQLId(String id) => _escapeString(id);

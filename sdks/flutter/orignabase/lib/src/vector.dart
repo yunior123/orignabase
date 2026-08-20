@@ -4,7 +4,7 @@ import 'document.dart';
 
 /// Vector similarity search over a collection's embedding field.
 ///
-/// Uses SurrealDB's native `vector::similarity::cosine()` function
+/// Uses PostgreSQL's native `vector::similarity::cosine()` function
 /// to find the most similar documents to a query embedding.
 ///
 /// ```dart
@@ -57,7 +57,9 @@ class VectorSearch {
       return results.map((item) {
         final map = item is Map<String, dynamic>
             ? item
-            : (item is String ? jsonDecode(item) as Map<String, dynamic> : <String, dynamic>{});
+            : (item is String
+                ? jsonDecode(item) as Map<String, dynamic>
+                : <String, dynamic>{});
         final score = (map.remove('score') as num?)?.toDouble() ?? 0.0;
         return VectorSearchResult(
           document: Document.fromMap(collection, map),

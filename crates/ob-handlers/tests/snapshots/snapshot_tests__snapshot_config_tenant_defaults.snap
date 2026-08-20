@@ -3,6 +3,6 @@ source: crates/ob-handlers/tests/snapshot_tests.rs
 expression: tenant_snapshot
 ---
 {
-  "multi_tenant": false,
-  "header_name": "X-Tenant-ID"
+  "header_name": "X-Tenant-ID",
+  "multi_tenant": false
 }

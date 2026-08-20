@@ -113,3 +113,133 @@ pub fn shipping_notification_html(
 
     email_wrapper(&title, &content, true, l)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::email::{OrderItem, OrderSummary};
+
+    fn sample_order(order_id: &str) -> OrderSummary {
+        OrderSummary {
+            order_id: order_id.into(),
+            items: vec![OrderItem {
+                name: "Widget".into(),
+                quantity: 2,
+                price_cents: 1500,
+            }],
+            subtotal_cents: 3000,
+            shipping_cost_cents: 500,
+            tax_amount_cents: 390,
+            total_amount_cents: 3890,
+        }
+    }
+
+    #[test]
+    fn test_shipping_notification_en_with_carrier() {
+        let order = sample_order("order_abc123");
+        let html =
+            shipping_notification_html(&order, "Alice", "1Z999AA10123456784", Some("UPS"), "en");
+        assert!(html.contains("Hello Alice"));
+        assert!(html.contains("Your order #order_ab is on the way via UPS"));
+        assert!(html.contains("1Z999AA10123456784"));
+        assert!(html.contains("Order #order_ab shipped"));
+        assert!(html.contains("Your order is on the way"));
+        assert!(html.contains("Tracking number"));
+        assert!(html.contains("Carrier"));
+        assert!(html.contains("Track Your Order"));
+    }
+
+    #[test]
+    fn test_shipping_notification_fr_with_carrier() {
+        let order = sample_order("cmd_fr123456");
+        let html = shipping_notification_html(&order, "Marie", "FR123456789", Some("FedEx"), "fr");
+        assert!(html.contains("Bonjour Marie"));
+        assert!(html.contains("Commande #cmd_fr12 expédiée"));
+        assert!(html.contains("Votre commande #cmd_fr12 est en route via FedEx"));
+        assert!(html.contains("Suivi: FR123456789"));
+        assert!(html.contains("Votre commande est en route"));
+        assert!(html.contains("Numéro de suivi"));
+        assert!(html.contains("Transporteur"));
+        assert!(html.contains("Suivre ma commande"));
+    }
+
+    #[test]
+    fn test_shipping_notification_fr_without_carrier() {
+        let order = sample_order("cmd12345678");
+        let html = shipping_notification_html(&order, "Pierre", "TN998877", None, "fr");
+        assert!(html.contains("Votre commande #cmd12345 est en route. Suivi: TN998877"));
+        assert!(!html.contains("via "));
+    }
+
+    #[test]
+    fn test_shipping_notification_empty_buyer_name() {
+        let order = sample_order("ord1234567");
+        let html_en = shipping_notification_html(&order, "", "TN123", None, "en");
+        assert!(
+            html_en.contains("Hello"),
+            "Empty buyer name should fallback to 'Hello'"
+        );
+
+        let html_fr = shipping_notification_html(&order, "   ", "TN123", None, "fr");
+        assert!(
+            html_fr.contains("Bonjour"),
+            "Whitespace-only buyer name should fallback to 'Bonjour'"
+        );
+    }
+
+    #[test]
+    fn test_shipping_notification_en_without_carrier() {
+        let order = sample_order("ord1234567");
+        let html = shipping_notification_html(&order, "Bob", "TN00112233", None, "en");
+        assert!(html.contains("Your order #ord12345 is on the way. Tracking: TN00112233"));
+        assert!(!html.contains("via "));
+    }
+
+    #[test]
+    fn test_shipping_notification_short_order_id() {
+        let order = sample_order("abc");
+        let html = shipping_notification_html(&order, "User", "TN1", None, "en");
+        assert!(html.contains("#abc"), "Short order ID should be used as-is");
+        assert!(!html.contains("#abc."));
+    }
+
+    #[test]
+    fn test_shipping_notification_exactly_8_char_id() {
+        let order = sample_order("12345678");
+        let html = shipping_notification_html(&order, "User", "TN1", None, "en");
+        assert!(
+            html.contains("#12345678"),
+            "Exactly 8 char ID should not be truncated"
+        );
+    }
+
+    #[test]
+    fn test_shipping_notification_empty_carrier_string() {
+        let order = sample_order("ord1234567");
+        let html = shipping_notification_html(&order, "User", "TN123", Some(""), "en");
+        assert!(
+            !html.contains("via "),
+            "Empty carrier string should behave like None"
+        );
+    }
+
+    #[test]
+    fn test_shipping_notification_unknown_lang_defaults_to_en() {
+        let order = sample_order("ord1234567");
+        let html = shipping_notification_html(&order, "User", "TN1", None, "de");
+        assert!(
+            html.contains("Hello User"),
+            "Unknown lang should default to English"
+        );
+        assert!(html.contains("Your order"));
+    }
+
+    #[test]
+    fn test_shipping_notification_produces_valid_html() {
+        let order = sample_order("ord1234567");
+        let html = shipping_notification_html(&order, "User", "TN1", Some("UPS"), "en");
+        assert!(html.contains("<!DOCTYPE html>"));
+        assert!(html.contains("</html>"));
+        assert!(html.contains(email_config::URL_PROD));
+    }
+}
