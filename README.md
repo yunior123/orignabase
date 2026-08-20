@@ -2,6 +2,12 @@
 
 A lightweight, blazingly fast, self-hosted Backend-as-a-Service. Firebase/Supabase alternative built in Rust.
 
+<p align="center">
+  <img src="docs/images/orignabase-architecture.svg" alt="OrignaBase architecture overview" width="100%">
+</p>
+
+<p align="center"><strong>One Rust service for auth, data, realtime, storage, search, functions, analytics, and administration.</strong></p>
+
 ## Features
 
 - **GraphQL API** — Auto-generated CRUD with filters, ordering, pagination

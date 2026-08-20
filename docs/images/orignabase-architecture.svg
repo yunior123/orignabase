@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 760" role="img" aria-labelledby="title desc">
+  <title id="title">OrignaBase architecture overview</title>
+  <desc id="desc">Client SDKs connect to a Rust API core that coordinates authentication, security rules, PostgreSQL, realtime, storage, search, functions, analytics, and administration.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1020"/>
+      <stop offset="1" stop-color="#171f3d"/>
+    </linearGradient>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#7c3aed"/>
+      <stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000" flood-opacity=".28"/>
+    </filter>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="9" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#8b9bc7"/>
+    </marker>
+  </defs>
+
+  <rect width="1600" height="760" rx="36" fill="url(#bg)"/>
+  <circle cx="1420" cy="110" r="220" fill="#7c3aed" opacity=".08"/>
+  <circle cx="180" cy="690" r="260" fill="#2563eb" opacity=".08"/>
+
+  <text x="80" y="92" fill="#fff" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="48" font-weight="800">OrignaBase</text>
+  <text x="80" y="135" fill="#aeb9d8" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="24">A self-hosted backend platform in one Rust service</text>
+
+  <g filter="url(#shadow)" font-family="Inter,Segoe UI,Arial,sans-serif">
+    <rect x="70" y="260" width="260" height="190" rx="24" fill="#151d36" stroke="#3c4b78" stroke-width="2"/>
+    <text x="200" y="315" text-anchor="middle" fill="#dbe5ff" font-size="25" font-weight="700">Client SDKs</text>
+    <text x="200" y="360" text-anchor="middle" fill="#8fa1ce" font-size="19">Flutter · Web · CLI</text>
+    <text x="200" y="395" text-anchor="middle" fill="#8fa1ce" font-size="19">GraphQL · WebSocket</text>
+
+    <rect x="470" y="225" width="340" height="260" rx="28" fill="url(#brand)"/>
+    <text x="640" y="300" text-anchor="middle" fill="#fff" font-size="30" font-weight="800">Rust API Core</text>
+    <text x="640" y="350" text-anchor="middle" fill="#e7e8ff" font-size="20">Routing · validation · state</text>
+    <rect x="520" y="385" width="240" height="52" rx="14" fill="#10162b" opacity=".75"/>
+    <text x="640" y="419" text-anchor="middle" fill="#fff" font-size="19" font-weight="700">Auth + Security Rules</text>
+
+    <rect x="950" y="260" width="280" height="190" rx="24" fill="#151d36" stroke="#3c4b78" stroke-width="2"/>
+    <text x="1090" y="315" text-anchor="middle" fill="#dbe5ff" font-size="25" font-weight="700">PostgreSQL</text>
+    <text x="1090" y="360" text-anchor="middle" fill="#8fa1ce" font-size="19">ACID transactions</text>
+    <text x="1090" y="395" text-anchor="middle" fill="#8fa1ce" font-size="19">Tenant-scoped data</text>
+
+    <rect x="1300" y="225" width="230" height="260" rx="24" fill="#151d36" stroke="#3c4b78" stroke-width="2"/>
+    <text x="1415" y="278" text-anchor="middle" fill="#dbe5ff" font-size="23" font-weight="700">Integrated</text>
+    <text x="1415" y="326" text-anchor="middle" fill="#8fa1ce" font-size="18">Realtime</text>
+    <text x="1415" y="362" text-anchor="middle" fill="#8fa1ce" font-size="18">Storage</text>
+    <text x="1415" y="398" text-anchor="middle" fill="#8fa1ce" font-size="18">Meilisearch</text>
+    <text x="1415" y="434" text-anchor="middle" fill="#8fa1ce" font-size="18">WASM functions</text>
+  </g>
+
+  <g fill="none" stroke="#8b9bc7" stroke-width="5" marker-end="url(#arrow)">
+    <path d="M330 355 H450"/>
+    <path d="M810 355 H930"/>
+    <path d="M1230 355 H1280"/>
+  </g>
+
+  <g font-family="Inter,Segoe UI,Arial,sans-serif">
+    <rect x="290" y="560" width="1020" height="100" rx="24" fill="#10172c" stroke="#2f3d68" stroke-width="2"/>
+    <text x="800" y="607" text-anchor="middle" fill="#dbe5ff" font-size="23" font-weight="700">Single binary · self-hosted · observable · migration-friendly</text>
+    <text x="800" y="640" text-anchor="middle" fill="#8294c2" font-size="18">Admin API · privacy-first analytics · signed storage URLs · Firebase migration tooling</text>
+  </g>
+</svg>
