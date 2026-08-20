@@ -4940,12 +4940,7 @@ async fn test_122_auth_token_edge_cases() {
     let client = reqwest::Client::new();
 
     // Expired/malformed tokens
-    let bad_tokens = [
-        "not.a.valid.jwt",
-        "REDACTED_SECRET",
-        "",
-        "Bearer ",
-    ];
+    let bad_tokens = ["not.a.valid.jwt", "REDACTED_SECRET", "", "Bearer "];
 
     for bad_token in &bad_tokens {
         let query = r#"{ list(collection: "test", limit: 1) }"#;
